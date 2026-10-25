@@ -112,3 +112,20 @@ class LazyInstructionTests(unittest.TestCase):
 
 if __name__ == '__main__':
     unittest.main()
+
+
+class SymbolScopeTests(unittest.TestCase):
+    def test_dlopened_modules_prefer_own_copy_over_sibling(self):
+        sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
+        import elfprep
+        class Fake:
+            def __init__(self, name, needed): self.name, self.needed = name, needed
+        program = Fake('portal2_linux', ['libtier0.so'])
+        tier0 = Fake('libtier0.so', [])
+        client = Fake('client.so', ['libtier0.so'])
+        server = Fake('server.so', ['libtier0.so'])
+        scopes = elfprep.lookup_scopes([tier0, client, server, program])
+        # Portée globale d'abord, puis le module lui-même : jamais client.so pour server.so.
+        self.assertEqual([m.name for m in scopes['server.so']], ['portal2_linux', 'libtier0.so', 'server.so'])
+        self.assertNotIn('client.so', [m.name for m in scopes['server.so']])
+        self.assertEqual([m.name for m in scopes['portal2_linux']], ['portal2_linux', 'libtier0.so'])

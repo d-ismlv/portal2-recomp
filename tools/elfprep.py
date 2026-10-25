@@ -107,6 +107,34 @@ class Elf:
         return self._export_cache
 
 
+def lookup_scopes(mods, program='portal2_linux'):
+    """Ordre de recherche des symboles de chaque module, comme ld.so :
+    portée globale (programme + DT_NEEDED en largeur) puis portée locale du
+    module (lui-même + ses DT_NEEDED en largeur), sans doublon."""
+    by_name = {m.name: m for m in mods}
+    def breadth_first(root):
+        order, queue, seen = [], [root], {root.name}
+        while queue:
+            current = queue.pop(0)
+            order.append(current)
+            for needed in current.needed:
+                dep = by_name.get(needed)
+                if dep and dep.name not in seen:
+                    seen.add(dep.name); queue.append(dep)
+        return order
+    main_module = by_name.get(program)
+    global_scope = breadth_first(main_module) if main_module else []
+    scopes = {}
+    for m in mods:
+        order = list(global_scope)
+        names = {x.name for x in order}
+        for x in breadth_first(m):
+            if x.name not in names:
+                order.append(x); names.add(x.name)
+        scopes[m.name] = order
+    return scopes
+
+
 def main():
     import argparse
     ap = argparse.ArgumentParser()
@@ -119,10 +147,23 @@ def main():
         p, b = spec.split('@')
         mods.append(Elf(p, int(b, 16), i + 1))
 
-    definitions = {}
-    for module in mods:
-        for name, symbol in module.exports().items():
-            definitions.setdefault(name, (module, symbol))
+    # Portées de recherche de glibc : le programme principal et ses DT_NEEDED
+    # (en largeur) forment la portée globale ; un module chargé par dlopen
+    # sans RTLD_GLOBAL (moteur, client.so, server.so...) cherche d'abord dans
+    # la portée globale puis dans sa portée locale (lui-même et ses DT_NEEDED).
+    # Ainsi server.so utilise sa propre copie statique de libprotobuf et non
+    # celle de client.so (sinon : « File already exists in database »).
+    scopes = lookup_scopes(mods)
+
+    def definition_for(module, name):
+        for candidate in scopes[module.name]:
+            symbol = candidate.exports().get(name)
+            if symbol is None:
+                continue
+            if candidate.name.startswith('libsteam_api') and name.startswith(HOST_BRIDGED):
+                continue
+            return candidate, symbol
+        return None
 
     imports = {}      # nom -> adresse du thunk
     data_imports = {}
@@ -134,10 +175,8 @@ def main():
             order.append(name)
         return imports[name]
 
-    def lookup(name, weak, kind=0, size=0):
-        definition = definitions.get(name)
-        if definition and definition[0].name.startswith('libsteam_api') and name.startswith(HOST_BRIDGED):
-            definition = None
+    def lookup(module, name, weak, kind=0, size=0):
+        definition = definition_for(module, name)
         if definition:
             module, symbol = definition
             value = symbol['value'] if symbol['shndx'] == 0xfff1 else module.base + symbol['value']
@@ -171,7 +210,7 @@ def main():
             if typ in (R_386_TLS_DTPMOD32, R_386_TLS_DTPOFF32):
                 owner, tls_symbol = m, sym
                 if sym and sym['bind'] and sym.get('visibility', 0) not in (1, 2, 3):
-                    definition = definitions.get(sym['name'])
+                    definition = definition_for(m, sym['name'])
                     if definition:
                         owner, tls_symbol = definition
                     elif sym['shndx'] == 0:
@@ -188,7 +227,7 @@ def main():
             if local:
                 S = sym['value'] if sym['shndx'] == 0xfff1 else m.base + sym['value']
             else:
-                S, _ = lookup(sym['name'], sym['bind'] == 2, sym['type'], sym['size'])
+                S, _ = lookup(m, sym['name'], sym['bind'] == 2, sym['type'], sym['size'])
             if typ == R_386_32:
                 m.put32(off, S + A)
             elif typ == R_386_PC32:
