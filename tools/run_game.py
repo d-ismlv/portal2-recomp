@@ -27,7 +27,10 @@ log = Path('build/game/launch.log')
 with log.open('w') as output:
     try:
         env = dict(os.environ)
-        if not args.show: env.setdefault('P2_HIDDEN_WINDOWS', '1')
+        if not args.show:
+            env.setdefault('P2_HIDDEN_WINDOWS', '1')
+            # Lancement de diagnostic : jamais de son sur les haut-parleurs de l'utilisateur.
+            env.setdefault('SDL_AUDIODRIVER', 'dummy')
         result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=args.timeout, env=env)
         status = result.returncode
     except subprocess.TimeoutExpired:

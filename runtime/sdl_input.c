@@ -275,6 +275,26 @@ static void poll_into(CPU *c, uint32_t guest, int *got) {
         if (*got < 0) *got = 0;
         return;
     }
+    // Diagnostic (fenêtre cachée seulement) : P2_FAKE_FOCUS=1 annonce une fois au
+    // jeu que sa fenêtre a le focus, pour mesurer sans le sommeil de 50 ms que
+    // le moteur s'impose sans focus. Sans effet en fenêtre visible.
+    static int fake_focus = -1;
+    if (fake_focus < 0) {
+        const char *hidden = getenv("P2_HIDDEN_WINDOWS"), *wanted = getenv("P2_FAKE_FOCUS");
+        fake_focus = hidden && *hidden && strcmp(hidden, "0") && wanted && *wanted && strcmp(wanted, "0");
+    }
+    SDL_Window *window = fake_focus == 1 ? SDL_GL_GetCurrentWindow() : NULL;
+    if (window) {
+        fake_focus = 2;
+        memset(&event, 0, sizeof(event));
+        event.type = SDL_WINDOWEVENT;
+        event.window.timestamp = SDL_GetTicks();
+        event.window.windowID = SDL_GetWindowID(window);
+        event.window.event = SDL_WINDOWEVENT_FOCUS_GAINED;
+        event_to_guest(c, &event, guest, 0);
+        *got = 1;
+        return;
+    }
     while ((*got = SDL_PollEvent(&event)) && !rt_sdl_event_is_sdl2(event.type)) {}
     if (*got) event_to_guest(c, &event, guest, 1);
 }
