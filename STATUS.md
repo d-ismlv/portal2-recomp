@@ -91,6 +91,12 @@ sources de fichiers. Aucun contournement des imports manquants ne doit servir
   invitée au format i386.
 - **Retour flottant** : `rt_return_st0(c, valeur)`. **Rappel invité** depuis
   l'hôte : `rt_invoke` (`modules.h`).
+- **Rappel invité depuis un thread hôte étranger** (thread audio SDL, CoreAudio) :
+  `CPU *c = rt_foreign_thread_attach()` (idempotent : pile protégée, TCB, TLS,
+  errno propres), puis `rt_guest_enter(); rt_invoke(c, …); rt_guest_leave();`.
+  Détachement explicite ou automatique à la sortie du thread. Tout appel hôte qui
+  peut attendre ce thread (verrou de périphérique SDL, jonction) se fait verrou
+  invité relâché (`rt_guest_suspend/resume`), sinon interblocage.
 - **Tests** : `tests/checks_<domaine>.c` avec `RT_CHECK(nom) { ... }`, liés
   automatiquement dans `abi-smoke` (et sa variante UBSan).
 - **Bibliothèques hôtes** : `HOST_CFLAGS`/`HOST_LIBS` du Makefile, recopiés dans
