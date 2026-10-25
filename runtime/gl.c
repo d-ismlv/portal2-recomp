@@ -64,12 +64,47 @@ static void *host_function(const RtGlEntry *entry) {
     return fn;
 }
 
+// ---- GLX minimal sur CGL ----
+// togl ne se sert de GLX que pour un repli : quand une extension manque dans
+// GL_EXTENSIONS, il la cherche dans glXQueryExtensionsString(glXGetCurrentDisplay(), 0)
+// et exige ces deux fonctions. macOS n'a ni X11 ni GLX : le « display » est un
+// handle opaque (jamais déréférençable) et la liste d'extensions GLX est vide,
+// ce qui est exact. Toute autre fonction glX* reste absente.
+#define GLX_DISPLAY_KIND 0x474c5844u  // 'GLXD'
+static int is_glx(const char *name) {
+    return name && (!strcmp(name, "glXGetCurrentDisplay") || !strcmp(name, "glXQueryExtensionsString"));
+}
+static uint32_t glx_display;
+static uint32_t glx_empty;
+static int glx_shim(CPU *c, const char *name) {
+    pthread_mutex_lock(&lock);
+    if (!glx_display) {
+        static int marker;
+        glx_display = rt_handle_new(&marker, GLX_DISPLAY_KIND);
+        glx_empty = rt_alloc(1);
+        if (glx_empty) W8(glx_empty, 0);
+    }
+    uint32_t display = glx_display, empty = glx_empty;
+    pthread_mutex_unlock(&lock);
+    if (!display || !empty) rt_trap(c, c->eip, "GLX : allocation impossible");
+    if (!strcmp(name, "glXGetCurrentDisplay")) {
+        c->eax = CGLGetCurrentContext() ? display : 0;  // NULL sans contexte courant, comme GLX
+    } else {
+        uint32_t dpy = R32(c->esp + 4);
+        if (!rt_handle_get(dpy, GLX_DISPLAY_KIND)) rt_trap(c, c->eip, "glXQueryExtensionsString : display inconnu");
+        c->eax = empty;
+    }
+    return 1;
+}
+
 uint32_t rt_gl_proc_address(const char *name) {
+    if (is_glx(name)) return rt_dynamic_import(name);
     const RtGlEntry *entry = find_entry(name);
     return entry && host_function(entry) ? rt_dynamic_import(name) : 0;
 }
 
 static int gl_shim(CPU *c, const char *name) {
+    if (is_glx(name)) return glx_shim(c, name);
     const RtGlEntry *entry = find_entry(name);
     if (!entry) return 0;
     void *fn = host_function(entry);

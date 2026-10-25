@@ -48,7 +48,7 @@ RT_CHECK(gl_proc_address_matches_macos_sdl) {
     assert(rt_gl_proc_address("glGenSamplers"));
     // Absents d'OpenGL.framework, ou inconnus du pont.
     assert(!rt_gl_proc_address("glDebugMessageCallbackARB") && !rt_gl_proc_address("glGenFencesNV"));
-    assert(!rt_gl_proc_address("glXGetCurrentDisplay") && !rt_gl_proc_address("glob") && !rt_gl_proc_address(NULL));
+    assert(!rt_gl_proc_address("glXSwapBuffers") && !rt_gl_proc_address("glob") && !rt_gl_proc_address(NULL));
 }
 
 RT_CHECK(gl_get_string_is_a_stable_guest_copy) {
@@ -256,4 +256,17 @@ RT_CHECK(gl_texture_range_pointer_round_trips) {
     assert(R32(DATA) == DATA + 0x800);
     glDeleteTextures(1, &texture);
     assert(gl("glGetError", 0) == GL_NO_ERROR);
+}
+
+RT_CHECK(glx_fallback_reports_no_extensions) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    CGLSetCurrentContext(NULL);
+    assert(gl("glXGetCurrentDisplay", 0) == 0);           // pas de contexte courant
+    current_context();
+    uint32_t dpy = gl("glXGetCurrentDisplay", 0);
+    assert(dpy >= RT_HANDLE_BASE && dpy == gl("glXGetCurrentDisplay", 0));
+    uint32_t list = gl("glXQueryExtensionsString", 2, dpy, 0);
+    assert(list && R8(list) == 0);                        // aucune extension GLX sur macOS
+    assert(!rt_gl_proc_address("glXSwapIntervalEXT"));    // le reste de GLX est absent
+    CGLSetCurrentContext(saved);
 }

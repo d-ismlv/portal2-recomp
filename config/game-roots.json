@@ -485,5 +485,6 @@
   "launcher.so:code:0x1ea90",
   "launcher.so:code:0x1eab0",
   "launcher.so:code:0x1ead0",
-  "launcher.so:code:0x1eb00"
+  "launcher.so:code:0x1eb00",
+  "launcher.so:code:0x36960"
 ]
