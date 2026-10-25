@@ -267,6 +267,8 @@ uint32_t rt_handle_new(void *host, uint32_t kind);
 void *rt_handle_get(uint32_t handle, uint32_t kind);
 uint32_t rt_handle_find(const void *host, uint32_t kind);
 void *rt_handle_free(uint32_t handle, uint32_t kind);
+// Adresse invitée d'une fonction GL hôte, 0 si non prise en charge (gl.c).
+uint32_t rt_gl_proc_address(const char *name);
 // Valeur de retour flottante i386 (float/double/long double) : dans ST(0).
 static inline void rt_return_st0(CPU *c, double value) { fpush(c, value); }
 typedef int (*rt_shim_provider)(CPU *c, const char *name);

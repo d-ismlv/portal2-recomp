@@ -90,3 +90,8 @@ void *rt_handle_free(uint32_t handle, uint32_t kind) {
     pthread_mutex_unlock(&lock);
     return host;
 }
+
+// Contrat SDL ↔ GL : SDL_GL_GetProcAddress délègue à rt_gl_proc_address,
+// défini par runtime/gl.c. Cette version faible renvoie 0 (fonction absente)
+// tant que le pont GL n'est pas lié.
+__attribute__((weak)) uint32_t rt_gl_proc_address(const char *name) { (void)name; return 0; }
