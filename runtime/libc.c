@@ -2,6 +2,7 @@
 // or structure is ever cast to the guest ABI.
 #include "posix.h"
 #include <dirent.h>
+#include <pthread.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
@@ -154,7 +155,62 @@ void rt_dir_entries_free(RtDirEntry *entries, size_t count) {
     for (size_t i = 0; i < count; ++i) free(entries[i].name);
     free(entries);
 }
+// Cache des listes de dossiers du jeu : le correcteur de casse de Source liste
+// les dossiers composant par composant à chaque fichier absent (des dizaines
+// de milliers de fois par minute). Invalidé à chaque écriture invitée
+// (rt_paths_generation) ; les changements faits hors du jeu ne sont pas vus
+// pendant la partie.
+static int dir_entries_uncached(const char *path, RtDirEntry **entries, size_t *count);
+typedef struct { char relative[PATH_MAX]; unsigned long generation; int error; RtDirEntry *entries; size_t count; } DirCache;
+static DirCache dir_cache[64];
+static unsigned dir_cache_next;
+static pthread_mutex_t dir_cache_lock = PTHREAD_MUTEX_INITIALIZER;
+static RtDirEntry *copy_entries(const RtDirEntry *from, size_t count) {
+    RtDirEntry *to = calloc(count ? count : 1, sizeof(*to));
+    for (size_t i = 0; to && i < count; ++i) {
+        to[i] = from[i];
+        if (!(to[i].name = strdup(from[i].name))) { rt_dir_entries_free(to, i); return NULL; }
+    }
+    return to;
+}
 int rt_dir_entries(const char *path, RtDirEntry **entries, size_t *count) {
+    char relative[PATH_MAX];
+    int inside = rt_path_relative(path, relative);
+    if (inside < 0) return dir_entries_uncached(path, entries, count);
+    if (!inside) {   // hors du jeu (parents de la racine...) : clé = chemin absolu
+        if (rt_path_absolute(path, relative)) return dir_entries_uncached(path, entries, count);
+        memmove(relative + 1, relative, strnlen(relative, PATH_MAX - 2) + 1);
+        relative[0] = '\x01';   // ne peut pas coïncider avec un chemin relatif du jeu
+    }
+    unsigned long now = rt_paths_generation();
+    pthread_mutex_lock(&dir_cache_lock);
+    for (unsigned i = 0; i < 64; ++i) {
+        DirCache *e = &dir_cache[i];
+        if (e->generation != now || strcmp(e->relative, relative)) continue;
+        int error = e->error;
+        RtDirEntry *copy = error ? NULL : copy_entries(e->entries, e->count);
+        size_t n = e->count;
+        pthread_mutex_unlock(&dir_cache_lock);
+        if (error) { errno = error; return -1; }
+        if (!copy) { errno = ENOMEM; return -1; }
+        *entries = copy; *count = n;
+        return 0;
+    }
+    pthread_mutex_unlock(&dir_cache_lock);
+    int result = dir_entries_uncached(path, entries, count), error = result ? errno : 0;
+    if (result && error != ENOENT && error != ENOTDIR) return result;
+    RtDirEntry *stored = result ? NULL : copy_entries(*entries, *count);
+    if (!result && !stored) return result;
+    pthread_mutex_lock(&dir_cache_lock);
+    DirCache *e = &dir_cache[dir_cache_next++ % 64];
+    if (e->entries) rt_dir_entries_free(e->entries, e->count);
+    snprintf(e->relative, sizeof(e->relative), "%s", relative);
+    e->generation = now; e->error = error; e->entries = stored; e->count = result ? 0 : *count;
+    pthread_mutex_unlock(&dir_cache_lock);
+    if (result) errno = error;
+    return result;
+}
+static int dir_entries_uncached(const char *path, RtDirEntry **entries, size_t *count) {
     char relative[PATH_MAX], sources[3][PATH_MAX];
     int inside = rt_path_relative(path, relative), source_count = 0;
     if (inside < 0) return -1;
