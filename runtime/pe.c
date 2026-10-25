@@ -138,6 +138,10 @@ static const Loaded *recognise(uint32_t target) {
     return NULL;
 }
 
+// Cycle de vie : une image oubliée (munmap) puis reconnue de nouveau réécrit
+// ses deltas. Le code invité est sérialisé par le verrou invité et Miles ne
+// démappe un greffon qu'après avoir cessé de l'appeler ; un appel encore en
+// cours dans une image démappée serait déjà une faute sous Linux.
 gfn rt_pe_lookup(uint32_t target) {
     pthread_mutex_lock(&lock);
     const Loaded *found = NULL;
@@ -156,9 +160,10 @@ gfn rt_pe_lookup(uint32_t target) {
     if (lo < image->function_count && image->function_rvas[lo] == rva) {
         // Diagnostic : P2_PE_TRACE=1 affiche chaque fonction appelée par adresse
         // (depuis Miles ou par pointeur), à son premier appel et tous les 2^k.
-        static int trace = -1;
-        if (trace < 0) trace = getenv("P2_PE_TRACE") != NULL;
-        if (trace) {
+        static _Atomic int trace = -1;
+        int tracing = atomic_load_explicit(&trace, memory_order_relaxed);
+        if (tracing < 0) atomic_store_explicit(&trace, tracing = getenv("P2_PE_TRACE") != NULL, memory_order_relaxed);
+        if (tracing) {
             static _Atomic uint32_t counts[4096];
             uint32_t n = ++counts[(rva ^ (uint32_t)(uintptr_t)image) & 4095];
             if (!(n & (n - 1))) fprintf(stderr, "[pe] %s RVA %#x called (%u)\n", image->name, rva, n);
@@ -185,8 +190,15 @@ void rt_pe_forget(uint32_t address, uint64_t length) {
 typedef struct { const RtPeImage *image; dev_t device; ino_t inode; off_t size; struct timespec modified; int verdict; } FileVerdict;
 static FileVerdict verdicts[MAX_IMAGES];
 int rt_pe_file_matches(const RtPeImage *image, const char *path) {
+    // Identité et octets du même descripteur ouvert : un remplacement du
+    // fichier entre les deux ne peut pas associer un verdict au mauvais fichier.
+    FILE *file = fopen(path, "rb");
+    if (!file) return 0;
     struct stat info;
-    if (stat(path, &info) || !S_ISREG(info.st_mode) || (uint64_t)info.st_size != image->file_size) return 0;
+    if (fstat(fileno(file), &info) || !S_ISREG(info.st_mode) || (uint64_t)info.st_size != image->file_size) {
+        fclose(file);
+        return 0;
+    }
     pthread_mutex_lock(&lock);
     FileVerdict *slot = NULL;
     for (unsigned i = 0; i < MAX_IMAGES; ++i)
@@ -196,9 +208,7 @@ int rt_pe_file_matches(const RtPeImage *image, const char *path) {
                 slot->modified.tv_nsec == info.st_mtimespec.tv_nsec;
     int verdict = known ? slot->verdict : 0;
     pthread_mutex_unlock(&lock);
-    if (known) return verdict;
-    FILE *file = fopen(path, "rb");
-    if (!file) return 0;
+    if (known) { fclose(file); return verdict; }
     uint8_t *data = malloc(image->file_size ? image->file_size : 1);
     verdict = data && fread(data, 1, image->file_size, file) == image->file_size && fgetc(file) == EOF &&
               rt_pe_hash(data, image->file_size) == image->file_hash;
