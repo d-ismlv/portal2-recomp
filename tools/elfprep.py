@@ -10,6 +10,9 @@ import json, os, struct, sys
 THUNK_BASE = 0xF0000000   # une adresse par fonction importée de la libc
 THUNK_STRIDE = 0x10
 SHIMDATA_BASE = 0xE0000000  # objets de données importés (stderr, ...)
+# Pont Steam (runtime/steam.c) : les exports Steam des libsteam_api*.so invités deviennent des
+# imports hôtes ; leur libsupc++ embarqué (__cxa_*, typeinfo), utilisé par tout le jeu, reste invité.
+HOST_BRIDGED = ('SteamAPI_', 'SteamInternal_', 'SteamGameServer_')
 
 R_386_NONE, R_386_32, R_386_PC32 = 0, 1, 2
 R_386_GLOB_DAT, R_386_JMP_SLOT, R_386_RELATIVE = 6, 7, 8
@@ -133,6 +136,8 @@ def main():
 
     def lookup(name, weak, kind=0, size=0):
         definition = definitions.get(name)
+        if definition and definition[0].name.startswith('libsteam_api') and name.startswith(HOST_BRIDGED):
+            definition = None
         if definition:
             module, symbol = definition
             value = symbol['value'] if symbol['shndx'] == 0xfff1 else module.base + symbol['value']
