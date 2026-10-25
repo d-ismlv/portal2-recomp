@@ -5,6 +5,7 @@
 // (SteamAppId=620), appels par vtable invitée, CSteamID par pointeur caché,
 // callback et résultat d'appel pompés. Aucun identifiant n'est affiché.
 #include "checks.h"
+#include <pthread.h>
 #include "steam.h"
 #include <stdio.h>
 #include <stdlib.h>
@@ -314,4 +315,24 @@ RT_CHECK(steam_real_client) {
     assert(game == 620);
     call_import("SteamAPI_Shutdown", 0, NULL);
     printf("steam client: init, vtable calls, CSteamID sret, callback and call result verified\n");
+}
+
+static int hook_severity = -1; static char hook_text[96];
+static int fake_guest_hook(CPU *c, const char *name) {
+    if (strcmp(name, "__steam_test_hook")) return 0;
+    hook_severity = (int)R32(c->esp + 4);
+    uint32_t text = R32(c->esp + 8);
+    snprintf(hook_text, sizeof(hook_text), "%s", (const char *)GPTR(text));
+    c->eax = 0; return 1;
+}
+RT_SHIM_PROVIDER(fake_guest_hook)
+static void *hook_thread(void *unused) {
+    (void)unused;
+    steam_test_warning_hook(rt_dynamic_import("__steam_test_hook"), 1, "id 76561197960287930 warn");
+    return NULL;
+}
+RT_CHECK(steam_warning_hook_reaches_guest_from_steam_thread) {
+    pthread_t thread;
+    assert(!pthread_create(&thread, NULL, hook_thread, NULL) && !pthread_join(thread, NULL));
+    assert(hook_severity == 1 && strstr(hook_text, "warn") && !strstr(hook_text, "76561197960287930"));
 }

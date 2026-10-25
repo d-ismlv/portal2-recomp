@@ -39,3 +39,4 @@ uint32_t steam_vtable(CPU *c, const char *version);
 void *steam_proxy_host(uint32_t proxy);
 void steam_pop_hidden_pointer(CPU *c);
 void steam_mask_ids(char *text, size_t length);   // masque les SteamID64 d'un texte
+void steam_test_warning_hook(uint32_t guest_fn, int severity, const char *text);

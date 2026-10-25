@@ -633,3 +633,49 @@ static int steam_shim(CPU *c, const char *name) {
     return 1;
 }
 RT_SHIM_PROVIDER(steam_shim)
+
+// ---- SetWarningMessageHook : rappel invité void (*)(int severity, const char *text) ----
+// Steam appelle le crochet de façon synchrone pendant un appel de l'API (thread
+// invité dans un shim : rt_shim_cpu) ou depuis un de ses threads (rattaché le
+// temps de l'appel). Le texte est recopié en mémoire invitée, SteamID64 masqués.
+static uint32_t warning_hook;
+static void host_warning_hook(int severity, const char *text) {
+    uint32_t fn = __atomic_load_n(&warning_hook, __ATOMIC_ACQUIRE);
+    if (!fn || !text) return;
+    CPU *c = rt_shim_cpu();
+    int attached = !c;
+    if (attached) c = rt_foreign_thread_attach();
+    size_t length = strlen(text);
+    char *copy = malloc(length + 1);
+    if (!copy) rt_trap(c, c->eip, "Steam warning hook: out of memory");
+    memcpy(copy, text, length + 1);
+    steam_mask_ids(copy, length);
+    uint32_t guest = rt_alloc((uint32_t)length + 1);
+    if (!guest) rt_trap(c, c->eip, "Steam warning hook: guest memory exhausted");
+    memcpy(GPTR(guest), copy, length + 1);
+    free(copy);
+    uint32_t arguments[] = {(uint32_t)severity, guest};
+    rt_invoke(c, fn, arguments, 2);
+    rt_free(guest);
+    if (attached) rt_foreign_thread_detach();
+}
+static void set_warning_hook(CPU *c, void *self, uint32_t args, const char *symbol) {
+    typedef void (*Hook)(int, const char *);
+    typedef void (*F)(void *, Hook);
+    uint32_t fn = R32(args);
+    __atomic_store_n(&warning_hook, fn, __ATOMIC_RELEASE);
+    ((F)steam_flat(c, symbol))(self, fn ? host_warning_hook : NULL);
+}
+void steam_manual_client_warning_hook(CPU *c, void *self, uint32_t args, uint32_t sret) {
+    (void)sret; set_warning_hook(c, self, args, "SteamAPI_ISteamClient_SetWarningMessageHook");
+}
+void steam_manual_utils_warning_hook(CPU *c, void *self, uint32_t args, uint32_t sret) {
+    (void)sret; set_warning_hook(c, self, args, "SteamAPI_ISteamUtils_SetWarningMessageHook");
+}
+
+// Tests : déclenche le crochet hôte comme le ferait Steam.
+void steam_test_warning_hook(uint32_t guest_fn, int severity, const char *text) {
+    __atomic_store_n(&warning_hook, guest_fn, __ATOMIC_RELEASE);
+    host_warning_hook(severity, text);
+    __atomic_store_n(&warning_hook, 0, __ATOMIC_RELEASE);
+}

@@ -155,6 +155,13 @@ def wrapper_returns(files):
     return result
 
 
+
+# Méthodes écrites à la main dans runtime/steam.c (rappels invités, etc.).
+MANUAL = {
+    'SteamAPI_ISteamClient_SetWarningMessageHook': 'steam_manual_client_warning_hook',
+    'SteamAPI_ISteamUtils_SetWarningMessageHook': 'steam_manual_utils_warning_hook',
+}
+
 class Unsupported(Exception):
     pass
 
@@ -269,6 +276,10 @@ def generate(pkg, dylib):
                 raise SystemExit(f'{klass}: emplacement {slot} partagé par {seen[slot]} et {method}')
             seen[slot] = method
             entry = dict(name=f'{version}::{method}', iface=len(interfaces) - 1, slot=slot, flat=flat)
+            if flat in MANUAL:
+                entry['fn'] = MANUAL[flat]
+                methods.append(entry)
+                continue
             try:
                 if flat not in natives:
                     raise Unsupported('signature absente de Steamworks.NET')
@@ -277,11 +288,12 @@ def generate(pkg, dylib):
             except Unsupported as exc:
                 entry['why'] = str(exc)
             methods.append(entry)
-        stats[version] = (len(own), sum('body' in m for m in methods if m['iface'] == len(interfaces) - 1), count)
+        stats[version] = (len(own), sum(('body' in m or 'fn' in m) for m in methods if m['iface'] == len(interfaces) - 1), count)
     methods.sort(key=lambda m: m['name'])
     out = ['/* Généré par tools/gen_steam.py depuis la libsteam_api.dylib officielle (SDK 1.53a) et',
            ' * Steamworks.NET 20.1.0 (MIT). Ne pas modifier : relancer le générateur. */',
            '#include "steam.h"', '']
+    out.extend(f'void {fn}(CPU *c, void *self, uint32_t args, uint32_t sret);' for fn in sorted(set(MANUAL.values())))
     for index, m in enumerate(methods):
         if 'body' in m:
             m['fn'] = f'm{index}'

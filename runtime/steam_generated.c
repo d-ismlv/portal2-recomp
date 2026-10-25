@@ -2,6 +2,8 @@
  * Steamworks.NET 20.1.0 (MIT). Ne pas modifier : relancer le générateur. */
 #include "steam.h"
 
+void steam_manual_client_warning_hook(CPU *c, void *self, uint32_t args, uint32_t sret);
+void steam_manual_utils_warning_hook(CPU *c, void *self, uint32_t args, uint32_t sret);
 /* STEAMAPPLIST_INTERFACE_VERSION001::GetAppBuildId */
 static void m0(CPU *c, void *self, uint32_t args, uint32_t sret) {
     (void)args; (void)sret;
@@ -8779,7 +8781,7 @@ const SteamMethodInfo steam_methods[] = {
     {"SteamClient020::GetISteamVideo", 0u, 36u, 0, m412, NULL},
     {"SteamClient020::ReleaseUser", 0u, 4u, 0, m413, NULL},
     {"SteamClient020::SetLocalIPBinding", 0u, 7u, 0, NULL, "param\u00e8tre ref SteamIPAddress_t unIP"},
-    {"SteamClient020::SetWarningMessageHook", 0u, 22u, 0, NULL, "param\u00e8tre SteamAPIWarningMessageHook_t pFunction"},
+    {"SteamClient020::SetWarningMessageHook", 0u, 22u, 0, steam_manual_client_warning_hook, NULL},
     {"SteamController008::ActivateActionSet", 13u, 5u, 0, m416, NULL},
     {"SteamController008::ActivateActionSetLayer", 13u, 7u, 0, m417, NULL},
     {"SteamController008::DeactivateActionSetLayer", 13u, 8u, 0, m418, NULL},
@@ -9132,7 +9134,7 @@ const SteamMethodInfo steam_methods[] = {
     {"SteamUtils010::SetOverlayNotificationInset", 3u, 25u, 0, m765, NULL},
     {"SteamUtils010::SetOverlayNotificationPosition", 3u, 10u, 0, m766, NULL},
     {"SteamUtils010::SetVRHeadsetStreamingEnabled", 3u, 29u, 0, m767, NULL},
-    {"SteamUtils010::SetWarningMessageHook", 3u, 16u, 0, NULL, "param\u00e8tre SteamAPIWarningMessageHook_t pFunction"},
+    {"SteamUtils010::SetWarningMessageHook", 3u, 16u, 0, steam_manual_utils_warning_hook, NULL},
     {"SteamUtils010::ShowFloatingGamepadTextInput", 3u, 35u, 0, m769, NULL},
     {"SteamUtils010::ShowGamepadTextInput", 3u, 20u, 0, m770, NULL},
     {"SteamUtils010::StartVRDashboard", 3u, 27u, 0, m771, NULL},
