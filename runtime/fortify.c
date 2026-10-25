@@ -1,0 +1,70 @@
+// Variantes _FORTIFY_SOURCE de la glibc : même contrôle de taille de
+// destination que glibc, puis l'opération normale. Un dépassement appelle
+// __chk_fail, qui sous Linux affiche « buffer overflow detected » et avorte :
+// ici, rt_trap avec le même message. Les variantes printf (__sprintf_chk...)
+// vivent dans format.c, à côté du moteur de formatage.
+// SHIMS: __memcpy_chk __memmove_chk __memset_chk __strcpy_chk __strncpy_chk
+// SHIMS: __strcat_chk __strncat_chk __stack_chk_fail
+#include "rt.h"
+
+static uint32_t argument(CPU *c, unsigned i) { return R32(c->esp + 4 + 4 * i); }
+__attribute__((noreturn)) static void chk_fail(CPU *c) {
+    rt_trap(c, c->eip, "*** buffer overflow detected ***: terminated (__chk_fail)");
+}
+// Longueur d'une chaîne invitée bornée à `limit` octets (strnlen).
+static uint32_t bounded_length(CPU *c, uint32_t address, uint32_t limit) {
+    uint32_t n = 0;
+    while (n < limit) {
+        rt_span(c, address + n, 1);
+        if (!R8(address + n)) break;
+        ++n;
+    }
+    return n;
+}
+
+int rt_fortify_shim(CPU *c, const char *name) {
+    if (!strcmp(name, "__stack_chk_fail"))
+        rt_trap(c, c->eip, "*** stack smashing detected ***: terminated (__stack_chk_fail)");
+    if (!strcmp(name, "__memcpy_chk") || !strcmp(name, "__memmove_chk")) {
+        uint32_t dst = argument(c, 0), src = argument(c, 1), n = argument(c, 2), dstlen = argument(c, 3);
+        if (dstlen < n) chk_fail(c);
+        void *to = rt_write_span(c, dst, n), *from = rt_span(c, src, n);
+        memmove(to, from, n);  // même extension déterministe que le shim memcpy
+        c->eax = dst;
+    } else if (!strcmp(name, "__memset_chk")) {
+        uint32_t dst = argument(c, 0), value = argument(c, 1), n = argument(c, 2), dstlen = argument(c, 3);
+        if (dstlen < n) chk_fail(c);
+        memset(rt_write_span(c, dst, n), (int)value, n);
+        c->eax = dst;
+    } else if (!strcmp(name, "__strcpy_chk")) {
+        uint32_t dst = argument(c, 0), src = argument(c, 1), dstlen = argument(c, 2);
+        uint32_t n = rt_string_length(c, src);
+        if (n >= dstlen) chk_fail(c);
+        memmove(rt_write_span(c, dst, (uint64_t)n + 1), GPTR(src), (size_t)n + 1);
+        c->eax = dst;
+    } else if (!strcmp(name, "__strncpy_chk")) {
+        uint32_t dst = argument(c, 0), src = argument(c, 1), n = argument(c, 2), dstlen = argument(c, 3);
+        if (dstlen < n) chk_fail(c);
+        uint32_t length = bounded_length(c, src, n);
+        uint8_t *to = rt_write_span(c, dst, n);
+        memmove(to, GPTR(src), length);
+        memset(to + length, 0, n - length);
+        c->eax = dst;
+    } else if (!strcmp(name, "__strcat_chk") || !strcmp(name, "__strncat_chk")) {
+        int bounded = !strcmp(name, "__strncat_chk");
+        uint32_t dst = argument(c, 0), src = argument(c, 1);
+        uint32_t limit = bounded ? argument(c, 2) : UINT32_MAX, dstlen = argument(c, bounded ? 3 : 2);
+        // glibc parcourt dest puis copie en décrémentant dstlen : échec dès que
+        // strlen(dest) + copié + NUL dépasse dstlen.
+        uint32_t existing = bounded_length(c, dst, dstlen);
+        if (existing == dstlen) chk_fail(c);
+        uint32_t count = bounded_length(c, src, limit);
+        if ((uint64_t)existing + count + 1 > dstlen) chk_fail(c);
+        uint8_t *to = rt_write_span(c, dst + existing, (uint64_t)count + 1);
+        memmove(to, GPTR(src), count);
+        to[count] = 0;
+        c->eax = dst;
+    } else return 0;
+    return 1;
+}
+RT_SHIM_PROVIDER(rt_fortify_shim)
