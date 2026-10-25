@@ -241,6 +241,13 @@ void rt_guest_poll(void);
 int rt_thread_shim(CPU *c, const char *name);
 void rt_thread_destructors(CPU *c);
 void rt_threads_destroy(void);
+// Threads hôtes étrangers (thread audio SDL/CoreAudio...) appelant du code
+// invité : attach donne au thread courant un CPU invité (pile protégée, TCB,
+// TLS, errno), idempotent ; l'appelant encadre rt_invoke par
+// rt_guest_enter/leave. detach exécute les destructeurs TLS invités ; il est
+// aussi fait automatiquement à la sortie du thread hôte (threads.c).
+CPU *rt_foreign_thread_attach(void);
+void rt_foreign_thread_detach(void);
 
 int rt_futex(CPU *c,uint32_t address,uint32_t operation,uint32_t value,uint32_t timeout);
 // Fournisseurs de shims supplémentaires : chaque fichier runtime s'enregistre
