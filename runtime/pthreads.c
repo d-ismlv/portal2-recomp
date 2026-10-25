@@ -1,13 +1,19 @@
 // Linux i386 pthread objects do not have Darwin's size/layout. Keep the native
 // objects in a registry keyed by their guest address; never cast guest storage.
+// i386 glibc pthread_mutex_t: __lock, __count, __owner, __kind (offset 12),
+// __nusers, __spins: the static initializers differ only in __kind.
+// SHIMS: pthread_mutex_timedlock
 #include "modules.h"
 #include <errno.h>
 #include <pthread.h>
 #include <stdlib.h>
+#include <time.h>
 
 typedef struct Mutex {
-    uint32_t address;
+    uint32_t address, kind;
     pthread_mutex_t native;
+    pthread_t owner;   // tracked for error-checking mutexes only
+    int owned;
     struct Mutex *next;
 } Mutex;
 typedef struct Attr {
@@ -49,14 +55,59 @@ static Mutex *find_mutex(uint32_t address) {
     for (Mutex *m = mutexes; m; m = m->next) if (m->address == address) return m;
     return NULL;
 }
-static int create_mutex(uint32_t address, const pthread_mutexattr_t *attr) {
+static int create_mutex(uint32_t address, const pthread_mutexattr_t *attr, uint32_t kind) {
     if (!address || find_mutex(address)) return EINVAL;
     Mutex *m = calloc(1, sizeof(*m));
     if (!m) return ENOMEM;
     int error = pthread_mutex_init(&m->native, attr);
     if (error) { free(m); return error; }
-    m->address = address; m->next = mutexes; mutexes = m;
+    m->address = address; m->kind = kind; m->next = mutexes; mutexes = m;
     return 0;
+}
+static int native_type(uint32_t kind) {
+    return kind == 1 ? PTHREAD_MUTEX_RECURSIVE : kind == 2 ? PTHREAD_MUTEX_ERRORCHECK : PTHREAD_MUTEX_NORMAL;
+}
+// Lazily adopt a statically initialized guest mutex: PTHREAD_MUTEX_INITIALIZER
+// and the _NP recursive/errorcheck/adaptive initializers (kind 0..3).
+static Mutex *static_mutex(CPU *c, uint32_t address) {
+    const uint8_t *raw = rt_span(c, address, 24);
+    uint32_t word[6]; memcpy(word, raw, sizeof(word));
+    if (word[0] || word[1] || word[2] || word[4] || word[5] || word[3] > 3) return NULL;
+    pthread_mutexattr_t attr;
+    if (pthread_mutexattr_init(&attr)) return NULL;
+    int error = pthread_mutexattr_settype(&attr, native_type(word[3]));
+    if (!error) error = create_mutex(address, &attr, word[3] == 3 ? 0 : word[3]);
+    pthread_mutexattr_destroy(&attr);
+    return error ? NULL : find_mutex(address);
+}
+static void lock_acquired(Mutex *m) { if (m->kind == 2) { m->owner = pthread_self(); m->owned = 1; } }
+static int deadline_passed(const struct timespec *deadline, struct timespec *remaining) {
+    struct timespec now; clock_gettime(CLOCK_REALTIME, &now);
+    if (now.tv_sec > deadline->tv_sec || (now.tv_sec == deadline->tv_sec && now.tv_nsec >= deadline->tv_nsec)) return 1;
+    remaining->tv_sec = deadline->tv_sec - now.tv_sec; remaining->tv_nsec = deadline->tv_nsec - now.tv_nsec;
+    if (remaining->tv_nsec < 0) { --remaining->tv_sec; remaining->tv_nsec += 1000000000; }
+    return 0;
+}
+// Darwin has no pthread_mutex_timedlock: poll trylock with the gate released,
+// backing off from 50 us to 1 ms, until the CLOCK_REALTIME deadline.
+static int timed_lock(CPU *c, Mutex *m, uint32_t pointer) {
+    if (m->kind == 2 && m->owned && pthread_equal(m->owner, pthread_self())) return EDEADLK;
+    int error = pthread_mutex_trylock(&m->native);
+    if (error != EBUSY) return error;
+    struct timespec deadline = {(int32_t)R32(pointer), (int32_t)R32(pointer + 4)}, remaining;
+    (void)c;
+    if (deadline.tv_nsec < 0 || deadline.tv_nsec >= 1000000000) return EINVAL;
+    long backoff = 50000;
+    unsigned saved = rt_guest_suspend();
+    while ((error = pthread_mutex_trylock(&m->native)) == EBUSY) {
+        if (deadline_passed(&deadline, &remaining)) { error = ETIMEDOUT; break; }
+        struct timespec delay = {0, backoff};
+        if (remaining.tv_sec == 0 && remaining.tv_nsec < backoff) delay.tv_nsec = remaining.tv_nsec;
+        nanosleep(&delay, NULL);
+        if (backoff < 1000000) backoff *= 2;
+    }
+    rt_guest_resume(saved);
+    return error;
 }
 
 static int pthread_objects(CPU *c, const char *name) {
@@ -142,12 +193,8 @@ static int pthread_objects(CPU *c, const char *name) {
     } else if (!strcmp(name, "pthread_mutexattr_settype")) {
         Attr *a = find_attr(address);
         uint32_t type = argument(c, 1);
-        int native_type;
-        if (type == 0) native_type = PTHREAD_MUTEX_NORMAL;
-        else if (type == 1) native_type = PTHREAD_MUTEX_RECURSIVE;
-        else if (type == 2) native_type = PTHREAD_MUTEX_ERRORCHECK;
-        else { c->eax = 22; return 1; }
-        error = a ? pthread_mutexattr_settype(&a->native, native_type) : EINVAL;
+        if (type > 2) { c->eax = 22; return 1; }
+        error = a ? pthread_mutexattr_settype(&a->native, native_type(type)) : EINVAL;
         if (!error) { a->kind = type; W32(address, type); }
     } else if (!strcmp(name, "pthread_mutexattr_destroy")) {
         Attr **link = &attributes;
@@ -161,8 +208,8 @@ static int pthread_objects(CPU *c, const char *name) {
     } else if (!strcmp(name, "pthread_mutex_init")) {
         uint32_t attr_address = argument(c, 1);
         Attr *a = find_attr(attr_address);
-        error = attr_address && !a ? EINVAL : create_mutex(address, a ? &a->native : NULL);
-        if (!error) { memset(rt_span(c, address, 24), 0, 24); W32(address + 16, a ? a->kind : 0); }
+        error = attr_address && !a ? EINVAL : create_mutex(address, a ? &a->native : NULL, a ? a->kind : 0);
+        if (!error) { memset(rt_write_span(c, address, 24), 0, 24); W32(address + 12, a ? a->kind : 0); }
     } else if (!strcmp(name, "pthread_mutex_destroy")) {
         Mutex **link = &mutexes;
         while (*link && (*link)->address != address) link = &(*link)->next;
@@ -170,21 +217,21 @@ static int pthread_objects(CPU *c, const char *name) {
         else {
             Mutex *m = *link;
             error = pthread_mutex_destroy(&m->native);
-            if (!error) { *link = m->next; W32(address + 16, UINT32_MAX); free(m); }
+            if (!error) { *link = m->next; W32(address + 12, UINT32_MAX); free(m); }
         }
     } else if (!strcmp(name, "pthread_mutex_lock") || !strcmp(name, "pthread_mutex_trylock") ||
-               !strcmp(name, "pthread_mutex_unlock")) {
+               !strcmp(name, "pthread_mutex_timedlock") || !strcmp(name, "pthread_mutex_unlock")) {
         Mutex *m = find_mutex(address);
-        if (!m && address) {
-            // Linux PTHREAD_MUTEX_INITIALIZER is six zero dwords.
-            int zero = 1;
-            for (unsigned i = 0; i < 24; i += 4) if (R32(address + i)) zero = 0;
-            if (zero) { error = create_mutex(address, NULL); m = find_mutex(address); }
-        }
+        if (!m && address) m = static_mutex(c, address);
         if (!m) error = EINVAL;
-        else if (!strcmp(name, "pthread_mutex_lock")) { unsigned saved=rt_guest_suspend(); error=pthread_mutex_lock(&m->native); rt_guest_resume(saved); }
-        else if (!strcmp(name, "pthread_mutex_trylock")) error = pthread_mutex_trylock(&m->native);
-        else error = pthread_mutex_unlock(&m->native);
+        else if (!strcmp(name, "pthread_mutex_lock")) {
+            if (m->kind == 2 && m->owned && pthread_equal(m->owner, pthread_self())) error = EDEADLK;
+            else { unsigned saved=rt_guest_suspend(); error=pthread_mutex_lock(&m->native); rt_guest_resume(saved); }
+            if (!error) lock_acquired(m);
+        }
+        else if (!strcmp(name, "pthread_mutex_trylock")) { error = pthread_mutex_trylock(&m->native); if (!error) lock_acquired(m); }
+        else if (!strcmp(name, "pthread_mutex_timedlock")) { error = timed_lock(c, m, argument(c, 1)); if (!error) lock_acquired(m); }
+        else { error = pthread_mutex_unlock(&m->native); if (!error && m->kind == 2) m->owned = 0; }
     } else return 0;
     c->eax = (uint32_t)linux_error(error);
     return 1;
