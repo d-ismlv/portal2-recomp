@@ -22,6 +22,13 @@ int rt_init(void) {
                    MAP_PRIVATE | MAP_ANON, -1, 0);
     if (p == MAP_FAILED) { perror("guest address space"); return -1; }
     M = p;
+    // RT_RETURN_SENTINEL is the return address of every outermost guest
+    // frame. Unwinders (libgcc's fallback for frames without FDE) read the
+    // code at a return address to detect signal trampolines: back it with a
+    // readable page of HLT bytes, which matches no trampoline and has no
+    // unwind data, so stack walks end there as at the bottom of a process.
+    if (rt_map(RT_RETURN_SENTINEL & ~UINT32_C(0xfff), 0x1000)) { perror("guest sentinel page"); return -1; }
+    memset(M + (RT_RETURN_SENTINEL & ~UINT32_C(0xfff)), 0xf4, 0x1000);
     return 0;
 }
 
