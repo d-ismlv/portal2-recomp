@@ -88,10 +88,16 @@ static int audio_shim(CPU *c, const char *name) {
         rt_guest_resume(saved);
         free(host_name);
         if (!id) { free(device); c->eax = 0; return 1; }
-        // Without `obtained`, SDL converts to the desired format and buffer size.
-        const SDL_AudioSpec *actual = obtained_address ? &obtained : &desired;
-        device->id = id; device->silence = actual->silence;
-        device->capacity = actual->size ? actual->size : 4096;
+        // Without `obtained`, SDL converts to the desired format; silence and size
+        // are then derived from it as SDL_CalculateAudioSpec does (the guest
+        // need not fill them in).
+        if (!obtained_address) {
+            obtained = desired;
+            obtained.silence = desired.format == AUDIO_U8 ? 0x80 : 0;
+            obtained.size = (Uint32)(SDL_AUDIO_BITSIZE(desired.format) / 8) * desired.channels * desired.samples;
+        }
+        device->id = id; device->silence = obtained.silence;
+        device->capacity = obtained.size ? obtained.size : 4096;
         device->buffer = rt_alloc(device->capacity);
         if (!device->buffer) rt_trap(c, c->eip, "cannot allocate guest audio buffer");
         device->next = audio_devices; audio_devices = device;
