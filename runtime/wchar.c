@@ -89,6 +89,7 @@ static uint32_t encode(int utf8, uint32_t wc, uint8_t out[4]) {
     out[0] = (uint8_t)(0xf0 | wc >> 18); out[1] = (uint8_t)(0x80 | ((wc >> 12) & 0x3f));
     out[2] = (uint8_t)(0x80 | ((wc >> 6) & 0x3f)); out[3] = (uint8_t)(0x80 | (wc & 0x3f)); return 4;
 }
+uint32_t rt_wc_encode(int utf8, uint32_t wc, uint8_t out[4]) { return encode(utf8, wc, out); }
 
 // Multioctet -> large. `limit` = octets lisibles (au plus jusqu'au NUL inclus).
 // *consumed : octets consommés ; *nul : NUL atteint. Renvoie le nombre de

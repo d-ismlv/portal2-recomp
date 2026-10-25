@@ -20,6 +20,8 @@ enum { RT_WC_ALNUM = 1, RT_WC_ALPHA, RT_WC_BLANK, RT_WC_CNTRL, RT_WC_DIGIT, RT_W
        RT_WC_LOWER, RT_WC_PRINT, RT_WC_PUNCT, RT_WC_SPACE, RT_WC_UPPER, RT_WC_XDIGIT };
 int rt_wclass(uint32_t wc, int cls, int utf8);
 uint32_t rt_wcase(uint32_t wc, int upper, int utf8);
+// wcrtomb de la locale (wchar.c) : longueur écrite dans out, ou (uint32_t)-1 (EILSEQ).
+uint32_t rt_wc_encode(int utf8, uint32_t wc, uint8_t out[4]);
 // Formatage strftime en locale C (unités : octets ou wchar_t de 4 octets).
 // Renvoie le nombre d'unités écrites sans le NUL, 0 si `max` est insuffisant.
 uint32_t rt_strftime(CPU *c, uint32_t out, uint32_t max, uint32_t format, uint32_t tm, int wide);
