@@ -69,6 +69,20 @@ int main(int argc, char **argv) {
     ((read_pixels_fn)gl4es_GetProcAddress("glReadPixels"))(fb_w / 2, fb_h / 2, 1, 1, 0x1908, 0x1401, pixel);
     printf("probe: center pixel %u %u %u %u (expected 255 0 0 255)\n", pixel[0], pixel[1], pixel[2], pixel[3]);
     SDL_GL_SwapWindow(window);
+    // 5. Fonctions GL demandées par togl (liste du pont, un nom par ligne).
+    const char *names = getenv("P2_PROBE_GL_NAMES");
+    FILE *list = names ? fopen(names, "r") : NULL;
+    if (list) {
+        char name[128]; int total = 0, absent = 0;
+        while (fgets(name, sizeof(name), list)) {
+            name[strcspn(name, "\r\n")] = 0;
+            if (!name[0]) continue;
+            ++total;
+            if (!gl4es_GetProcAddress(name)) { printf("probe: absent %s\n", name); ++absent; }
+        }
+        fclose(list);
+        printf("probe: %d/%d fonctions GL absentes de gl4es\n", absent, total);
+    }
     printf("probe: done\n");
     fflush(stdout);
     SDL_Quit();

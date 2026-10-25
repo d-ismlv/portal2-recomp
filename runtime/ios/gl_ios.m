@@ -38,6 +38,7 @@ static void *gles_function(const char *name) {
 }
 static void main_framebuffer_size(int *width, int *height) { *width = drawable_width; *height = drawable_height; }
 
+static void load_extras(void);
 static pthread_once_t once = PTHREAD_ONCE_INIT;
 static void start_gl4es(void) {
     gles = dlopen("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW | RTLD_LOCAL);
@@ -46,10 +47,80 @@ static void start_gl4es(void) {
     set_getprocaddress(gles_function);
     set_getmainfbsize(main_framebuffer_size);
     initialize_gl4es();
+    load_extras();
 }
 
+// ---- ajouts à gl4es pour togl ----
+// togl exige des fences (NV, ARB ou APPLE), S3TC et EXT_texture_sRGB_decode.
+// gl4es n'a ni fences ni sRGB_decode : ARB_sync est servi par APPLE_sync
+// d'OpenGL ES (mêmes constantes), après vidage des commandes que gl4es tient
+// encore en tampon ; sRGB_decode est annoncé seulement (le paramètre de
+// texture est ignoré : gamma approximatif, rendu correct par ailleurs).
+typedef struct __GLsync *SyncObject;
+static SyncObject (*es_fence_sync)(GLenum, GLbitfield);
+static GLenum (*es_client_wait_sync)(SyncObject, GLbitfield, uint64_t);
+static void (*es_wait_sync)(SyncObject, GLbitfield, uint64_t);
+static void (*es_delete_sync)(SyncObject);
+static void (*es_get_synciv)(SyncObject, GLenum, GLsizei, GLsizei *, GLint *);
+static void (*gl4es_flush_fn)(void);
+static const GLubyte *(*gl4es_get_string)(GLenum);
+static void *es_symbol(const char *name) {
+    char apple[96];
+    snprintf(apple, sizeof(apple), "%sAPPLE", name);
+    void *fn = dlsym(gles, apple);
+    return fn ? fn : dlsym(gles, name);
+}
+static void load_extras(void) {
+    es_fence_sync = es_symbol("glFenceSync");
+    es_client_wait_sync = es_symbol("glClientWaitSync");
+    es_wait_sync = es_symbol("glWaitSync");
+    es_delete_sync = es_symbol("glDeleteSync");
+    es_get_synciv = es_symbol("glGetSynciv");
+    gl4es_flush_fn = gl4es_GetProcAddress("glFlush");
+    gl4es_get_string = gl4es_GetProcAddress("glGetString");
+    if (!es_fence_sync) fprintf(stderr, "[gl-ios] OpenGL ES sans APPLE_sync : fences indisponibles\n");
+}
+static SyncObject fence_sync(GLenum condition, GLbitfield flags) {
+    gl4es_flush_fn();   // la fence doit suivre les tracés que gl4es diffère
+    return es_fence_sync(condition, flags);
+}
+static GLenum client_wait_sync(SyncObject sync, GLbitfield flags, uint64_t timeout) {
+    return es_client_wait_sync(sync, flags, timeout);
+}
+static void wait_sync(SyncObject sync, GLbitfield flags, uint64_t timeout) { es_wait_sync(sync, flags, timeout); }
+static void delete_sync(SyncObject sync) { if (sync) es_delete_sync(sync); }
+static void get_synciv(SyncObject sync, GLenum name, GLsizei size, GLsizei *length, GLint *values) {
+    es_get_synciv(sync, name, size, length, values);
+}
+static const GLubyte *get_string(GLenum name) {
+    static char *extensions;
+    const GLubyte *s = gl4es_get_string(name);
+    if (name != GL_EXTENSIONS || !s) return s;
+    if (!extensions && asprintf(&extensions, "%s%s%s", s, es_fence_sync ? " GL_ARB_sync" : "",
+                                " GL_EXT_texture_sRGB_decode") < 0) return s;
+    return (const GLubyte *)extensions;
+}
+// Références directes de gl.c, que gl4es n'exporte pas sous ces noms.
+void gl4es_glDeleteSync(SyncObject sync) { delete_sync(sync); }
+GLboolean gl4es_glUnmapBuffer(GLenum target);
+GLboolean gl4es_glUnmapBufferARB(GLenum target) { return gl4es_glUnmapBuffer(target); }
+
 void *rt_host_gl_open(void) { return (void *)1; }   // gl4es est lié statiquement
-void *rt_host_gl_symbol(void *library, const char *name) { (void)library; return gl4es_GetProcAddress(name); }
+void *rt_host_gl_symbol(void *library, const char *name) {
+    (void)library;
+    static const struct { const char *name; void *fn; } extras[] = {
+        {"glFenceSync", (void *)fence_sync}, {"glClientWaitSync", (void *)client_wait_sync},
+        {"glWaitSync", (void *)wait_sync}, {"glDeleteSync", (void *)delete_sync},
+        {"glGetSynciv", (void *)get_synciv}, {"glGetString", (void *)get_string},
+    };
+    for (size_t i = 0; i < sizeof(extras) / sizeof(*extras); ++i) {
+        if (strcmp(name, extras[i].name)) continue;
+        if (!gl4es_get_string) return NULL;   // avant le premier contexte : rien
+        int sync = strstr(name, "Sync") != NULL;
+        return sync && !es_fence_sync ? NULL : extras[i].fn;
+    }
+    return gl4es_GetProcAddress(name);
+}
 
 void *rt_ios_gl_current_context(void) { return (__bridge void *)[EAGLContext currentContext]; }
 void *rt_ios_gl_share_group(void *context) {
