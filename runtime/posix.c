@@ -73,6 +73,13 @@ static int do_unlink(const char *path, int directory) {
     if (!inside) return directory ? rmdir(path) : unlink(path);
     if (!*relative) { errno = directory ? EBUSY : EISDIR; return -1; }
     char seen[PATH_MAX], overlay[PATH_MAX]; struct stat info;
+    // Un lien créé par l'invité se supprime lui-même, sans regarder sa cible.
+    if (rt_path_overlay(relative, overlay)) return -1;
+    if (!lstat(overlay, &info) && S_ISLNK(info.st_mode)) {
+        if (directory) { errno = ENOTDIR; return -1; }
+        if (unlink(overlay)) return -1;
+        return path_lower_exists(relative) ? rt_path_whiteout(relative) : 0;
+    }
     if (visible(path, seen, &info)) return -1;
     if (directory && !S_ISDIR(info.st_mode)) { errno = ENOTDIR; return -1; }
     if (!directory && S_ISDIR(info.st_mode)) { errno = EISDIR; return -1; }
@@ -133,7 +140,7 @@ static int do_rename(const char *from, const char *to) {
     // Un répertoire cible présent dans l'original ne peut pas être remplacé.
     if (to_exists && S_ISDIR(existing.st_mode) && to_inside &&
         (rt_path_overlay(to_relative, to_overlay) || lstat(to_overlay, &own))) { errno = EXDEV; return -1; }
-    if (keep(target, to_inside ? rt_write_path(to, 0) : to)) return -1;
+    if (keep(target, to_inside ? rt_write_path_nofollow(to) : to)) return -1;
     if (!from_inside) {
         if (rename(from, target)) return -1;
     } else {

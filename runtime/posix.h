@@ -45,6 +45,8 @@ int rt_path_clear_whiteout(const char *relative);
 // Nom d'une source originale masqué dans un répertoire relatif (supprimé
 // par l'invité, ou répertoire interne des suppressions).
 int rt_path_hidden_name(const char *relative_dir, const char *name);
+// rt_write_path sans suivre un lien final (rename, lchown, unlink...).
+const char *rt_write_path_nofollow(const char *path);
 // Chemin canonique tel que l'invité le voit (realpath invité).
 int rt_guest_realpath(const char *path, char out[PATH_MAX]);
 

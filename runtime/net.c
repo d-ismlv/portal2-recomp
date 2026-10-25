@@ -28,7 +28,7 @@ static void fail(CPU *c, int linux_errno) { rt_set_errno(c, linux_errno); c->eax
 enum { L_AF_UNSPEC = 0, L_AF_UNIX = 1, L_AF_INET = 2, L_AF_INET6 = 10 };
 
 // sockaddr invité Linux -> sockaddr hôte. Renvoie un errno Linux, 0 si succès.
-static int host_address(CPU *c, uint32_t address, uint32_t length, struct sockaddr_storage *out, socklen_t *out_length) {
+static int host_address(CPU *c, uint32_t address, uint32_t length, struct sockaddr_storage *out, socklen_t *out_length, int creating) {
     if (!address || length < 2 || length > 128) return 22;
     const uint8_t *in = rt_span(c, address, length);
     uint16_t family; memcpy(&family, in, 2);
@@ -55,8 +55,14 @@ static int host_address(CPU *c, uint32_t address, uint32_t length, struct sockad
         size_t path = length - 2;
         if (path && in[2] == 0) rt_trap(c, c->eip, "Linux abstract AF_UNIX socket names are not supported");
         size_t used = strnlen((const char *)in + 2, path);
+        if (used >= PATH_MAX) return 36;
+        // Les sockets nommées sont des fichiers : même vue fusionnée que open.
+        char guest_path[PATH_MAX]; memcpy(guest_path, in + 2, used); guest_path[used] = 0;
+        const char *host_path = creating ? rt_write_path(guest_path, 0) : rt_read_path(guest_path);
+        if (!host_path) return rt_linux_errno(errno);
+        used = strlen(host_path);
         if (used >= sizeof(un->sun_path)) return 36;
-        un->sun_family = AF_UNIX; memcpy(un->sun_path, in + 2, used);
+        un->sun_family = AF_UNIX; memcpy(un->sun_path, host_path, used);
         un->sun_len = (uint8_t)(offsetof(struct sockaddr_un, sun_path) + used + 1);
         *out_length = un->sun_len; return 0;
     }
@@ -266,7 +272,7 @@ static int net_shim(CPU *c, const char *name) {
         finish(c, fd);
     } else if (!strcmp(name, "bind") || !strcmp(name, "connect")) {
         int fd = (int32_t)arg(c, 0);
-        if ((error = host_address(c, arg(c, 1), arg(c, 2), &address, &length))) { fail(c, error); return 1; }
+        if ((error = host_address(c, arg(c, 1), arg(c, 2), &address, &length, !strcmp(name, "bind")))) { fail(c, error); return 1; }
         int result = !strcmp(name, "bind") ? bind(fd, (struct sockaddr *)&address, length)
                                            : BLOCKING(connect(fd, (struct sockaddr *)&address, length));
         finish(c, result);
@@ -288,7 +294,7 @@ static int net_shim(CPU *c, const char *name) {
         int flags = host_message_flags(c, arg(c, 3), 0);
         const void *data = rt_span(c, buffer, size);
         uint32_t target = !strcmp(name, "sendto") ? arg(c, 4) : 0;
-        if (target && (error = host_address(c, target, arg(c, 5), &address, &length))) { fail(c, error); return 1; }
+        if (target && (error = host_address(c, target, arg(c, 5), &address, &length, 0))) { fail(c, error); return 1; }
         ssize_t result = BLOCKING(target ? sendto(fd, data, size, flags, (struct sockaddr *)&address, length)
                                          : send(fd, data, size, flags));
         finish(c, result);

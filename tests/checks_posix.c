@@ -431,3 +431,46 @@ RT_CHECK(process_children_and_linux_wait_status) {
     int host_status; assert(waitpid(exiting, &host_status, 0) == exiting);
     assert(WIFEXITED(host_status) && WEXITSTATUS(host_status) == 9 && !strcmp(order, "231"));
 }
+
+RT_CHECK(posix_guest_symlinks_never_reach_original_copy) {
+    setup();
+    char path[PATH_MAX], contents[64]; struct stat info;
+    // Lien absolu vers un fichier original, puis écriture à travers le lien.
+    assert(call("symlink", 2, gstr(game_path("a.txt")), gstr(game_path("dir/abs"))) == 0);
+    uint32_t file = call("fopen", 2, gstr(game_path("dir/abs")), gstr("w")); assert(file);
+    assert(call("fputs", 2, gstr("through-link"), file) != UINT32_MAX && call("fclose", 1, file) == 0);
+    slurp(game_path("a.txt"), contents, sizeof(contents)); assert(!strcmp(contents, "game-a"));
+    snprintf(path, sizeof(path), "%s/a.txt", user); slurp(path, contents, sizeof(contents)); assert(!strcmp(contents, "through-link"));
+    // Lien relatif vers un répertoire original utilisé comme composant.
+    assert(call("symlink", 2, gstr("dir"), gstr(game_path("alias"))) == 0);
+    assert(call("chmod", 2, gstr(game_path("alias/x")), 0600) == 0);
+    snprintf(path, sizeof(path), "%s/dir/x", game); assert(!stat(path, &info) && (info.st_mode & 0777) != 0600);
+    snprintf(path, sizeof(path), "%s/dir/x", user); assert(!stat(path, &info) && (info.st_mode & 0777) == 0600);
+    // Boucle de liens : ELOOP Linux (40).
+    assert(call("symlink", 2, gstr("loop2"), gstr(game_path("loop1"))) == 0);
+    assert(call("symlink", 2, gstr("loop1"), gstr(game_path("loop2"))) == 0);
+    assert(call("fopen", 2, gstr(game_path("loop1")), gstr("w")) == 0 && guest_errno() == 40);
+    // rename sur un lien existant remplace le lien, pas sa cible.
+    assert(call("rename", 2, gstr(game_path("dir/y")), gstr(game_path("dir/abs"))) == 0);
+    snprintf(path, sizeof(path), "%s/dir/abs", user); assert(!lstat(path, &info) && S_ISREG(info.st_mode));
+    snprintf(path, sizeof(path), "%s/a.txt", user); slurp(path, contents, sizeof(contents)); assert(!strcmp(contents, "through-link"));
+    // Les marques de suppression ne sont pas accessibles à l'invité.
+    assert(call("unlink", 1, gstr(game_path("dir/z"))) == 0);
+    assert(call("unlink", 1, gstr(game_path(RT_WHITEOUTS "/dir/z/.wh"))) == UINT32_MAX && guest_errno() == 2);
+    assert(call("opendir", 1, gstr(game_path(RT_WHITEOUTS))) == 0 && guest_errno() == 2);
+    assert(call("fopen", 2, gstr(game_path(RT_WHITEOUTS "/x")), gstr("w")) == 0 && guest_errno() == 2);
+    // Socket AF_UNIX nommée sous la racine du jeu : créée dans les données utilisateur.
+    int32_t fd = (int32_t)call("socket", 3, 1, 1, 0); assert(fd >= 0);
+    uint32_t address = 0x2001e000u; memset(GPTR(address), 0, 110); W16(address, 1);
+    strcpy(GPTR(address + 2), "dir/sock"); // relatif : passer par le répertoire courant
+    char cwd[PATH_MAX]; assert(getcwd(cwd, sizeof(cwd)) && !chdir(game));
+    assert(call("bind", 3, (uint32_t)fd, address, 110) == 0);
+    assert(!chdir(cwd));
+    snprintf(path, sizeof(path), "%s/dir/sock", user); assert(!lstat(path, &info) && S_ISSOCK(info.st_mode));
+    snprintf(path, sizeof(path), "%s/dir/sock", game); assert(lstat(path, &info));
+    close(fd);
+    assert(call("unlink", 1, gstr(game_path("alias"))) == 0); // le lien, pas le répertoire
+    assert(call("opendir", 1, gstr(game_path("alias"))) == 0 && guest_errno() == 2);
+    assert(call("rmdir", 1, gstr(game_path("loop1"))) == UINT32_MAX && guest_errno() == 20);
+    cleanup();
+}

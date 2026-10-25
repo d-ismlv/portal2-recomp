@@ -58,14 +58,23 @@ int rt_paths_init(const char *game,const char *linux,const char *user) {
     if(mkdir(user_root,0755) && errno!=EEXIST)return -1;
     return 0;
 }
+// Le répertoire des marques de suppression n'existe pas dans la vue invitée.
+static int reserved(const char *relative) {
+    size_t length=strlen(RT_WHITEOUTS);
+    return !strncmp(relative,RT_WHITEOUTS,length) && (!relative[length] || relative[length]=='/');
+}
+static int overlay_link(const char *result,const char *relative,int preserve_existing,int follow_final,const char **out);
 const char *rt_read_path(const char *path) {
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     if(!within(canonical,game_root))return path;
     const char *relative=canonical+strlen(game_root); while(*relative=='/')++relative;
+    if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer();
     int count=snprintf(result,PATH_MAX,"%s/%s",user_root,relative);
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
+    const char *linked;
+    if(*relative && overlay_link(result,relative,-1,1,&linked))return linked;
     struct stat info;
     if(!stat(result,&info) && (!S_ISDIR(info.st_mode) || access(canonical,F_OK)))return result;
     // Supprimé par l'invité : la copie utilisateur absente donne ENOENT.
@@ -149,13 +158,55 @@ int rt_guest_realpath(const char *path,char out[PATH_MAX]) {
     if(!resolved || stat(resolved,&info))return -1;
     return 0;
 }
-const char *rt_write_path(const char *path,int preserve_existing) {
+static _Thread_local unsigned link_depth;
+static const char *write_path(const char *path,int preserve_existing,int follow_final);
+// Un lien symbolique créé par l'invité dans la copie utilisateur est résolu
+// dans la vue invitée : suivre le lien sur l'hôte pourrait écrire dans la copie
+// originale du jeu, et une lecture doit retrouver la cible dans les autres
+// sources. preserve_existing < 0 : résolution en lecture. Renvoie 1 si un lien
+// a été remplacé dans *out.
+static int overlay_link(const char *result,const char *relative,int preserve_existing,int follow_final,const char **out) {
+    size_t root=strlen(user_root)+1;
+    char prefix[PATH_MAX]; strcpy(prefix,result);
+    for(size_t i=root;;++i){
+        char saved=prefix[i];
+        if(saved!='/' && saved)continue;
+        if(!saved && !follow_final)return 0;
+        prefix[i]=0;
+        struct stat info;
+        if(lstat(prefix,&info))return 0;
+        if(S_ISLNK(info.st_mode)){
+            char target[PATH_MAX]; ssize_t length=readlink(prefix,target,sizeof(target)-1);
+            if(length<0){*out=NULL;return 1;}
+            target[length]=0;
+            size_t component=i-root; // longueur de la partie relative jusqu'au lien
+            const char *slash=NULL; for(size_t j=0;j<component;++j)if(relative[j]=='/')slash=relative+j;
+            char next[PATH_MAX]; int count;
+            if(target[0]=='/')count=snprintf(next,PATH_MAX,"%s%s",target,result+i);
+            else count=snprintf(next,PATH_MAX,"%s/%.*s%s%s%s",game_root,slash?(int)(slash-relative):0,relative,
+                slash?"/":"",target,result+i);
+            if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;*out=NULL;return 1;}
+            if(++link_depth>40){link_depth=0;errno=ELOOP;*out=NULL;return 1;}
+            *out=preserve_existing<0?rt_read_path(next):write_path(next,preserve_existing,follow_final);
+            link_depth=0;
+            return 1;
+        }
+        if(!saved)return 0;
+        prefix[i]=saved;
+    }
+}
+const char *rt_write_path(const char *path,int preserve_existing) { return write_path(path,preserve_existing,1); }
+const char *rt_write_path_nofollow(const char *path) { return write_path(path,0,0); }
+static const char *write_path(const char *path,int preserve_existing,int follow_final) {
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     if(!within(canonical,game_root))return path;
     const char *relative=canonical+strlen(game_root); while(*relative=='/')++relative;
+    if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer(); int count=snprintf(result,PATH_MAX,"%s/%s",user_root,relative);
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
+    const char *linked;
+    if(*relative && overlay_link(result,relative,preserve_existing,follow_final,&linked))return linked;
     // Ne recrée dans la copie utilisateur que les répertoires parents visibles
     // dans la vue fusionnée : sinon ENOENT, comme sous Linux.
     for(char *p=result+strlen(user_root)+1;*p;++p)if(*p=='/'){
