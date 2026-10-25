@@ -25,6 +25,21 @@ façon ld.so (libprotobuf de client.so/server.so), /proc générés depuis
 l'hôte, binaires Windows de la copie du jeu invisibles (Miles chargeait un
 .asi PE), GLX minimal, événements SDL3 filtrés, Steam GameCoordinator.
 
+## Greffons Miles PE (voix MP3) — branche feat/pe-plugins
+
+libMiles charge lui-même les DLL Windows `bin/linux32/*.asi` (mssmp3 décode les
+voix MP3). Elles sont traduites d'avance (`tools/peprep.py`,
+`lift.generate_pe`, appelés par `build_game.py` → `build/game/gen/pe`) en C
+relogeable indexé par RVA ; `runtime/pe.c` reconnaît l'image au premier
+transfert vers elle (octets de .text identiques au fichier, relocations
+comprises : données vers la vue écrivable de Miles, valeurs vers .text vers la
+vue exécutable), puis aiguille. Seuls les .asi traduits et identiques au
+fichier restent visibles (`rt_path_windows_binary`). Diagnostic :
+`P2_PE_TRACE=1` (fonctions de greffon appelées). Vérifié : plus de « Can't
+create mixer », décodage de `vo/announcer/openingexercise01.wav` identique à
+afconvert (corrélation 0,9999997). En fenêtre cachée, la carte ne déclenche
+pas la réplique d'ouverture et la sortie reste muette : à écouter en vrai.
+
 ---
 
 # Point de reprise — 25 octobre 2026

@@ -21,6 +21,7 @@ import subprocess
 import sys
 import time
 import lift
+import peprep
 
 # Identique à HOST_CFLAGS/HOST_LIBS du Makefile.
 HOST_CFLAGS = ['-I/opt/homebrew/include', '-I/opt/homebrew/include/freetype2', '-DGL_SILENCE_DEPRECATION',
@@ -29,7 +30,11 @@ HOST_LIBS = ['-L/opt/homebrew/lib', '-lSDL2', '-lfreetype', '-lfontconfig', '-li
              '-framework', 'OpenGL', '-framework', 'OpenAL']
 WARNINGS = ['-Wall', '-Wextra', '-Werror']
 DEBUG = {'full': '-g', 'lines': '-gline-tables-only', 'none': '-g0'}
-TOOLS = ['tools/lift.py', 'tools/float_lift.py', 'tools/registry.py', 'tools/build_game.py']
+TOOLS = ['tools/lift.py', 'tools/float_lift.py', 'tools/registry.py', 'tools/build_game.py', 'tools/peprep.py']
+# Greffons Windows que libMiles charge lui-même depuis bin/linux32 de la copie
+# du jeu (runtime/pe.c) : mssmp3 décode les voix MP3, mssvoice le chat vocal,
+# binkawin l'audio des vidéos Bink.
+PE_PLUGINS = ('mssmp3.asi', 'mssvoice.asi', 'binkawin.asi')
 KEEP_CONFIGURATIONS = 2   # objets conservés pour les deux derniers jeux d'options
 
 
@@ -78,6 +83,36 @@ def generate(args, layout, specs):
     manifest['key'] = key
     manifest_path.write_text(json.dumps(manifest))
     return manifest, time.time() - started
+
+
+def generate_plugins(config_path, log=print):
+    """C relogeable des greffons PE de bin/linux32 (lift.generate_pe), dans
+    build/game/gen/pe : un fichier par greffon, réécrit seulement s'il change."""
+    out = Path('build/game/gen/pe')
+    out.mkdir(parents=True, exist_ok=True)
+    config = json.loads(Path(config_path).read_text()) if Path(config_path).exists() else {}
+    root = Path(config.get('game_root', '')) / 'bin/linux32'
+    sources, stats = [], []
+    for name in PE_PLUGINS:
+        path = root / name
+        if not config.get('game_root') or not path.is_file():
+            log(f'PE plugin {name} not found under {root}: Miles will not see it')
+            continue
+        tag = name.split('.')[0].lower()
+        target = out / f'pe_{tag}.c'
+        key = digest(*(Path(t).read_bytes() for t in TOOLS[:3] + ['tools/peprep.py']), path.read_bytes(), 'pe-v1')
+        stamp = out / f'pe_{tag}.key'
+        if not (target.exists() and stamp.exists() and stamp.read_text() == key):
+            source, info = lift.generate_pe(peprep.PeImage(path), tag, log=log)
+            target.write_text(source)
+            stamp.write_text(key)
+            (out / f'pe_{tag}.json').write_text(json.dumps(info, indent=1) + '\n')
+        stats.append(json.loads((out / f'pe_{tag}.json').read_text()))
+        sources.append(target)
+    for stale in out.glob('pe_*.c'):
+        if stale not in sources:
+            stale.unlink()
+    return sources, stats
 
 
 INCLUDE = re.compile(rb'^\s*#\s*include\s+"([^"]+)"', re.M)
@@ -207,6 +242,8 @@ def main():
                              'diagnostics et P2_WATCH_CALL (par défaut, appels directs, voir rt.h)')
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     parser.add_argument('--stats', type=Path, default=Path('build/game/build-stats.json'))
+    parser.add_argument('--config', type=Path, default=Path('config/local.json'),
+                        help='game_root : copie du jeu contenant bin/linux32/*.asi (greffons PE)')
     args = parser.parse_args()
     sys.stdout.reconfigure(line_buffering=True)
     started = time.time()
@@ -215,6 +252,7 @@ def main():
         manifest, generation_time = generate(args, layout, roots(layout))
     except lift.Unsupported as exc:
         parser.exit(1, f'game lift: {exc}\n')
+    plugin_sources, plugin_stats = generate_plugins(args.config)
     imports = {item['addr']: item['name'] for item in layout['imports']}
     unimplemented = sorted({imports[a] for a in manifest['used_imports']} - lift.SHIMS)
     if unimplemented:
@@ -228,6 +266,7 @@ def main():
     units.append(('src/main.c', runtime_flags))
     units += [(str(sources / name), generated_flags) for name in sorted(manifest['shards'])]
     units.append((str(sources / 'dispatch.c'), generated_flags))
+    units += [(str(p), generated_flags) for p in plugin_sources]
     cache = Path('build/game/obj')
     compile_started = time.time()
     objects, compiled, cpu = compile_units(units, cache, args.jobs, identity)
@@ -248,7 +287,8 @@ def main():
                  binary_bytes=args.out.stat().st_size, object_cache_bytes=disk_usage(cache),
                  generated_source_bytes=disk_usage(sources), removed_object_bytes=removed,
                  opt=args.opt, runtime_opt=args.runtime_opt or args.opt, debug=args.debug, whole_game=args.all,
-                 fast_memory=args.fast_memory, traced_calls=args.traced_calls)
+                 fast_memory=args.fast_memory, traced_calls=args.traced_calls,
+                 pe_plugins=[{k: v for k, v in item.items() if k != 'not_compiled'} for item in plugin_stats])
     args.stats.write_text(json.dumps(stats, indent=1) + '\n')
     print(f'{compiled}/{len(units)} files compiled in {compile_time:.0f} s ({cpu:.0f} s CPU), '
           f'link {link_time:.0f} s, total {stats["total_seconds"]:.0f} s; binary '
