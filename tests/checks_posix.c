@@ -577,3 +577,17 @@ RT_CHECK(posix_case_variants_of_root_and_listing_cache) {
     listing("dir", 0, names, sizeof(names)); assert(!strcmp(names, "w,x,y,z"));
     cleanup();
 }
+
+RT_CHECK(posix_read_cache_sees_guest_creations) {
+    setup();
+    char host[PATH_MAX]; snprintf(host, sizeof(host), "%s/later.cfg", user);
+    const char *before = rt_read_path(game_path("later.cfg"));
+    assert(before && access(before, F_OK));                        // absent (résolution mise en cache)
+    assert(rt_read_path(game_path("later.cfg")));                  // deuxième sondage servi par le cache
+    uint32_t file = call("fopen", 2, gstr(game_path("later.cfg")), gstr("w"));
+    assert(file && call("fclose", 1, file) == 0);
+    const char *after = rt_read_path(game_path("later.cfg"));
+    char resolved[PATH_MAX];
+    assert(after && !access(after, F_OK) && realpath(after, resolved) && !strcmp(resolved, host)); // créé par le jeu : visible aussitôt
+    cleanup();
+}

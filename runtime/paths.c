@@ -1,6 +1,7 @@
 #include "posix.h"
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -96,11 +97,50 @@ static int reserved(const char *relative) {
     return !strncmp(relative,RT_WHITEOUTS,length) && (!relative[length] || relative[length]=='/');
 }
 static int overlay_link(const char *result,const char *relative,int preserve_existing,int follow_final,const char **out);
+// Cache des résolutions de lecture sous la racine du jeu : le menu sonde en
+// boucle des fichiers absents (cartes du workshop...) et chaque résolution
+// coûte cinq à six appels système. Une entrée vaut pour une génération : toute
+// écriture invitée (write_path, marques de suppression) ou changement de
+// racines l'invalide. Les changements faits hors du jeu ne sont pas vus.
+#define READ_CACHE 4096u
+typedef struct { unsigned long generation; int error; char canonical[PATH_MAX]; char result[PATH_MAX]; } ReadEntry;
+static ReadEntry *read_cache;
+static pthread_mutex_t read_lock=PTHREAD_MUTEX_INITIALIZER;
+static unsigned read_slot(const char *canonical) {
+    unsigned h=2166136261u; for(const char *p=canonical;*p;++p)h=(h^(unsigned char)*p)*16777619u;
+    return h&(READ_CACHE-1);
+}
+static const char *read_path_uncached(const char *path);
 const char *rt_read_path(const char *path) {
     if(rt_is_proc_path(path))return rt_proc_path(path);   // fichiers /proc générés (procfs.c)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     if(!within(canonical,game_root))return path;
+    unsigned long now=generation; unsigned slot=read_slot(canonical);
+    pthread_mutex_lock(&read_lock);
+    if(!read_cache)read_cache=calloc(READ_CACHE,sizeof(*read_cache));
+    ReadEntry *e=read_cache?&read_cache[slot]:NULL;
+    if(e && e->generation==now && !strcmp(e->canonical,canonical)){
+        int error=e->error; char *result=error?NULL:buffer();
+        if(result)strcpy(result,e->result);
+        pthread_mutex_unlock(&read_lock);
+        if(error){errno=error;return NULL;}
+        return result;
+    }
+    pthread_mutex_unlock(&read_lock);
+    const char *result=read_path_uncached(path); int error=result?0:errno;
+    if(!result && error!=ENOENT)return NULL;   // erreurs inattendues : non mémorisées
+    pthread_mutex_lock(&read_lock);
+    if(e && strlen(canonical)<PATH_MAX && (!result || strlen(result)<PATH_MAX)){
+        e->generation=now; e->error=error; strcpy(e->canonical,canonical);
+        if(result)strcpy(e->result,result);
+    }
+    pthread_mutex_unlock(&read_lock);
+    if(!result)errno=error;
+    return result;
+}
+static const char *read_path_uncached(const char *path) {
+    char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     const char *relative=canonical+strlen(game_root); while(*relative=='/')++relative;
     if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer();
@@ -261,8 +301,14 @@ static int overlay_link(const char *result,const char *relative,int preserve_exi
         prefix[i]=saved;
     }
 }
-const char *rt_write_path(const char *path,int preserve_existing) { return write_path(path,preserve_existing,1); }
-const char *rt_write_path_nofollow(const char *path) { return write_path(path,0,0); }
+// Génération incrémentée aussi en sortie : write_path résout l'original en
+// lecture (copie préalable), ce qui pourrait sinon rester en cache alors que la
+// copie utilisateur vient d'être créée. Le fichier lui-même est créé ensuite
+// par le même shim, verrou d'exécution invité tenu.
+const char *rt_write_path(const char *path,int preserve_existing) {
+    const char *result=write_path(path,preserve_existing,1); ++generation; return result;
+}
+const char *rt_write_path_nofollow(const char *path) { const char *result=write_path(path,0,0); ++generation; return result; }
 static const char *write_path(const char *path,int preserve_existing,int follow_final) {
     ++generation;   // toute écriture invalide les caches de lecture (listes de dossiers)
     if(!game_root[0])return path;
