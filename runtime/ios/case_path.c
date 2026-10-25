@@ -12,12 +12,13 @@
 #include <stdlib.h>
 #include <string.h>
 #include <strings.h>
+#include <errno.h>
 #include <sys/stat.h>
+#include <time.h>
 
-// Cache des contenus de répertoires (chemin exact -> noms). Une entrée créée
-// après coup avec une autre casse n'est pas vue : rare, et le nom tel quel est
-// alors gardé (l'appel échoue comme il le ferait sans cache).
-typedef struct Directory { char *path; char **names; size_t count; struct Directory *next; } Directory;
+// Cache des contenus de répertoires (chemin exact -> noms), relu quand un nom
+// y manque (fichier créé depuis la mise en cache).
+typedef struct Directory { char *path; char **names; size_t count; time_t refreshed; struct Directory *next; } Directory;
 #define BUCKETS 4096u
 static Directory *buckets[BUCKETS];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -48,11 +49,33 @@ static Directory *listing(const char *path) {
     return d;
 }
 
+static const char *find(Directory *d, const char *name) {
+    for (size_t i = 0; d && i < d->count; ++i) if (!strcasecmp(d->names[i], name)) return d->names[i];
+    return NULL;
+}
+// Relit un répertoire déjà en cache (une entrée a pu être créée depuis). Les
+// anciens noms restent alloués : des pointeurs renvoyés plus tôt les désignent.
+static void refresh(Directory *d) {
+    time_t now = time(NULL);   // au plus une relecture par seconde : le moteur sonde beaucoup d'absents
+    if (now == d->refreshed) return;
+    d->refreshed = now;
+    DIR *dir = opendir(d->path);
+    if (!dir) return;
+    struct dirent *entry;
+    while ((entry = readdir(dir))) {
+        if (find(d, entry->d_name)) continue;
+        char **grown = realloc(d->names, (d->count + 1) * sizeof(*grown));
+        if (!grown) break;
+        d->names = grown;
+        d->names[d->count++] = strdup(entry->d_name);
+    }
+    closedir(dir);
+}
 static const char *match(const char *directory, const char *name) {
     pthread_mutex_lock(&lock);
     Directory *d = listing(directory);
-    const char *found = NULL;
-    for (size_t i = 0; d && i < d->count && !found; ++i) if (!strcasecmp(d->names[i], name)) found = d->names[i];
+    const char *found = find(d, name);
+    if (d && !found) { refresh(d); found = find(d, name); }
     pthread_mutex_unlock(&lock);
     return found;   // les noms du cache ne sont jamais libérés
 }
@@ -63,9 +86,10 @@ const char *rt_ios_case_path(const char *canonical, size_t trusted) {
     static _Thread_local unsigned next;
     char *out = ring[next++ & 3];
     struct stat info;
-    if (!lstat(canonical, &info)) return canonical;   // déjà exact
     size_t length = strlen(canonical);
-    if (trusted > length || length >= PATH_MAX) return canonical;
+    // Le résultat survit à l'appel : jamais le tampon (souvent sur la pile) de l'appelant.
+    if (length >= PATH_MAX) { errno = ENAMETOOLONG; return NULL; }
+    if (!lstat(canonical, &info) || trusted > length) { memcpy(out, canonical, length + 1); return out; }
     memcpy(out, canonical, trusted); out[trusted] = 0;
     const char *rest = canonical + trusted;
     int exact = 1;
@@ -75,10 +99,10 @@ const char *rt_ios_case_path(const char *canonical, size_t trusted) {
         const char *end = strchr(rest, '/'); if (!end) end = rest + strlen(rest);
         char part[NAME_MAX + 1];
         size_t n = (size_t)(end - rest);
-        if (n > NAME_MAX) return canonical;
+        if (n > NAME_MAX) { memcpy(out, canonical, length + 1); return out; }
         memcpy(part, rest, n); part[n] = 0;
         size_t used = strlen(out);
-        if (used + 1 + n >= PATH_MAX) return canonical;
+        if (used + 1 + n >= PATH_MAX) { memcpy(out, canonical, length + 1); return out; }
         const char *real = NULL;
         if (exact) {
             out[used] = '/'; strcpy(out + used + 1, part);

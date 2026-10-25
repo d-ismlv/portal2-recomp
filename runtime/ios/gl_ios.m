@@ -84,6 +84,8 @@ static void (*es_get_synciv)(SyncObject, GLenum, GLsizei, GLsizei *, GLint *);
 static void (*gl4es_flush_fn)(void);
 static const GLubyte *(*gl4es_get_string)(GLenum);
 static GLenum (*gl4es_check_status)(GLenum);
+static void (*gl4es_tex_parameteri)(GLenum, GLenum, GLint);
+static void (*gl4es_tex_parameteriv)(GLenum, GLenum, const GLint *);
 static void *es_symbol(const char *name) {
     char apple[96];
     snprintf(apple, sizeof(apple), "%sAPPLE", name);
@@ -99,6 +101,8 @@ static void load_extras(void) {
     gl4es_flush_fn = gl4es_GetProcAddress("glFlush");
     gl4es_get_string = gl4es_GetProcAddress("glGetString");
     gl4es_check_status = gl4es_GetProcAddress("glCheckFramebufferStatus");
+    gl4es_tex_parameteri = gl4es_GetProcAddress("glTexParameteri");
+    gl4es_tex_parameteriv = gl4es_GetProcAddress("glTexParameteriv");
     if (!es_fence_sync) fprintf(stderr, "[gl-ios] OpenGL ES sans APPLE_sync : fences indisponibles\n");
 }
 static SyncObject fence_sync(GLenum condition, GLbitfield flags) {
@@ -130,7 +134,9 @@ static GLenum check_framebuffer_status(GLenum target) {
         void (*attachment)(GLenum, GLenum, GLenum, GLint *) = dlsym(gles, "glGetFramebufferAttachmentParameteriv");
         void (*rb)(GLenum, GLenum, GLint *) = dlsym(gles, "glGetRenderbufferParameteriv");
         void (*bind_rb)(GLenum, GLuint) = dlsym(gles, "glBindRenderbuffer");
-        GLint fbo = 0; real_get_integerv(GL_FRAMEBUFFER_BINDING, &fbo);
+        GLint fbo = 0, previous_rb = 0;
+        real_get_integerv(GL_FRAMEBUFFER_BINDING, &fbo);
+        real_get_integerv(GL_RENDERBUFFER_BINDING, &previous_rb);
         fprintf(stderr, "[gl-ios] FBO %d incomplet : %#x\n", fbo, status);
         const struct { GLenum point; const char *name; } points[] = {
             {GL_COLOR_ATTACHMENT0, "couleur0"}, {GL_DEPTH_ATTACHMENT, "profondeur"}, {GL_STENCIL_ATTACHMENT, "stencil"}};
@@ -148,8 +154,19 @@ static GLenum check_framebuffer_status(GLenum target) {
                     type == GL_TEXTURE ? "texture" : type == GL_RENDERBUFFER ? "renderbuffer" : type ? "?" : "aucun",
                     name, format, width, height);
         }
+        bind_rb(GL_RENDERBUFFER, (GLuint)previous_rb);
     }
     return status;
+}
+
+// EXT_texture_sRGB_decode est annoncé à togl : son paramètre de texture est
+// absorbé ici au lieu d'atteindre gl4es/OpenGL ES (GL_INVALID_ENUM).
+#define TEXTURE_SRGB_DECODE 0x8A48
+static void tex_parameteri(GLenum target, GLenum name, GLint value) {
+    if (name != TEXTURE_SRGB_DECODE) gl4es_tex_parameteri(target, name, value);
+}
+static void tex_parameteriv(GLenum target, GLenum name, const GLint *values) {
+    if (name != TEXTURE_SRGB_DECODE) gl4es_tex_parameteriv(target, name, values);
 }
 
 // Références directes de gl.c, que gl4es n'exporte pas sous ces noms.
@@ -165,6 +182,7 @@ void *rt_host_gl_symbol(void *library, const char *name) {
         {"glWaitSync", (void *)wait_sync}, {"glDeleteSync", (void *)delete_sync},
         {"glGetSynciv", (void *)get_synciv}, {"glGetString", (void *)get_string},
         {"glCheckFramebufferStatus", (void *)check_framebuffer_status},
+        {"glTexParameteri", (void *)tex_parameteri}, {"glTexParameteriv", (void *)tex_parameteriv},
         {"glCheckFramebufferStatusEXT", (void *)check_framebuffer_status},
     };
     for (size_t i = 0; i < sizeof(extras) / sizeof(*extras); ++i) {
