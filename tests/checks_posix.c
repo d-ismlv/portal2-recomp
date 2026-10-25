@@ -417,8 +417,8 @@ RT_CHECK(process_children_and_linux_wait_status) {
     pid_t exiting = fork();
     if (!exiting) {
         close(fds[0]); exit_pipe = fds[1];
-        size_t before = rt_atexit_count();
-        if (before) _exit(99);
+        // D'autres checks du même processus ont pu enregistrer des handlers.
+        for (size_t i = rt_atexit_count(); i--;) rt_atexit_clear(i);
         call("__cxa_atexit", 3, rt_dynamic_import("test_exit_handler1"), '1', 0);
         call("__cxa_atexit", 3, rt_dynamic_import("test_exit_handler2"), '2', 0);
         call("exit", 1, 9);
@@ -430,6 +430,24 @@ RT_CHECK(process_children_and_linux_wait_status) {
     close(fds[0]);
     int host_status; assert(waitpid(exiting, &host_status, 0) == exiting);
     assert(WIFEXITED(host_status) && WEXITSTATUS(host_status) == 9 && !strcmp(order, "231"));
+    // Un handler déjà exécuté par __cxa_finalize (dlclose) n'est pas rappelé par exit.
+    assert(!pipe(fds));
+    exiting = fork();
+    if (!exiting) {
+        close(fds[0]); exit_pipe = fds[1];
+        for (size_t i = rt_atexit_count(); i--;) rt_atexit_clear(i);
+        call("__cxa_atexit", 3, rt_dynamic_import("test_exit_handler1"), '1', 0);
+        call("__cxa_atexit", 3, rt_dynamic_import("test_exit_handler4"), '4', 0x1234);
+        call("__cxa_finalize", 1, 0x1234);
+        call("exit", 1, 7);
+        _exit(98);
+    }
+    close(fds[1]);
+    memset(order, 0, sizeof(order)); got = 0;
+    while ((n = read(fds[0], order + got, sizeof(order) - 1 - (size_t)got)) > 0) got += n;
+    close(fds[0]);
+    assert(waitpid(exiting, &host_status, 0) == exiting);
+    assert(WIFEXITED(host_status) && WEXITSTATUS(host_status) == 7 && !strcmp(order, "41"));
 }
 
 RT_CHECK(posix_guest_symlinks_never_reach_original_copy) {

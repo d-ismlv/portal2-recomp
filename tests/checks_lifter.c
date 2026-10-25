@@ -306,6 +306,9 @@ RT_CHECK(lifter_libc_start_main) {
     assert(pid >= 0);
     if (!pid) {
         CPU c; rt_cpu_reset(&c);
+        // Le vrai shim exit (process.c) peut passer avant child_exit : vider les
+        // handlers atexit laissés par d'autres checks de ce processus.
+        for (size_t i = rt_atexit_count(); i--;) rt_atexit_clear(i);
         rt_shim(&c, "__lifter_child");
         CALL("__libc_start_main", lifter_entry("lf_main"), 1, IN + 0xd10, lifter_entry("lf_start_init"), 0, 0, 0);
         _exit(99);                                          // __libc_start_main must not return

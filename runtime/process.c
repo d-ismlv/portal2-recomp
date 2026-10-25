@@ -52,25 +52,22 @@ uint32_t rt_linux_wait_status(int status) {
 
 // Les handlers __cxa_atexit invités s'exécutent du plus récent au plus ancien,
 // y compris ceux enregistrés pendant l'exécution des autres (comme glibc).
+// Chacun est effacé avant son appel : un handler déjà exécuté par
+// __cxa_finalize (dlclose) n'est pas rappelé. Puis les destructeurs des
+// modules (DT_FINI_ARRAY/DT_FINI), comme _dl_fini.
 static void run_guest_atexit(CPU *c) {
-    unsigned char *done = NULL; size_t known = 0;
     for (;;) {
-        size_t count = rt_atexit_count();
-        if (count > known) {
-            unsigned char *grown = realloc(done, count);
-            if (!grown) rt_trap(c, c->eip, "cannot track guest exit handlers");
-            memset(grown + known, 0, count - known);
-            done = grown; known = count;
+        size_t i = rt_atexit_count();
+        uint32_t function = 0, argument = 0, dso = 0;
+        while (i--) {
+            if (rt_atexit_get(i, &function, &argument, &dso)) rt_trap(c, c->eip, "atexit table changed");
+            if (function) break;
         }
-        size_t index = count;
-        while (index && done[index - 1]) --index;
-        if (!index) break;
-        done[index - 1] = 1;
-        uint32_t function, argument, dso;
-        if (rt_atexit_get(index - 1, &function, &argument, &dso)) break;
+        if (i == (size_t)-1) break;
+        rt_atexit_clear(i);
         rt_invoke(c, function, &argument, 1);
     }
-    free(done);
+    rt_finalize_modules(c);
 }
 
 // Copie une liste argv invitée terminée par NULL (au plus 65536 entrées).
