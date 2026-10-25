@@ -152,15 +152,32 @@ static int join(char out[PATH_MAX],const char *root,const char *relative) {
 }
 int rt_path_overlay(const char *relative,char out[PATH_MAX]) { return join(out,user_root,relative); }
 int rt_path_absolute(const char *path,char out[PATH_MAX]) { return absolute_path(path,out); }
+static int join(char out[PATH_MAX],const char *root,const char *relative);
+// Greffon Miles de bin/linux32 traduit d'avance (pe.c) : visible seulement si
+// le fichier de la copie du jeu est exactement celui qui a été traduit.
+static int translated_plugin(const char *relative) {
+    static const char prefix[]="bin/linux32/";
+    if(strncasecmp(relative,prefix,sizeof(prefix)-1))return 0;
+    const char *name=relative+sizeof(prefix)-1;
+    if(!*name || strchr(name,'/'))return 0;
+    const RtPeImage *image=rt_pe_image_named(name);
+    char host[PATH_MAX];
+    if(!image || !game_root[0] || join(host,game_root,relative))return 0;
+    return rt_pe_file_matches(image,host);
+}
 // La copie du jeu est l'installation Windows : ses binaires (DLL, EXE, greffons
 // Miles .asi/.flt) n'existent pas dans une installation Linux et ne doivent pas
-// être vus par le jeu Linux (Miles chargeait mssmp3.asi, un greffon PE).
-int rt_path_windows_binary(const char *name) {
-    const char *base=strrchr(name,'/'); base=base?base+1:name;
+// être vus par le jeu Linux (Miles chargeait mssmp3.asi, un greffon PE, et
+// sautait dans son code non traduit). Exception : les greffons de bin/linux32
+// traduits d'avance, que Miles charge comme sous Linux. `relative` est relatif
+// à la racine du jeu.
+int rt_path_windows_binary(const char *relative) {
+    const char *base=strrchr(relative,'/'); base=base?base+1:relative;
     const char *dot=strrchr(base,'.');
     if(!dot)return 0;
     static const char *const ext[]={".dll",".exe",".asi",".flt",".pdb",".sys"};
-    for(size_t i=0;i<sizeof(ext)/sizeof(*ext);++i)if(!strcasecmp(dot,ext[i]))return 1;
+    for(size_t i=0;i<sizeof(ext)/sizeof(*ext);++i)
+        if(!strcasecmp(dot,ext[i]))return !translated_plugin(relative);
     return 0;
 }
 int rt_path_is_game_source(const char *host) { return game_root[0] && within(host,game_root); }

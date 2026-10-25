@@ -415,3 +415,29 @@ static inline int rt_route_call(const RtShimRoute *route, CPU *c, const char *na
     return route->handler ? route->handler(c, name, route->data) : route->provider(c, name);
 }
 void rt_futex_destroy(void);
+
+// Greffons PE traduits d'avance (bin/linux32/*.asi chargés par libMiles,
+// tools/lift.py generate_pe). Miles projette l'image à une base choisie à
+// l'exécution et applique ses relocations ; le code traduit est indexé par RVA
+// et lit `delta` (base réelle - ImageBase, pour la vue écrivable où Miles
+// relocalise les données et pour la vue exécutable). Au premier transfert vers une
+// adresse non traduite, rt_dispatch demande à rt_pe_lookup si elle appartient
+// à une image connue : les octets de ses sections de code doivent être ceux du
+// fichier, relocalisations comprises pour ce delta, sinon refus (piège).
+typedef struct { uint32_t rva, size; const uint8_t *bytes; } RtPeSection;
+typedef struct {
+    const char *name;                 // nom du fichier (« mssmp3.asi »)
+    uint32_t image_base, image_size, section_alignment;
+    uint32_t file_size; uint64_t file_hash;   // FNV-1a 64 du fichier traduit
+    const RtPeSection *sections; uint32_t section_count;   // sections de code
+    // RVA HIGHLOW dans le code, triées ; bit 31 : la valeur désigne .text.
+    const uint32_t *relocations; uint32_t relocation_count;
+    const uint32_t *function_rvas; const gfn *functions; uint32_t function_count;  // triées
+    uint32_t *delta;   // [0] vue écrivable (données), [1] vue exécutable (code) : base - ImageBase
+} RtPeImage;
+void rt_pe_register_image(const RtPeImage *image);   // constructeur du code généré
+gfn rt_pe_lookup(uint32_t target);                   // NULL : pas une fonction traduite d'une image reconnue
+void rt_pe_forget(uint32_t address, uint64_t length); // munmap : images projetées dans la plage oubliées
+const RtPeImage *rt_pe_image_named(const char *name);  // image traduite de ce nom de fichier, NULL sinon
+uint64_t rt_pe_hash(const uint8_t *data, size_t size);
+int rt_pe_file_matches(const RtPeImage *image, const char *host_path);  // fichier identique au traduit

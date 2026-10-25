@@ -33,9 +33,26 @@ class Unsupported(ValueError):
     pass
 
 
+# Greffons PE (generate_pe) : un mot couvert par une relocation de base est
+# marqué `@0x<valeur au ImageBase préféré>` dans le texte désassemblé ; il vaut
+# `valeur + d_` à l'exécution. libMiles projette l'image deux fois (vue
+# écrivable et vue exécutable d'un même fichier) : une valeur qui désigne
+# .text est relocalisée vers la vue exécutable (`@c0x...`, `valeur + x_`), les
+# autres vers la vue écrivable (d_). Les adresses de code émises (appels,
+# retours, tables de switch) utilisent x_. Voir lift() et runtime/pe.c.
+RELOCATED = 'd_'
+CODE_RELOCATED = 'x_'
+
+
+def relocated(token):
+    """`@0x...` (donnée) ou `@c0x...` (code) -> expression C relogée."""
+    code = token.startswith('@c')
+    return f'({int(token[2 if code else 1:], 0):#x}u + {CODE_RELOCATED if code else RELOCATED})'
+
+
 def address(expr):
     """Accept only sums/differences of registers, scaled registers and constants."""
-    tokens = re.findall(r'0x[0-9a-f]+|[a-z]+|[0-9]+|[-+*]', expr)
+    tokens = re.findall(r'@c?0x[0-9a-f]+|0x[0-9a-f]+|[a-z]+|[0-9]+|[-+*]', expr)
     if ''.join(tokens) != re.sub(r'\s+', '', expr):
         raise Unsupported(f'address expression {expr!r}')
     parts = re.split(r'(?=[+-])', ''.join(tokens))
@@ -51,6 +68,8 @@ def address(expr):
                 values.append('c->' + atom)
             elif atom == 'eiz':
                 values.append('0u')
+            elif atom.startswith('@') and sign == '+' and len(factors) == 1:
+                values.append(relocated(atom))
             else:
                 try:
                     values.append(f'{int(atom, 0):#x}u')
@@ -75,6 +94,10 @@ class Operand:
             self.addr = f'(uint32_t)(rt_thread_pointer(c) + {self.effective_addr})' if m[2] == 'gs' else self.effective_addr
             self.width = {None: None, 'byte': 8, 'word': 16, 'dword': 32, 'qword': 64, 'xmmword': 128}[m[1]]
         self.imm = None
+        self.relocated = None
+        if not self.reg and self.addr is None and re.fullmatch(r'@c?0x[0-9a-f]+', text):
+            self.relocated = text   # immédiat relocalisé : pas une constante
+            return
         if not self.reg and self.addr is None:
             try:
                 self.imm = int(text, 0) & 0xffffffff
@@ -89,6 +112,8 @@ class Operand:
             return f'{"RX" if self.width == 128 else "R" + str(self.width)}({self.addr})'
         if self.imm is not None:
             return f'{self.imm:#x}u'
+        if self.relocated is not None:
+            return f'(uint32_t){relocated(self.relocated)}'
         raise Unsupported(self.text)
 
     def write(self, value):
@@ -104,9 +129,10 @@ class Operand:
         raise Unsupported(f'destination {self.text!r}')
 
 
-def disassemble(image, base, objdump):
+def disassemble(image, base, objdump, start=None, stop=None):
+    window = [f'--start-address={start:#x}', f'--stop-address={stop:#x}'] if start is not None else []
     result = subprocess.run([objdump, '-d', '-z', '--x86-asm-syntax=intel',
-                             f'--adjust-vma={base:#x}', str(image)],
+                             f'--adjust-vma={base:#x}', *window, str(image)],
                             check=True, capture_output=True, text=True)
     insns = {}
     for line in result.stdout.splitlines():
@@ -170,13 +196,20 @@ def string_instruction(op, args, nxt):
     return text + f' goto L{nxt:x};', [nxt]
 
 
-def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
+def code_address(address, rebase):
+    """Adresse invitée d'un point de code : constante, ou relative au module
+    (greffons PE chargés à une base choisie à l'exécution)."""
+    return f'({address:#x}u + {CODE_RELOCATED})' if rebase else f'{address:#x}u'
+
+
+def translate(pc, insn, entries=frozenset(), callees=None, cases=None, rebase=False):
     if callees is None:
         callees = set()
     nxt, op, args = insn
     end = f'goto L{nxt:x};'
+    here, after = code_address(pc, rebase), code_address(nxt, rebase)
     if op in ('int3', 'ud2', 'hlt'):
-        return f'rt_trap(c, {pc:#x}u, "{op}");', []
+        return f'rt_trap(c, {here}, "{op}");', []
     string = string_instruction(op, args, nxt)
     if string is not None:
         return string
@@ -194,7 +227,7 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
     if op == 'call':
         target = Operand(args)
         if target.imm == nxt:
-            return f'PUSH(c, {nxt:#x}u); {end}', [nxt]
+            return f'PUSH(c, {after}); {end}', [nxt]
         if target.imm is not None:
             callees.add(target.imm)
         elif target.width != 32:
@@ -202,12 +235,12 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
         if target.imm is not None:
             # Appel direct vers une fonction traduite (link_direct remplace
             # par rt_call une cible qui ne l'est pas, par ex. un import).
-            call = f'rt_call_fn(c, fn_{target.imm:x}, {target.imm:#x}u, {nxt:#x}u);'
+            call = f'rt_call_fn(c, fn_{target.imm:x}, {code_address(target.imm, rebase)}, {after});'
         else:
-            call = f'a = {target.read()}; c->flags = f; rt_call_any(c, a, {nxt:#x}u);'
+            call = f'a = {target.read()}; c->flags = f; rt_call_any(c, a, {after});'
         if target.imm is not None:
             call = 'c->flags = f; ' + call
-        return f'{call} if (c->eip != {nxt:#x}u) goto resume; f = c->flags; {end}', [nxt]
+        return f'{call} if (c->eip != {after}) goto resume; f = c->flags; {end}', [nxt]
     if op == 'jmp' or (op.startswith('j') and op[1:] in CC):
         target = Operand(args)
         if target.imm is None:
@@ -220,12 +253,13 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
                 local = sorted(t for t in set(cases) if t not in entries)
                 callees.update(t for t in cases if t in entries)
                 labels = ' '.join(f'case {t:#x}u: goto L{t:x};' for t in local)
-                return (f'a = {target.read()}; rt_poll(); switch (a) {{ {labels} '
+                selector = f'(uint32_t)(a - {CODE_RELOCATED})' if rebase else 'a'
+                return (f'a = {target.read()}; rt_poll(); switch ({selector}) {{ {labels} '
                         'default: c->flags = f; rt_jump_any(c, a); return; }'), local
             return f'a = {target.read()}; c->flags = f; rt_jump_any(c, a); return;', []
         if target.imm in entries:
             callees.add(target.imm)
-            branch = f'c->flags = f; rt_jump_fn(c, fn_{target.imm:x}, {target.imm:#x}u); return;'
+            branch = f'c->flags = f; rt_jump_fn(c, fn_{target.imm:x}, {code_address(target.imm, rebase)}); return;'
             successors = []
         else:
             branch = ('rt_poll(); ' if target.imm <= pc else '') + f'goto L{target.imm:x};'
@@ -287,7 +321,7 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
                     'c->edx = (c->edx & 0xffff0000u) | (r >> 16); '
                     + ('f.cf = f.of = (r >> 16) != 0;' if op == 'mul' else 'f.cf = f.of = r != sx(r & 0xffffu, 16);'))
     elif op in ('div', 'idiv') and len(operands) == 1 and operands[0].width in (8, 16):
-        code = f'rt_div_narrow(c, {operands[0].read()}, {operands[0].width}, {int(op == "idiv")}, {pc:#x}u);'
+        code = f'rt_div_narrow(c, {operands[0].read()}, {operands[0].width}, {int(op == "idiv")}, {here});'
     elif op == 'cwde' and not operands:
         code = 'c->eax = sx(c->eax & 0xffffu, 16);'
     elif op == 'fxsave' and len(operands) == 1 and operands[0].addr:
@@ -393,7 +427,7 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
     elif op.startswith('set') and op[3:] in CC and len(operands) == 1:
         code = operands[0].write(f'cond(&f, CC_{CC[op[3:]]})')
     elif op in ('div', 'idiv') and len(operands) == 1 and operands[0].width == 32:
-        code = f'rt_div32(c, {operands[0].read()}, {int(op == "idiv")}, {pc:#x}u);'
+        code = f'rt_div32(c, {operands[0].read()}, {int(op == "idiv")}, {here});'
     elif op == 'mul' and len(operands) == 1 and operands[0].width == 32:
         code = (f'{{ uint64_t value = (uint64_t)c->eax * {operands[0].read()}; '
                 'c->eax = (uint32_t)value; c->edx = (uint32_t)(value >> 32); f.cf = f.of = c->edx != 0; }')
@@ -432,9 +466,11 @@ class _Without:
         return address != self.own and address in self.entries
 
 
-def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=None):
+def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=None, delta=None):
     """Translate one function. `setjmp(target)` tells whether a direct call
-    target is setjmp; its return sites become resume points for longjmp."""
+    target is setjmp; its return sites become resume points for longjmp.
+    `delta` (expression C) : code relogeable d'un greffon PE, chaque adresse
+    de code et chaque valeur relocalisée vaut alors adresse + delta."""
     pending = [entry]
     translated = {}
     resume = set()
@@ -447,7 +483,7 @@ def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=No
             raise Unsupported(f'no instruction at {pc:#x}')
         try:
             code, successors = translate(pc, insns[pc], others, callees,
-                                         tables(pc) if tables else None)
+                                         tables(pc) if tables else None, delta is not None)
         except (Unsupported, IndexError) as exc:
             raise Unsupported(f'{pc:#x}: {exc}') from exc
         translated[pc] = code
@@ -465,11 +501,17 @@ def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=No
     # registres hôtes entre les accès mémoire (voir RT_MEM dans rt.h).
     lines = ['#undef RT_MEM', '#define RT_MEM mem_', f'static void fn_{entry:x}(CPU *restrict c) {{',
              '    uint8_t *const mem_ = M; FL f = c->flags; uint32_t a, b, r; int64_t product;',
-             '    (void)mem_; (void)f; (void)a; (void)b; (void)r; (void)product;', f'    goto L{entry:x};']
+             '    (void)mem_; (void)f; (void)a; (void)b; (void)r; (void)product;']
+    if delta is not None:
+        lines.append(f'    const uint32_t {RELOCATED} = {delta}[0], {CODE_RELOCATED} = {delta}[1]; '
+                     f'(void){RELOCATED}; (void){CODE_RELOCATED};')
+    lines.append(f'    goto L{entry:x};')
     lines.extend(f'L{pc:x}: {code}' for pc, code in sorted(translated.items()))
     if any('goto resume;' in code for code in translated.values()):
         # A call returned elsewhere (non-local transfer): resume here when the
         # target belongs to this function, otherwise drop this host frame.
+        if resume and delta is not None:
+            raise Unsupported('setjmp resume points in relocatable code')
         cases = ' '.join(f'case {pc:#x}u: goto L{pc:x};' for pc in sorted(resume))
         lines.append(f'resume: f = c->flags; switch (c->eip) {{ {cases} default: return; }}' if resume
                      else 'resume: return;')
@@ -1238,6 +1280,254 @@ def dispatch_source(layout, selected, imports, functions):
     code.extend(['return 0; }', ''])
     code.append(registry.generate(layout))
     return '\n'.join(code)
+
+
+# ---------------------------------------------------------------------------
+# Greffons PE de libMiles (bin/linux32/*.asi) : code relogeable, indexé par RVA.
+#
+# libMiles charge ces DLL Windows avec son propre chargeur, à une base choisie
+# à l'exécution (mmap), puis appelle leurs fonctions par pointeurs. Le code est
+# traduit ici au ImageBase préféré du fichier ; chaque mot couvert par une
+# relocation de base est marqué `@valeur` (voir address/Operand) et vaut
+# `valeur + d_` à l'exécution, comme toute adresse de code émise (appels,
+# adresses de retour, tables de switch). runtime/pe.c reconnaît l'image en
+# mémoire, fixe d_ et aiguille par RVA.
+
+_TOKEN = re.compile(r'([+-]\s*)?\b(0x[0-9a-f]+)\b')
+
+
+def mark_relocations(insn, words, image):
+    """Instruction `insn` dont les octets couvrent les mots relocalisés `words`
+    (adresses au ImageBase préféré). Chaque mot doit apparaître comme un
+    opérand (immédiat ou déplacement) de même valeur ; sinon l'instruction est
+    refusée (`unrelocatable`), jamais traduite avec une constante fausse."""
+    pc_end, op, args = insn
+    values = [image.u32(w - image.image_base) for w in words]
+    tokens = [(m, ((-int(m[2], 16)) if m[1] and m[1].strip() == '-' else int(m[2], 16)) & 0xffffffff)
+              for m in _TOKEN.finditer(args)]
+    for value in set(values):
+        if sum(v == value for _, v in tokens) != values.count(value):
+            return (pc_end, 'unrelocatable', f'{op} {args}')
+    out, last = [], 0
+    for m, value in tokens:
+        if value in values:
+            out.append(args[last:m.start()])
+            out.append(('+ ' if m[1] else '') + ('@c' if image.code_target(value) else '@') + f'{value:#x}')
+            last = m.end()
+    out.append(args[last:])
+    return (pc_end, op, ''.join(out))
+
+
+class PeInstructions(dict):
+    """Instructions d'un greffon PE, relocalisations marquées. Le code des
+    DLL MSVC contient des données (tables de switch) : le désassemblage
+    linéaire peut s'y désynchroniser. Toute adresse de code demandée qui n'est
+    pas une frontière connue est donc redécodée à partir d'elle ; le décodage
+    d'une adresse ne dépend que de ses octets, l'union des décodages reste
+    cohérente. `raw` garde le texte non marqué (reconnaissance des tables)."""
+    WINDOW = 0x800
+
+    def __init__(self, image, objdump):
+        super().__init__()
+        self.image, self.objdump = image, objdump
+        self.raw, self.previous, self.decoded_windows = {}, {}, set()
+        self.relocated = sorted(image.image_base + r for r in image.relocs)
+        self._add(disassemble(image.path, 0, objdump))
+
+    def _add(self, decoded):
+        import bisect
+        for pc, insn in decoded.items():
+            if pc in self.raw or not self.image.executable(pc):
+                continue
+            self.raw[pc] = insn
+            self.previous.setdefault(insn[0], pc)
+            nxt = insn[0]
+            low = bisect.bisect_left(self.relocated, pc - 3)
+            high = bisect.bisect_left(self.relocated, nxt)
+            words = self.relocated[low:high]
+            if not words:
+                dict.__setitem__(self, pc, insn)
+            elif any(w <= pc or w + 4 > nxt for w in words):
+                dict.__setitem__(self, pc, (nxt, 'unrelocatable', f'{insn[1]} {insn[2]}'))
+            else:
+                dict.__setitem__(self, pc, mark_relocations(insn, words, self.image))
+
+    def _fault(self, pc):
+        if dict.__contains__(self, pc) or pc in self.decoded_windows or not self.image.executable(pc):
+            return False
+        self.decoded_windows.add(pc)
+        rva = pc - self.image.image_base
+        section = next(x for x in self.image.executable_sections() if x['rva'] <= rva < x['rva'] + x['size'])
+        stop = min(pc + self.WINDOW, self.image.image_base + section['rva'] + section['size'])
+        self._add(disassemble(self.image.path, 0, self.objdump, pc, stop))
+        return True
+
+    def __contains__(self, pc):
+        return dict.__contains__(self, pc) or (self._fault(pc) and dict.__contains__(self, pc))
+
+    def __getitem__(self, pc):
+        if not dict.__contains__(self, pc):
+            self._fault(pc)
+        return dict.__getitem__(self, pc)
+
+    def get(self, pc, default=None):
+        return self[pc] if pc in self else default
+
+
+class _RawView:
+    """Vue non marquée de PeInstructions pour JumpTables (même décodage paresseux)."""
+    def __init__(self, insns):
+        self.insns = insns
+        self.previous = insns.previous
+
+    def __contains__(self, pc):
+        return pc in self.insns
+
+    def __getitem__(self, pc):
+        self.insns[pc]
+        return self.insns.raw[pc]
+
+    def __len__(self):
+        return len(self.insns.raw)
+
+    def items(self):
+        return self.insns.raw.items()
+
+
+class PeTables(JumpTables):
+    """Tables de switch MSVC (`jmp [4*I + T]`, T relocalisé) lues dans l'image
+    au ImageBase préféré ; le code généré compare la cible calculée à
+    l'exécution, moins d_, à ces valeurs."""
+
+    def __init__(self, image, insns):
+        super().__init__({'modules': []}, _RawView(insns))
+        self.image = image
+
+    def module(self, address):
+        return self.image if 0 <= address - self.image.image_base < self.image.image_size else None
+
+    def read32(self, address):
+        if self.module(address) is None or self.module(address + 3) is None:
+            return None
+        return self.image.u32(address - self.image.image_base)
+
+
+def pe_pointer_roots(image, insns):
+    """Valeurs relocalisées qui désignent du code et servent de pointeur de
+    fonction : stockées hors du code, immédiates d'une instruction, ou entrées
+    de table dans le code (cibles de switch). Une valeur qui n'apparaît que
+    comme déplacement mémoire (`[4*eax + T]`, base de table) n'en est pas une."""
+    import bisect
+    starts = sorted(insns.raw)
+    roots = set()
+    for location, value in image.code_pointers():
+        address = image.image_base + location
+        if not image.executable(address):
+            roots.add(value)
+            continue
+        covering = []
+        i = bisect.bisect_right(starts, address) - 1
+        while i >= 0 and address - starts[i] < 16:
+            pc = starts[i]
+            nxt, _, args = insns.raw[pc]
+            if pc < address and address + 4 <= nxt:
+                covering.append(args)
+            i -= 1
+        token = f'{value:#x}'
+        bracketed = lambda args: any(token in part for part in re.findall(r'\[[^\]]*\]', args))
+        if not covering or not all(bracketed(args) for args in covering):
+            roots.add(value)
+    return roots
+
+
+def generate_pe(image, tag, objdump='objdump', log=print):
+    """C relogeable d'un greffon PE et son descripteur RtPeImage (runtime/pe.c).
+    Renvoie (source, statistiques). Une fonction non traduisible n'est pas
+    émise : si Miles l'appelle, l'aiguillage piège (« not recompiled »)."""
+    if not re.fullmatch(r'[a-z0-9_]+', tag):
+        raise Unsupported(f'invalid plugin tag {tag!r}')
+    for rva in image.relocs:
+        sections = [x for x in image.executable_sections() if x['rva'] < rva + 4 and rva < x['rva'] + x['size']]
+        if sections and not (sections[0]['rva'] <= rva and rva + 4 <= sections[0]['rva'] + sections[0]['size']):
+            raise Unsupported(f'{image.name}: relocation {rva:#x} straddles a code section boundary')
+    insns = PeInstructions(image, objdump)
+    tables = PeTables(image, insns)
+    base = image.image_base
+    named = {base + rva for rva in image.exports.values()}
+    if image.entry_rva:
+        named.add(base + image.entry_rva)
+    named = {a for a in named if image.executable(a)}
+    roots = named | {a for a in pe_pointer_roots(image, insns) if image.executable(a)}
+    # Frontières de fonction : exportations, point d'entrée et cibles d'appels
+    # directs (point fixe) ; les pointeurs de code sont des racines compilées
+    # mais ne coupent pas une fonction (comme data_ptrs des modules ELF).
+    boundaries, pending, seen = set(named), sorted(roots), set()
+    while pending:
+        entry = pending.pop()
+        if entry in seen:
+            continue
+        seen.add(entry)
+        callees = set()
+        scan(entry, insns, boundaries, callees, tables=tables)
+        for target in callees:
+            if image.executable(target) and target not in boundaries:
+                boundaries.add(target)
+                pending.append(target)
+    functions, failures, pending = {}, {}, sorted(roots | boundaries, reverse=True)
+    while pending:
+        entry = pending.pop()
+        if entry in functions or entry in failures:
+            continue
+        callees = set()
+        try:
+            functions[entry] = lift(entry, insns, boundaries, callees, tables, None, 'pe_delta')
+        except Unsupported as exc:
+            failures[entry] = str(exc)
+            continue
+        pending.extend(t for t in callees if image.executable(t))
+    compiled = frozenset(functions)
+    name = lambda address: f'pe_{tag}_{address:x}'
+    rename = lambda body: re.sub(r'\bfn_([0-9a-f]+)\b', lambda m: name(int(m[1], 16)), body)
+    lines = [f'/* Generated by tools/lift.py from {image.name}. Do not edit. */', '#include "rt.h"',
+             'static uint32_t pe_delta[2];   // vues écrivable et exécutable - ImageBase, fixés par rt_pe_lookup']
+    lines += [f'static void {name(a)}(CPU *);' for a in sorted(compiled)]
+    lines += [rename(link_direct(functions[a][0], compiled)[0]) for a in sorted(compiled)]
+    code_sections = image.executable_sections()
+    for i, section in enumerate(code_sections):
+        data = image.mapped[section['rva']:section['rva'] + section['size']]
+        lines.append(f'static const uint8_t section_{i}[{len(data)}] = {{')
+        lines += [','.join(str(b) for b in data[j:j + 32]) + ',' for j in range(0, len(data), 32)]
+        lines.append('};')
+    lines.append('static const RtPeSection sections[] = {')
+    lines += [f'{{{s["rva"]:#x}u, {s["size"]:#x}u, section_{i}}},' for i, s in enumerate(code_sections)]
+    lines.append('};')
+    code_relocs = [r for r in image.relocs if image.executable(base + r)]
+    lines.append(f'static const uint32_t relocations[{max(1, len(code_relocs))}] = {{')
+    # Bit 31 : la valeur désigne .text (relocalisée vers la vue exécutable).
+    flagged = [r | (0x80000000 if image.code_target(image.u32(r)) else 0) for r in code_relocs]
+    lines += [', '.join(f'{r:#x}u' for r in flagged[j:j + 12]) + ',' for j in range(0, len(flagged), 12)]
+    lines += ['};' if code_relocs else '0};']
+    ordered = sorted(compiled)
+    lines.append(f'static const uint32_t function_rvas[{max(1, len(ordered))}] = {{')
+    lines += [', '.join(f'{a - base:#x}u' for a in ordered[j:j + 12]) + ',' for j in range(0, len(ordered), 12)]
+    lines += ['};' if ordered else '0};']
+    lines.append(f'static const gfn functions[{max(1, len(ordered))}] = {{')
+    lines += [', '.join(name(a) for a in ordered[j:j + 6]) + ',' for j in range(0, len(ordered), 6)]
+    lines += ['};' if ordered else '0};']
+    from peprep import fnv1a64
+    lines += [f'static const RtPeImage image = {{{json.dumps(image.name)}, {base:#x}u, {image.image_size:#x}u, '
+              f'{image.section_alignment:#x}u, {len(image.data)}u, {fnv1a64(image.data):#x}ull, sections, '
+              f'{len(code_sections)}u, relocations, {len(code_relocs)}u, function_rvas, functions, '
+              f'{len(ordered)}u, pe_delta}};',
+              '__attribute__((constructor)) static void pe_register(void) { rt_pe_register_image(&image); }', '']
+    stats = dict(name=image.name, functions=len(compiled), instructions=sum(n for _, n in functions.values()),
+                 roots=len(roots), boundaries=len(boundaries), relocations=len(code_relocs),
+                 not_compiled={f'{a - base:#x}': why for a, why in sorted(failures.items())},
+                 named_not_compiled=sorted(f'{a - base:#x}' for a in named if a in failures))
+    log(f'{image.name}: {stats["functions"]} functions, {stats["instructions"]} instructions, '
+        f'{len(failures)} not compiled' + (f' (exported/entry: {", ".join(stats["named_not_compiled"])})'
+                                           if stats['named_not_compiled'] else ''))
+    return '\n'.join(lines), stats
 
 
 def main():
