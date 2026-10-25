@@ -111,14 +111,85 @@ Il faut le même marshalling des vtables, mais vers les objets C++ ARM64 natifs
 **Exclu** : renvoyer de fausses interfaces ou forcer `BIsSubscribed`. Ce serait un
 émulateur Steam, interdit par les règles du projet.
 
-## 6. À demander à l'utilisateur
+## 6. Décisions (validées par l'utilisateur)
 
-1. Valider l'option A et l'usage de la `libsteam_api.dylib` officielle de
-   `work/downloads/steamworks`, chargée par chemin et jamais versionnée. Son chemin
-   irait dans `config/local.json`.
-2. Accepter que le jeu soit lancé avec `SteamAppId=620`. C'est le mécanisme
-   documenté de Valve, et le client vérifie toujours la possession. Sinon
-   `RestartAppIfNecessary` déclencherait `steam://run/620`.
-3. Laisser le client Steam lancé et connecté pendant les essais, et accepter que le
-   profil affiche « en jeu : Portal 2 ».
-4. Périmètre voulu : solo seul (4 à 7 jours) ou aussi coop/workshop (+3 à 5 jours).
+Option A ; dylib officielle chargée par chemin, jamais versionnée ; essais avec
+`SteamAppId=620` acceptés ; client Steam lancé et connecté par l'utilisateur ;
+solo d'abord, coop/workshop/navigateur de serveurs ensuite.
+
+## 7. Implémentation (branche `feat/steam-bridge`)
+
+**Fichiers.** `runtime/steam.c` (imports, mandataires, callbacks), `runtime/steam.h`,
+`runtime/steam_generated.c` (généré par `tools/gen_steam.py`, ne pas modifier),
+`tests/checks_steam.c`, `tools/steam_callsites.py` (mesure statique).
+
+**Chemin de la dylib** : variable `P2_STEAM_API_DYLIB`, sinon clé `steam_api_dylib` de
+`config/local.json` (lue relativement à l'exécutable : `<exe>/../config/local.json`), sinon
+`../work/downloads/steamworks/steam_api.bundle/Contents/MacOS/libsteam_api.dylib`.
+Dylib introuvable au premier appel Steam : `rt_trap` explicite (pas de faux `false`).
+`SteamAPI_InitSafe` pose `SteamAppId`/`SteamGameId` depuis la clé `steam_appid` de
+`config/local.json` s'ils sont absents de l'environnement.
+
+**Résolution des imports** (`tools/elfprep.py`, 5 lignes). `libsteam_api.so` invité **ne peut
+pas** être retiré : il embarque le libsupc++ (`__cxa_guard_*`, `__cxa_throw`,
+`__gxx_personality_v0`, vtables `typeinfo`) auquel se lient presque tous les modules. Seuls ses
+exports `SteamAPI_*`, `SteamInternal_*`, `SteamGameServer_*` deviennent des imports hôtes. Sans
+cela, `libsteam_api_linux.so` (ancien SDK que personne ne charge) capterait ces noms. Ses
+références internes (`SteamAPI_Init`, `SteamAPI_IsSteamRunning`…) deviennent aussi des imports :
+sans shim, elles piègent si son code devait un jour les atteindre. Adresses des modules inchangées.
+
+**Imports (25).** Transmis à la dylib, sauf :
+- `SteamAPI_RunCallbacks` / `SteamGameServer_RunCallbacks` : pompe `SteamAPI_ManualDispatch_*`
+  (activé après un `InitSafe`/`GameServer_Init` réussi), sans ré-entrance ;
+- `SteamAPI_(Un)RegisterCallback/CallResult` : registre hôte des objets `CCallbackBase` invités ;
+  `RegisterCallback` pose `k_ECallbackFlagsRegistered` et `m_iCallback` comme la dylib ;
+- `SteamInternal_ContextInit` : un double hôte par bloc invité ; quand la vraie dylib appelle
+  son `pFn` (compteur d'init changé), on appelle le `pFn` invité sur le contexte invité ;
+- breakpad (`UseBreakpadCrashHandler`, `SetMiniDumpComment`, `WriteMiniDump`) : sans effet,
+  journalisé une fois, pour ne pas installer les gestionnaires de signaux de breakpad.
+
+**Interfaces.** Mandataire invité = `[vtable invitée][handle hôte]` ; chaque emplacement est
+`rt_dynamic_import("SteamUser021::GetSteamID")`. Emplacements : désassemblage ARM64 des fonctions
+flat de la dylib (`ldr x8,[x0]; ldr xN,[x8,#off]; br xN` → off/8, ABI Itanium identique en i386
+GCC) ; N donne aussi le nombre d'arguments entiers, comparé à la signature. Signatures :
+`NativeMethods.cs` de Steamworks.NET 20.1.0 (MIT) + type de retour des enveloppes C#
+(CSteamID/CGameID par valeur → pointeur caché et `ret 4`, chaînes → copie invitée internée,
+`GetISteam*` → mandataire). `ISteamController` (absent de Steamworks.NET) reprend les
+signatures homonymes d'`ISteamInput` (`Legacy_*`, `Init`/`RunFrame` sans argument), contrôlées
+par le nombre d'arguments. Tampons : pointeur suivi d'une taille (`cub*`, `cch*`…) ou tableaux de
+taille documentée (`STEAM_INPUT_MAX_*`). **721/772 méthodes** des 25 interfaces sont traduites ;
+les autres et les emplacements sans fonction flat (méthodes `DEPRECATED`) piègent avec leur nom,
+leur emplacement et la raison. `SteamGameCoordinator001` et `SteamGameStats001` (hors SDK) : si le
+client en rend un, mandataire opaque dont tous les emplacements piègent.
+
+Méthodes piégées notables : `ISteamMatchmakingServers` (16/17, objets réponse C++ invités —
+navigateur de serveurs), `SetWarningMessageHook` (pointeur de fonction invité), une partie
+d'`ISteamUGC`/`ISteamInventory`/`ISteamHTMLSurface` (tableaux de chaînes, structures),
+`ISteamNetworking::GetP2PSessionState`, `ISteamUser::GetAvailableVoice`.
+
+**Callbacks.** `GetNextCallback` → copie du `pubParam` en mémoire invitée → `Run(param)`
+(emplacement 0) ou, pour `SteamAPICallCompleted_t`, `GetAPICallResult` puis
+`Run(param, bIOFailure, hCall)` (emplacement 1). Avant chaque appel, `GetCallbackSizeBytes`
+(emplacement 2) de l'objet invité doit égaler la taille hôte, sinon `rt_trap` : protège contre
+une disposition divergente (pointeurs). Ordre des emplacements vérifié statiquement : 32 vtables
+`[code, code, mov eax,imm; ret]` dans `engine.so`.
+
+**Confidentialité.** `steamclient.dylib` écrit le SteamID64 sur stderr pendant l'init : stderr
+est capturé pendant `InitSafe`/`GameServer_Init` et tout SteamID64 est masqué (`XXXX…`).
+
+**Mesure.** `tools/steam_callsites.py` (borne basse : les contextes membres d'objets échappent
+à l'heuristique) trouve 13 couples (interface, méthode) — tous traduits. La mesure dynamique
+attend que le jeu dépasse l'arrêt SDL.
+
+**Tests** (`make test`, `make sanitize`) : table générée, mandataires, inscription des
+callbacks, masquage, et marshalling i386 complet à travers les vraies fonctions flat de la dylib
+vers des objets hôtes de test (CSteamID `ret 4`, `uint64` en edx:eax, chaînes, sorties,
+`float`, interface rendue). `P2_STEAM_TESTS=1 make test` (client lancé, sinon « skip ») :
+`SteamAPI_InitSafe` réel avec `SteamAppId=620`, `BLoggedOn`, `GetSteamID` (validé sans
+l'afficher), `GetAppID`=620, `BIsSubscribedApp(620)`, callback `UserStatsReceived_t` (20 octets)
+et résultat d'appel `GlobalAchievementPercentagesReady_t`, puis `SteamAPI_Shutdown`.
+
+**Reste.** Solo : mesurer dynamiquement dès que le jeu dépasse SDL ; traduire les méthodes qui
+piègent alors. Les appels Steam bloquants (IPC) gardent le verrou d'exécution invité.
+Coop/workshop/serveurs : mandataires inverses pour `ISteamMatchmaking*Response`, tableaux de
+chaînes UGC, `SetWarningMessageHook` (rappel invité).
