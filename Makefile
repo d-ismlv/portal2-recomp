@@ -1,0 +1,50 @@
+RUNTIME := $(sort $(wildcard runtime/*.c))
+HEADERS := $(sort $(wildcard runtime/*.h))
+PYTHON ?= python3
+CC = clang
+CFLAGS ?= -O2 -g -Wall -Wextra -Werror
+LIFT_FLAGS ?= --allow-unimplemented-imports
+INPUT_DIR ?= ../work/portal2-linux/bin
+PREP = build/prep
+EXPORTS = Plat_IsInBenchmarkMode Plat_SetBenchmarkMode AreAllAssertsDisabled SetAllAssertsDisabled UnitTestCount GetUnitTest EncodeBinaryToString DecodeBinaryFromString Plat_GetMemPageSize ZeroMemory Plat_Alloc Plat_Realloc Plat_Free Plat_DefaultAllocErrorFn UnitTestInstallTestCase LoggingSystem_GetChannelCount LoggingSystem_FindChannel libtier0.so:code:0x157a0 libtier0.so:code:0x15a50 libtier0.so:code:0x15620 libtier0.so:code:0x13dd0 libtier0.so:code:0x13e00 libtier0.so:code:0x13e30 libtier0.so:code:0x13e60 libtier0.so:init:dt libtier0.so:init:0 libtier0.so:init:1 libtier0.so:init:2 libtier0.so:init:3 libtier0.so:init:4 libtier0.so:init:5 libtier0.so:init:6 libtier0.so:init:7 libtier0.so:init:8 libtier0.so:init:9 libtier0.so:init:10 libtier0.so:init:11 libtier0.so:init:12 libtier0.so:init:13 GetCPUInformation
+
+.PHONY: all test clean
+all: build/tier0-smoke
+
+$(PREP)/layout.json: tools/elfprep.py $(INPUT_DIR)/libtier0.so $(INPUT_DIR)/libvstdlib.so
+	$(PYTHON) tools/elfprep.py --out $(PREP) $(INPUT_DIR)/libtier0.so@0x10000000 $(INPUT_DIR)/libvstdlib.so@0x11000000
+
+build/tier0.c: Makefile tools/lift.py tools/float_lift.py tools/registry.py $(PREP)/layout.json
+	$(PYTHON) tools/lift.py $(LIFT_FLAGS) --layout $(PREP)/layout.json --out $@ $(EXPORTS)
+
+build/tier0-smoke: build/tier0.c $(RUNTIME) $(HEADERS) tests/tier0_smoke.c
+	$(CC) $(CFLAGS) -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c -o $@
+
+build/abi-fixture.c: tests/generate_abi_fixture.py tools/lift.py tools/float_lift.py tools/registry.py
+	@mkdir -p build
+	$(PYTHON) tests/generate_abi_fixture.py $@
+
+build/abi-smoke: build/abi-fixture.c tests/abi_smoke.c tests/cpu_checks.h tests/vm_checks.h tests/filesystem_checks.h tests/thread_checks.h $(RUNTIME) $(HEADERS)
+	$(CC) $(CFLAGS) -Iruntime $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c -o $@
+
+test: build/tier0-smoke build/abi-smoke
+	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
+	./build/tier0-smoke $(PREP)
+	./build/abi-smoke
+
+clean:
+	rm -rf build
+
+.PHONY: progress sanitize
+progress: $(PREP)/layout.json
+	$(PYTHON) tools/progress.py --layout $(PREP)/layout.json --out build/progress.json
+
+build/tier0-smoke-ubsan: build/tier0.c $(RUNTIME) $(HEADERS) tests/tier0_smoke.c
+	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c -o $@
+
+build/abi-smoke-ubsan: build/abi-fixture.c $(RUNTIME) $(HEADERS) tests/abi_smoke.c tests/cpu_checks.h tests/vm_checks.h
+	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c -o $@
+
+sanitize: build/tier0-smoke-ubsan build/abi-smoke-ubsan
+	./build/tier0-smoke-ubsan $(PREP)
+	./build/abi-smoke-ubsan
