@@ -226,6 +226,12 @@ static const char *gl_attribute_name(uint32_t attribute) {
     return attribute < sizeof(names) / sizeof(*names) ? names[attribute] : "?";
 }
 
+static int hidden_windows(void) {
+    static int value = -1;
+    if (value < 0) { const char *e = getenv("P2_HIDDEN_WINDOWS"); value = e && *e && strcmp(e, "0"); }
+    return value;
+}
+
 static int sdl_video(CPU *c, const char *name) {
     if (strncmp(name, "SDL_", 4)) return 0;
     const char *n = name + 4;
@@ -246,17 +252,20 @@ static int sdl_video(CPU *c, const char *name) {
     // Fenêtres
     else if (!strcmp(n, "CreateWindow")) {
         require_main_thread(c, "SDL_CreateWindow must run on the macOS main thread");
+        // Mode diagnostic P2_HIDDEN_WINDOWS=1 : la fenêtre existe (contexte GL
+        // réel) mais n'est jamais montrée ; le jeu n'en voit aucune différence.
+        uint32_t flags = arg(c, 5) | (hidden_windows() ? SDL_WINDOW_HIDDEN : 0);
         SDL_Window *w = SDL_CreateWindow(guest_string(c, arg(c, 0)), (int)arg(c, 1), (int)arg(c, 2),
-                                         (int)arg(c, 3), (int)arg(c, 4), arg(c, 5));
+                                         (int)arg(c, 3), (int)arg(c, 4), flags);
         if (w && !(r = rt_handle_new(w, RT_SDL_WINDOW))) { SDL_DestroyWindow(w); rt_trap(c, c->eip, "SDL: handle table full"); }
     } else if (!strcmp(n, "DestroyWindow")) {
         SDL_Window *w = WINDOW(0);
         if (w) rt_handle_free(arg(c, 0), RT_SDL_WINDOW);
         SDL_DestroyWindow(w);
     }
-    else if (!strcmp(n, "ShowWindow")) SDL_ShowWindow(WINDOW(0));
+    else if (!strcmp(n, "ShowWindow")) { SDL_Window *w = WINDOW(0); if (!hidden_windows()) SDL_ShowWindow(w); }
     else if (!strcmp(n, "HideWindow")) SDL_HideWindow(WINDOW(0));
-    else if (!strcmp(n, "RaiseWindow")) SDL_RaiseWindow(WINDOW(0));
+    else if (!strcmp(n, "RaiseWindow")) { SDL_Window *w = WINDOW(0); if (!hidden_windows()) SDL_RaiseWindow(w); }
     else if (!strcmp(n, "SetWindowTitle")) SDL_SetWindowTitle(WINDOW(0), guest_string(c, arg(c, 1)));
     else if (!strcmp(n, "SetWindowIcon")) {
         SDL_Window *w = WINDOW(0);

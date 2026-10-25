@@ -2,6 +2,7 @@
 """Run the native executable against the user's real game data and log output."""
 import argparse
 import json
+import os
 from pathlib import Path
 import subprocess
 import sys
@@ -9,6 +10,7 @@ import sys
 parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--build', action='store_true')
 parser.add_argument('--timeout', type=int, default=60)
+parser.add_argument('--show', action='store_true', help='afficher la fenêtre (sinon P2_HIDDEN_WINDOWS=1)')
 parser.add_argument('arguments', nargs=argparse.REMAINDER)
 args = parser.parse_args()
 if args.build:
@@ -24,7 +26,9 @@ command = [str(Path('build/portal2-native').resolve()), '--images', str(Path('bu
 log = Path('build/game/launch.log')
 with log.open('w') as output:
     try:
-        result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=args.timeout)
+        env = dict(os.environ)
+        if not args.show: env.setdefault('P2_HIDDEN_WINDOWS', '1')
+        result = subprocess.run(command, stdout=output, stderr=subprocess.STDOUT, timeout=args.timeout, env=env)
         status = result.returncode
     except subprocess.TimeoutExpired:
         status = 124
