@@ -174,6 +174,9 @@ void rt_dispatch(CPU *c, uint32_t target) {
     rt_guest_poll();
     c->eip = target;
     gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
+    // Pas une fonction des modules préparés : peut-être un greffon PE traduit
+    // que libMiles a projeté à l'exécution (pe.c vérifie l'image).
+    if (!fn && target < RT_IMPORT_BASE) fn = rt_pe_lookup(target);
     if (fn) { fn(c); return; }
     RouteSlot *slot = route_slot(target, 0);
     ImportRoute *cached = slot ? atomic_load_explicit(slot, memory_order_acquire) : NULL;
