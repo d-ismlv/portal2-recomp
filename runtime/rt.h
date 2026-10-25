@@ -248,6 +248,28 @@ uint32_t rt_compare_exchange32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t ex
 uint64_t rt_compare_exchange64(RT_NOESCAPE CPU *c, uint32_t address, uint64_t expected, uint64_t value);
 void rt_return(RT_NOESCAPE CPU *c);
 void rt_call(RT_NOESCAPE CPU *c, uint32_t target, uint32_t expected_return);
+// Appel et saut directs du code généré vers une fonction traduite connue
+// (tools/lift.py, link_direct). Hors RT_TRACED_CALLS, ni verrou invité (le
+// code généré le tient déjà), ni pile d'appels de diagnostic, ni
+// P2_WATCH_CALL, ni recherche de la cible : l'adresse de retour est empilée
+// et la fonction appelée comme le ferait rt_dispatch. Le protocole des
+// transferts non locaux est inchangé : l'appelant compare c->eip à son
+// adresse de retour. Les branches arrière et rt_dispatch cèdent toujours le
+// verrou (rt_guest_poll).
+static inline void rt_call_fn(CPU *c, gfn fn, uint32_t target, uint32_t expected_return) {
+#ifdef RT_TRACED_CALLS
+    (void)fn; rt_call(c, target, expected_return);
+#else
+    PUSH(c, expected_return); c->eip = target; fn(c);
+#endif
+}
+static inline void rt_jump_fn(CPU *c, gfn fn, uint32_t target) {
+#ifdef RT_TRACED_CALLS
+    (void)fn; rt_dispatch(c, target);
+#else
+    c->eip = target; fn(c);
+#endif
+}
 const char *rt_import_name(uint32_t target);
 int rt_shim(CPU *c, const char *name);
 int rt_guest_readable(uint32_t address);   // diagnostic : page hôte lisible

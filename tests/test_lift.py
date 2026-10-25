@@ -28,7 +28,23 @@ class LifterTests(unittest.TestCase):
                                       0x15: (0x16, 'ret', '')}, callees=calls)
         self.assertEqual(calls, {0x30})
         self.assertEqual(count, 2)
-        self.assertIn('rt_call(c, a, 0x15u)', code)
+        self.assertIn('rt_call_fn(c, fn_30, 0x30u, 0x15u);', code)
+        self.assertIn('if (c->eip != 0x15u) goto resume;', code)
+
+    def test_link_direct_keeps_compiled_targets_only(self):
+        insns = {0x10: (0x15, 'call', '0x30'), 0x15: (0x1a, 'call', '0x40'),
+                 0x1a: (0x1f, 'jmp', '0x50')}
+        code, _ = lift.lift(0x10, insns, entries={0x50})
+        linked, used = lift.link_direct(code, {0x30, 0x50})
+        self.assertEqual(used, {0x30, 0x50})
+        self.assertIn('rt_call_fn(c, fn_30, 0x30u, 0x15u);', linked)
+        self.assertIn('rt_call(c, 0x40u, 0x1au);', linked)   # not compiled: checked path
+        self.assertNotIn('fn_40', linked)
+        self.assertIn('rt_jump_fn(c, fn_50, 0x50u); return;', linked)
+        unlinked, used = lift.link_direct(code, set())
+        self.assertEqual(used, set())
+        self.assertIn('rt_dispatch(c, 0x50u); return;', unlinked)
+        self.assertNotIn('rt_call_fn', unlinked)
 
     def test_indirect_jump_uses_checked_dispatch(self):
         code, count = lift.lift(0x10, {0x10: (0x12, 'jmp', 'eax')})
