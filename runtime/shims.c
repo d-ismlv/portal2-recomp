@@ -95,6 +95,8 @@ void rt_shims_destroy(void) {
 }
 
 size_t rt_atexit_count(void) { return handler_count; }
+// __cxa_finalize marks a handler as run (function 0); exit must skip those.
+void rt_atexit_clear(size_t index) { if (index < handler_count) handlers[index].function = 0; }
 int rt_atexit_get(size_t index, uint32_t *function, uint32_t *arg, uint32_t *dso) {
     if (index >= handler_count) return -1;
     *function = handlers[index].function;

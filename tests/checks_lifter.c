@@ -202,3 +202,116 @@ RT_CHECK(lifter_setjmp_longjmp) {
         (void)c;
     }
 }
+
+// --- loader ------------------------------------------------------------------
+#include "modules.h"
+#include <signal.h>
+#include <sys/wait.h>
+#include <unistd.h>
+
+static uint32_t guest_call(const char *name, unsigned count, const uint32_t *args) {
+    CPU c; rt_cpu_reset(&c); c.esp = 0x20010000;
+    for (unsigned i = count; i; --i) PUSH(&c, args[i - 1]);
+    rt_call(&c, rt_dynamic_import(name), RT_RETURN_SENTINEL);   // same path as a guest import call
+    assert(c.esp == 0x20010000 - 4 * count);
+    return c.eax;
+}
+#define CALL(name, ...) guest_call(name, sizeof((uint32_t[]){__VA_ARGS__}) / 4, (uint32_t[]){__VA_ARGS__})
+static const char *log_text(void) { W8(OUT + 0xc04 + R32(OUT + 0xc00), 0); return GPTR(OUT + 0xc04); }
+static void log_reset(void) { W32(OUT + 0xc00, 0); }
+
+static void build_fake_image(void) {
+    const uint32_t base = 0x2001c000;
+    memset(GPTR(base), 0, 0x1000);
+    memcpy(GPTR(base), "\177ELF\001\001\001", 7);
+    W16(base + 16, 3); W16(base + 18, 3); W32(base + 28, 52);
+    W16(base + 40, 52); W16(base + 42, 32); W16(base + 44, 3);
+    uint32_t ph = base + 52;
+    uint32_t headers[3][8] = {{1, 0, 0, 0, 0x1000, 0x1000, 5, 0x1000},
+                              {2, 0x200, 0x200, 0x200, 24, 24, 6, 4},
+                              {0x6474e550, 0x300, 0x300, 0x300, 0x20, 0x20, 4, 4}};
+    memcpy(GPTR(ph), headers, sizeof(headers));
+    uint32_t dynamic[6] = {26, 0x280, 28, 8, 0, 0};                 // DT_FINI_ARRAY(SZ), DT_NULL
+    memcpy(GPTR(base + 0x200), dynamic, sizeof(dynamic));
+    W32(base + 0x280, lifter_entry("lf_log_fini_a")); W32(base + 0x284, lifter_entry("lf_log_fini_b"));
+}
+
+RT_CHECK(lifter_loader) {
+    clear(); log_reset(); build_fake_image();
+    const uint32_t path = IN + 0xc00, missing = IN + 0xc20, symbol = IN + 0xc40, data = IN + 0xc80;
+    strcpy(GPTR(path), "/some/dir/libfake.so"); strcpy(GPTR(missing), "missing.so");
+    strcpy(GPTR(symbol), "fake_symbol");
+    uint32_t callback = lifter_entry("lf_phdr_callback");
+
+    assert(CALL("dl_iterate_phdr", callback, data) == 0 && R32(data + 28) == 0);   // nothing loaded yet
+    uint32_t handle = CALL("dlopen", path, 2);
+    assert(handle == 0xcc000700u && !strcmp(log_text(), "IC"));                       // DT_INIT, then init_array
+    assert(CALL("dlopen", path, 2) == handle && !strcmp(log_text(), "IC"));           // initialised once
+    assert(CALL("dlsym", handle, symbol) == 0x2001c400u);
+
+    assert(CALL("dl_iterate_phdr", callback, data) == 0 && R32(data + 28) == 1);
+    assert(R32(data) == 0x2001c000u && R32(data + 8) == 0x2001c034u && R32(data + 12) == 3);
+    assert(!strcmp(GPTR(R32(data + 4)), "libfake.so") && R32(data + 16) == 40);
+    assert(R32(data + 20) == 1 && R32(data + 24) == 0);                               // dlpi_adds, no TLS
+    W32(data + 32, 5);
+    assert(CALL("dl_iterate_phdr", callback, data) == 5 && R32(data + 28) == 2);     // callback result stops
+
+    assert(CALL("dlclose", handle) == 0 && CALL("dlclose", handle) == 0);
+    assert(CALL("dlclose", handle) == UINT32_MAX);                                     // not open any more
+    uint32_t message = CALL("dlerror", 0);
+    assert(message && strstr(GPTR(message), "not open") && CALL("dlerror", 0) == 0);
+    assert(CALL("dlclose", 0xcc000800u) == UINT32_MAX);                                // unknown handle
+    assert(CALL("dlopen", path, 4 | 2) == handle);           // RTLD_NOLOAD: the image is kept (NODELETE)
+    assert(CALL("dlopen", missing, 4 | 2) == 0);
+    assert(CALL("dlmopen", 0, path, 2) == handle);                                     // LM_ID_BASE
+    assert(CALL("dlmopen", UINT32_MAX, missing, 2) == 0 && CALL("dlerror", 0));       // LM_ID_NEWLM
+    assert(!strcmp(log_text(), "IC"));
+
+    log_reset();
+    const uint32_t d1 = 0x2001c500, d2 = 0x2001c504;
+    assert(CALL("__cxa_atexit", lifter_entry("lf_log_exit_x"), 1, d1) == 0);
+    assert(CALL("__cxa_atexit", lifter_entry("lf_log_exit_y"), 2, d2) == 0);
+    assert(CALL("__cxa_atexit", lifter_entry("lf_log_exit_z"), 3, d1) == 0);
+    CALL("__cxa_finalize", d1);
+    assert(!strcmp(log_text(), "zx"));                       // this DSO only, newest first
+    CALL("__cxa_finalize", d1);
+    assert(!strcmp(log_text(), "zx"));                       // each handler runs once
+    CALL("__cxa_finalize", d2);
+    assert(!strcmp(log_text(), "zxy"));
+    CALL("_Jv_RegisterClasses", 0x2001c600);
+
+    log_reset();
+    CPU c; rt_cpu_reset(&c); c.esp = 0x20010000;
+    rt_finalize_modules(&c);
+    assert(!strcmp(log_text(), "baF"));                      // fini_array reversed, then DT_FINI
+    rt_finalize_modules(&c);
+    assert(!strcmp(log_text(), "baF"));
+}
+
+static int child_exit(CPU *c, const char *name) {
+    static int in_child;
+    if (!strcmp(name, "__lifter_child")) { in_child = 1; return 1; }
+    if (!in_child || strcmp(name, "exit")) return 0;
+    fflush(NULL);
+    _exit((int)R32(c->esp + 4));
+}
+RT_SHIM_PROVIDER(child_exit)
+
+RT_CHECK(lifter_libc_start_main) {
+    clear();
+    W32(IN + 0xd00, 0);                                     // argv = {"x", NULL}, envp = {NULL}
+    strcpy(GPTR(IN + 0xd40), "x"); W32(IN + 0xd10, IN + 0xd40); W32(IN + 0xd14, 0); W32(IN + 0xd18, 0);
+    fflush(NULL);
+    pid_t pid = fork();
+    assert(pid >= 0);
+    if (!pid) {
+        CPU c; rt_cpu_reset(&c);
+        rt_shim(&c, "__lifter_child");
+        CALL("__libc_start_main", lifter_entry("lf_main"), 1, IN + 0xd10, lifter_entry("lf_start_init"), 0, 0, 0);
+        _exit(99);                                          // __libc_start_main must not return
+    }
+    int status = 0, done = 0;
+    for (int tries = 0; tries < 1000 && !(done = waitpid(pid, &status, WNOHANG) == pid); ++tries) usleep(10000);
+    if (!done) { kill(pid, SIGKILL); waitpid(pid, &status, 0); assert(!"child hung"); }
+    assert(WIFEXITED(status) && WEXITSTATUS(status) == 42);  // 40 + argc + init ran
+}

@@ -332,3 +332,56 @@ lf_deeper:
     push dword ptr [esp + 8]
     call .Lplt_longjmp
     ud2
+
+# Loader: one synthetic module (tests/generate_abi_fixture.py) whose
+# initialisers, destructors and atexit handlers append a letter to a log at
+# OUT+0xc04 (length at OUT+0xc00).
+.macro LOGGER name, letter
+.globl \name
+\name:
+    mov eax, dword ptr [0x20019c00]
+    mov byte ptr [eax + 0x20019c04], \letter
+    add dword ptr [0x20019c00], 1
+    ret
+.endm
+LOGGER lf_log_init, 0x49        # I: DT_INIT
+LOGGER lf_log_ctor, 0x43        # C: init_array
+LOGGER lf_log_fini_a, 0x61      # a: fini_array[0]
+LOGGER lf_log_fini_b, 0x62      # b: fini_array[1]
+LOGGER lf_log_fini, 0x46        # F: DT_FINI
+LOGGER lf_log_exit_x, 0x78
+LOGGER lf_log_exit_y, 0x79
+LOGGER lf_log_exit_z, 0x7a
+
+.globl lf_phdr_callback
+lf_phdr_callback:                          # copies dl_phdr_info into data; returns data[8]
+    mov eax, dword ptr [esp + 4]
+    mov ecx, dword ptr [esp + 12]
+    mov edx, dword ptr [eax]
+    mov dword ptr [ecx], edx
+    mov edx, dword ptr [eax + 4]
+    mov dword ptr [ecx + 4], edx
+    mov edx, dword ptr [eax + 8]
+    mov dword ptr [ecx + 8], edx
+    movzx edx, word ptr [eax + 12]
+    mov dword ptr [ecx + 12], edx
+    mov edx, dword ptr [esp + 8]
+    mov dword ptr [ecx + 16], edx
+    mov edx, dword ptr [eax + 16]
+    mov dword ptr [ecx + 20], edx
+    mov edx, dword ptr [eax + 32]
+    mov dword ptr [ecx + 24], edx
+    add dword ptr [ecx + 28], 1
+    mov eax, dword ptr [ecx + 32]
+    ret
+
+.globl lf_start_init
+lf_start_init:
+    mov dword ptr [0x20019d00], 1
+    ret
+.globl lf_main
+lf_main:                                   # returns 40 + argc + (init ran)
+    mov eax, dword ptr [esp + 4]
+    add eax, 40
+    add eax, dword ptr [0x20019d00]
+    ret

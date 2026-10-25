@@ -144,7 +144,15 @@ class FixtureTables(lift.JumpTables):
         table.update({0x20018a00: 0xf10000a0, 0x20018a04: 0xf10000b0})   # GOT slots of the PLT stubs
         return table.get(address)
 tables = FixtureTables({'modules': []}, insns)
-code = ['#include "modules.h"', 'const GuestModule rt_modules[1] = {{0}};', 'const size_t rt_module_count = 0;']
+# One synthetic guest module for the loader checks (image built in guest
+# memory at 0x2001c000 by checks_lifter.c).
+f = functions
+code = ['#include "modules.h"',
+        f'static const uint32_t fake_constructors[] = {{{f["lf_log_ctor"]:#x}u}};',
+        'static const GuestSymbol fake_symbols[] = {{"fake_symbol", 0x2001c400u}, {NULL, 0}};',
+        'const GuestModule rt_modules[1] = {{"libfake.so", 7, 0x2001c000u, 0x2001c000u, '
+        f'{f["lf_log_init"]:#x}u, {f["lf_log_fini"]:#x}u, fake_constructors, 1, fake_symbols, 1, NULL, 0}}}};',
+        'const size_t rt_module_count = 1;']
 is_setjmp = lambda target: lift.import_called(target, insns, fixture_imports, tables) in lift.SETJMP_IMPORTS
 for entry in sorted(entries):
     body, _ = lift.lift(entry, insns, entries, set(), tables, is_setjmp)
