@@ -57,3 +57,4 @@ int rt_path_windows_binary(const char *name);   // .dll/.exe/.asi/.flt... de la 
 int rt_path_is_game_source(const char *host);
 unsigned long rt_paths_generation(void);   // change à chaque écriture invitée (paths.c)
 int rt_path_absolute(const char *path, char out[PATH_MAX]);   // chemin hôte absolu normalisé
+uint32_t rt_vm_mapped_bytes(void);   // diagnostic (vm.c)

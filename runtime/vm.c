@@ -135,3 +135,10 @@ void rt_vm_destroy(void) {
     while (mappings) { Mapping *next = mappings->next; free(mappings); mappings = next; }
     memset(rt_vm_permissions, 0, sizeof(rt_vm_permissions));
 }
+
+// Diagnostic : octets invités actuellement projetés par rt_mmap.
+uint32_t rt_vm_mapped_bytes(void) {
+    uint64_t total = 0;
+    for (Mapping *m = mappings; m; m = m->next) total += m->size;
+    return total > UINT32_MAX ? UINT32_MAX : (uint32_t)total;
+}

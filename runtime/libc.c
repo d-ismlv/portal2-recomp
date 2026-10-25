@@ -380,7 +380,13 @@ int rt_libc_shim(CPU *c, const char *name) {
         uint64_t offset = argument(c, 5);
         if (!strcmp(name, "mmap64")) offset |= (uint64_t)argument(c, 6) << 32;
         c->eax = rt_mmap(c, argument(c, 0), argument(c, 1), (int)argument(c, 2), argument(c, 3), (int32_t)argument(c, 4), offset);
-        if (c->eax == UINT32_MAX) save_errno(c);
+        if (c->eax == UINT32_MAX) {
+            save_errno(c);
+            if (getenv("P2_TRACE_MMAP"))
+                fprintf(stderr, "[mmap] échec hint=%#x len=%#x prot=%u flags=%#x fd=%d errno=%d (mappé %u Mio)\n",
+                        argument(c, 0), argument(c, 1), argument(c, 2), argument(c, 3), (int32_t)argument(c, 4), errno,
+                        rt_vm_mapped_bytes() >> 20);
+        }
     } else if (!strcmp(name, "munmap") || !strcmp(name, "mprotect") || !strcmp(name, "madvise")) {
         a = argument(c, 0); b = argument(c, 1); int result;
         if (!strcmp(name, "munmap")) result = rt_munmap(a, b);

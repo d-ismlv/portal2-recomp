@@ -6,6 +6,12 @@ RT_CHECK(heap_reuses_frees_and_rejects_unknown_addresses) {
     uint32_t a = rt_alloc(24), b = rt_alloc(24);
     assert(a && b && a != b && !(a & 15) && !(b & 15));
     assert(rt_heap_usable_size(a) == 32);                       // classe de 32 octets
+    uint32_t m1 = rt_alloc(100000), m2 = rt_alloc(100000);
+    assert(m1 && m2 && rt_heap_usable_size(m1) == 102400);      // zones de 4 Kio au-delà de 16 Kio
+    assert(!rt_free(m1) && !rt_free(m2));
+    uint32_t m3 = rt_alloc(150000);                              // réutilise les deux zones fusionnées
+    assert(m3 == m1 || m3 < m2);
+    assert(!rt_free(m3));
     memset(GPTR(a), 0xab, 24);
     assert(rt_free(a) == 0 && rt_heap_usable_size(a) == 0);
     assert(rt_free(a) == -1);                                     // double libération détectée

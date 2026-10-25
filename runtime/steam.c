@@ -305,6 +305,16 @@ void *steam_proxy_host(uint32_t proxy) {
 // ISteamGameCoordinator001 : SendMessage, IsMessageAvailable, RetrieveMessage.
 static int virtual_bridge(CPU *c, const char *name, uint32_t table, long iface) {
     unsigned slot;
+    if (!strcmp(name, "SteamUtils010::slot7")) {
+        // GetCSERIPPort(uint32 *ip, uint16 *port) -> bool : obsolète, sans
+        // fonction flat, toujours dans la vtable du client (lu au chargement de carte).
+        uint32_t object = R32(c->esp + 4), args = c->esp + 8;
+        void *host = object && R32(object) == table ? steam_proxy_host(object) : NULL;
+        if (!host) fail(c, "Steam: %s called on an object that is not a %s proxy", name, interface_version((size_t)iface));
+        typedef bool (*Get)(void *, uint32_t *, uint16_t *);
+        c->eax = ((Get)(*(void ***)host)[7])(host, steam_out(c, R32(args), 4), steam_out(c, R32(args + 4), 2)) ? 1u : 0u;
+        return 1;
+    }
     if (sscanf(name, "SteamGameCoordinator001::slot%u", &slot) != 1 || slot > 2) return 0;
     uint32_t object = R32(c->esp + 4), args = c->esp + 8;
     void *host = object && R32(object) == table ? steam_proxy_host(object) : NULL;

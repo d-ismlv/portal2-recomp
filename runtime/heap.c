@@ -1,22 +1,25 @@
 // Tas invité (malloc/free/realloc des imports libc) dans 0x80000000-0xc0000000.
 // Métadonnées hors de la mémoire invitée : un débordement invité ne peut pas
 // corrompre l'allocateur. Toutes les opérations sont en O(1) amorti :
-// - petits blocs (<= 1 Mio) : classes de taille, listes libres par classe ;
-// - gros blocs : multiples de 64 Kio, zones libres triées par adresse et
-//   fusionnées avec leurs voisines ;
+// - petits blocs (<= 16 Kio) : classes de taille, listes libres par classe ;
+// - au-delà : multiples de 4 Kio, zones libres triées par adresse, fusionnées
+//   avec leurs voisines et réutilisables pour toute taille (sinon la mémoire
+//   libérée dans une classe ne servait plus aux autres : un chargement de carte
+//   épuisait le tas) ;
 // - table de hachage adresse -> taille pour free/realloc/malloc_usable_size.
 // Remplace une liste chaînée parcourue entièrement à chaque appel (coût
 // quadratique pendant la traduction des shaders par togl).
 #include "rt.h"
 #include <pthread.h>
+#include <stdio.h>
 #include <stdlib.h>
 
 #define HEAP_BEGIN 0x80000000u
-#define HEAP_END 0xc0000000u
+#define HEAP_END 0xdf000000u        // sous les données importées (0xe0000000)
 #define MAP_STEP 0x400000u        // projection par tranches de 4 Mio
-#define SMALL_MAX 0x100000u       // au-delà : gros blocs
-#define LARGE_ALIGN 0x10000u
-#define CLASS_COUNT 104           // 64 classes de 16 o jusqu'à 1 Kio, puis 4 par puissance de 2
+#define SMALL_MAX 0x4000u         // au-delà : zones de 4 Kio fusionnables
+#define LARGE_ALIGN 0x1000u
+#define CLASS_COUNT 80            // 64 classes de 16 o jusqu'à 1 Kio, puis 4 par puissance de 2 jusqu'à 16 Kio
 
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
 static uint32_t top = HEAP_BEGIN, mapped = HEAP_BEGIN;
@@ -155,7 +158,12 @@ static uint32_t alloc_locked(uint32_t size) {
         rounded = (size + LARGE_ALIGN - 1) & ~(LARGE_ALIGN - 1);
         addr = large_alloc(rounded);
     }
-    if (!addr) return 0;
+    if (!addr) {
+        if (getenv("P2_TRACE_MMAP"))
+            fprintf(stderr, "[heap] échec malloc(%u) : arène %u Mio, vivant %llu Mio, %zu zones libres\n",
+                    size, (top - HEAP_BEGIN) >> 20, (unsigned long long)(live_bytes >> 20), large_count);
+        return 0;
+    }
     if (table_put(addr, rounded)) return 0;   // fuite d'un bloc, échec propre
     live_bytes += rounded;
     return addr;

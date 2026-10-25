@@ -51,7 +51,7 @@ uint32_t rt_rand32(void);
 
 #define GPTR(a) ((void *)(M + (uint32_t)(a)))
 
-#define RT_VM_BEGIN 0x40000000u
+#define RT_VM_BEGIN 0x21000000u  // au-dessus des modules (< 0x19000000) et de la zone de test 0x20000000
 #define RT_VM_END 0x70000000u
 extern uint8_t rt_vm_permissions[(RT_VM_END - RT_VM_BEGIN) / 4096];
 __attribute__((noreturn)) void rt_memory_trap(uint32_t address, uint64_t length, int mode);
