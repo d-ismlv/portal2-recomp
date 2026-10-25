@@ -24,6 +24,8 @@
 // SHIMS: SDL_CreateColorCursor SDL_CreateSystemCursor SDL_SetCursor SDL_FreeCursor SDL_ShowCursor
 // SHIMS: SDL_GetClipboardText SDL_SetClipboardText SDL_HasClipboardText
 #include "rt.h"
+#include <OpenGL/gl.h>
+#include <OpenGL/glext.h>
 #include "sdl_common.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -226,6 +228,47 @@ static const char *gl_attribute_name(uint32_t attribute) {
     return attribute < sizeof(names) / sizeof(*names) ? names[attribute] : "?";
 }
 
+// Diagnostic hôte (sans effet sur le jeu) : P2_FRAME_LOG=1 journalise le
+// nombre d'images et leur cadence ; P2_FRAME_DUMP=/chemin.ppm y écrit le
+// tampon arrière toutes les 120 images, avant l'échange (fenêtre cachée).
+static void diagnose_frame(SDL_Window *w) {
+    static uint64_t frames, last_ticks;
+    static int log = -1; static const char *dump;
+    if (log < 0) { log = getenv("P2_FRAME_LOG") != NULL; dump = getenv("P2_FRAME_DUMP"); }
+    ++frames;
+    if (log && frames % 60 == 0) {
+        uint64_t now = SDL_GetTicks64();
+        fprintf(stderr, "[diag] frame %llu, %.1f fps\n", (unsigned long long)frames,
+                last_ticks ? 60000.0 / (double)(now - last_ticks + 1) : 0.0);
+        last_ticks = now;
+    }
+    if (!dump || frames % 120 != 1 || !w) return;
+    int width = 0, height = 0;
+    SDL_GL_GetDrawableSize(w, &width, &height);
+    if (width <= 0 || height <= 0 || width > 8192 || height > 8192) return;
+    unsigned char *pixels = malloc((size_t)width * (size_t)height * 3);
+    if (!pixels) return;
+    GLint pack_alignment, read_buffer, pack_buffer = 0;
+    glGetIntegerv(GL_PACK_ALIGNMENT, &pack_alignment);
+    glGetIntegerv(GL_READ_BUFFER, &read_buffer);
+    glGetIntegerv(GL_PIXEL_PACK_BUFFER_BINDING, &pack_buffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, 1);
+    glReadBuffer(GL_BACK);
+    if (pack_buffer) glBindBuffer(GL_PIXEL_PACK_BUFFER, 0);
+    glReadPixels(0, 0, width, height, GL_RGB, GL_UNSIGNED_BYTE, pixels);
+    if (pack_buffer) glBindBuffer(GL_PIXEL_PACK_BUFFER, (GLuint)pack_buffer);
+    glReadBuffer((GLenum)read_buffer);
+    glPixelStorei(GL_PACK_ALIGNMENT, pack_alignment);
+    FILE *file = fopen(dump, "wb");
+    if (file) {
+        fprintf(file, "P6\n%d %d\n255\n", width, height);
+        for (int y = height - 1; y >= 0; --y) fwrite(pixels + (size_t)y * (size_t)width * 3, 1, (size_t)width * 3, file);
+        fclose(file);
+    }
+    free(pixels);
+    fprintf(stderr, "[diag] frame %llu dumped to %s (%dx%d)\n", (unsigned long long)frames, dump, width, height);
+}
+
 static int hidden_windows(void) {
     static int value = -1;
     if (value < 0) { const char *e = getenv("P2_HIDDEN_WINDOWS"); value = e && *e && strcmp(e, "0"); }
@@ -356,6 +399,7 @@ static int sdl_video(CPU *c, const char *name) {
     else if (!strcmp(n, "GL_SetSwapInterval")) r = (uint32_t)SDL_GL_SetSwapInterval((int)arg(c, 0));
     else if (!strcmp(n, "GL_SwapWindow")) {
         SDL_Window *w = WINDOW(0);
+        diagnose_frame(w);
         unsigned saved = rt_guest_suspend();   // la synchronisation verticale peut bloquer
         SDL_GL_SwapWindow(w);
         rt_guest_resume(saved);
