@@ -492,3 +492,24 @@ RT_CHECK(posix_guest_symlinks_never_reach_original_copy) {
     assert(call("rmdir", 1, gstr(game_path("loop1"))) == UINT32_MAX && guest_errno() == 20);
     cleanup();
 }
+
+RT_CHECK(posix_windows_binaries_of_game_copy_are_invisible) {
+    setup();
+    put(game, "dir/mssmp3.asi", "PE");
+    put(game, "dir/Engine.DLL", "PE");
+    put(depot, "dir/tool.exe", "linux-depot-file");   // une copie fournie par le dépôt Linux reste visible
+    errno = 0;
+    assert(!rt_read_path(game_path("dir/mssmp3.asi")) && errno == ENOENT);
+    assert(!rt_read_path(game_path("dir/Engine.DLL")));
+    assert(rt_read_path(game_path("dir/tool.exe")));
+    assert(rt_read_path(game_path("dir/x")));         // données ordinaires inchangées
+    RtDirEntry *entries; size_t count;
+    assert(!rt_dir_entries(game_path("dir"), &entries, &count));
+    int asi = 0, dll = 0, exe = 0, x = 0;
+    for (size_t i = 0; i < count; ++i) {
+        asi |= !strcmp(entries[i].name, "mssmp3.asi"); dll |= !strcmp(entries[i].name, "Engine.DLL");
+        exe |= !strcmp(entries[i].name, "tool.exe"); x |= !strcmp(entries[i].name, "x");
+    }
+    rt_dir_entries_free(entries, count);
+    assert(!asi && !dll && exe && x);
+}

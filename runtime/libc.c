@@ -188,6 +188,7 @@ int rt_dir_entries(const char *path, RtDirEntry **entries, size_t *count) {
             // la copie utilisateur cache seulement le répertoire des marques.
             if (inside && (i ? rt_path_hidden_name(relative, entry->d_name)
                              : !*relative && !strcmp(entry->d_name, RT_WHITEOUTS))) continue;
+            if (inside && rt_path_is_game_source(sources[i]) && rt_path_windows_binary(entry->d_name)) continue;
             if (listing_add(&l, entry)) { closedir(dir); errno = ENOMEM; goto fail; }
         }
         int error = errno;

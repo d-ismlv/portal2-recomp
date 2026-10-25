@@ -52,3 +52,6 @@ int rt_guest_realpath(const char *path, char out[PATH_MAX]);
 
 // Statistiques du tas invité glibc (shims.c).
 void rt_heap_info(uint32_t *arena, uint32_t *used, uint32_t *free_bytes, uint32_t *free_blocks);
+
+int rt_path_windows_binary(const char *name);   // .dll/.exe/.asi/.flt... de la copie Windows
+int rt_path_is_game_source(const char *host);

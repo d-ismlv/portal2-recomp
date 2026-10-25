@@ -3,6 +3,7 @@
 #include <limits.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <strings.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -89,6 +90,7 @@ const char *rt_read_path(const char *path) {
         count=snprintf(result,PATH_MAX,"%s/%s/%s",linux_root,directory,base+1);
         if(count>=0 && count<PATH_MAX && !stat(result,&info))return result;
     }
+    if(rt_path_windows_binary(relative)){errno=ENOENT;return NULL;}   // binaire Windows : absent sous Linux
     return path;
 }
 #define WHITEOUTS RT_WHITEOUTS
@@ -118,10 +120,22 @@ static int join(char out[PATH_MAX],const char *root,const char *relative) {
     return 0;
 }
 int rt_path_overlay(const char *relative,char out[PATH_MAX]) { return join(out,user_root,relative); }
+// La copie du jeu est l'installation Windows : ses binaires (DLL, EXE, greffons
+// Miles .asi/.flt) n'existent pas dans une installation Linux et ne doivent pas
+// être vus par le jeu Linux (Miles chargeait mssmp3.asi, un greffon PE).
+int rt_path_windows_binary(const char *name) {
+    const char *base=strrchr(name,'/'); base=base?base+1:name;
+    const char *dot=strrchr(base,'.');
+    if(!dot)return 0;
+    static const char *const ext[]={".dll",".exe",".asi",".flt",".pdb",".sys"};
+    for(size_t i=0;i<sizeof(ext)/sizeof(*ext);++i)if(!strcasecmp(dot,ext[i]))return 1;
+    return 0;
+}
+int rt_path_is_game_source(const char *host) { return game_root[0] && within(host,game_root); }
 int rt_path_lower(const char *relative,char out[2][PATH_MAX]) {
     int count=0; struct stat info;
     if(!join(out[count],linux_root,relative) && !lstat(out[count],&info))++count;
-    if(!join(out[count],game_root,relative) && !lstat(out[count],&info))++count;
+    if(!rt_path_windows_binary(relative) && !join(out[count],game_root,relative) && !lstat(out[count],&info))++count;
     return count;
 }
 static int whiteout_marker(const char *relative,char out[PATH_MAX]) {
