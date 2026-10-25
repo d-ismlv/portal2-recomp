@@ -287,8 +287,27 @@ void *rt_handle_free(uint32_t handle, uint32_t kind);
 uint32_t rt_gl_proc_address(const char *name);
 // Valeur de retour flottante i386 (float/double/long double) : dans ST(0).
 static inline void rt_return_st0(CPU *c, double value) { fpush(c, value); }
+// Contrat : la réponse d'un fournisseur (accepter ou non) ne dépend que du
+// nom, et un refus n'a aucun effet. rt_dispatch mémorise donc, par adresse
+// d'import, le fournisseur qui a accepté et l'appelle directement ensuite ;
+// s'il refuse quand même, la chaîne complète est reprise (puis piège).
 typedef int (*rt_shim_provider)(CPU *c, const char *name);
 void rt_register_shim_provider(rt_shim_provider provider);
 #define RT_SHIM_PROVIDER(fn) \
     __attribute__((constructor)) static void rt_register_##fn(void) { rt_register_shim_provider(fn); }
+// Résolution optionnelle : après acceptation d'un nom, le résolveur peut
+// fournir un handler direct (avec sa donnée) qui évite la recherche par nom
+// du fournisseur aux appels suivants. Il renvoie 0 pour garder le fournisseur.
+typedef int (*rt_shim_handler)(CPU *c, const char *name, void *data);
+typedef struct { rt_shim_provider provider; rt_shim_handler handler; void *data; } RtShimRoute;
+typedef int (*rt_shim_resolver)(const char *name, RtShimRoute *route);
+void rt_register_shim_resolver(rt_shim_provider provider, rt_shim_resolver resolver);
+#define RT_SHIM_PROVIDER_RESOLVER(fn, resolver) \
+    __attribute__((constructor)) static void rt_register_##fn(void) { rt_register_shim_resolver(fn, resolver); }
+// Exécute le nom comme rt_shim ; en cas de succès, *route (si non NULL)
+// désigne le fournisseur ou handler à rappeler pour ce même nom.
+int rt_shim_route(CPU *c, const char *name, RtShimRoute *route);
+static inline int rt_route_call(const RtShimRoute *route, CPU *c, const char *name) {
+    return route->handler ? route->handler(c, name, route->data) : route->provider(c, name);
+}
 void rt_futex_destroy(void);

@@ -133,20 +133,9 @@ uint32_t rt_string_length(CPU *c, uint32_t address) {
     rt_trap(c, c->eip, "unterminated guest string");
 }
 
-static rt_shim_provider providers[64];
-static size_t provider_count;
-void rt_register_shim_provider(rt_shim_provider provider) {
-    if (provider_count == sizeof(providers) / sizeof(*providers)) abort();
-    providers[provider_count++] = provider;
-}
-static int registered_shim(CPU *c, const char *name) {
-    for (size_t i = 0; i < provider_count; ++i) if (providers[i](c, name)) return 1;
-    return 0;
-}
-
 // Return 0 for an unsupported name. The dispatcher traps, with no fake result.
 // Argument layouts here are i386 cdecl, never the host's variadic/pointer ABI.
-int rt_shim(CPU *c, const char *name) {
+static int core_shim(CPU *c, const char *name) {
     uint32_t a, b, n;
     if (!strcmp(name, "___tls_get_addr") || !strcmp(name, "__tls_get_addr")) {
         a = c->eax; rt_span(c, a, 8); // i386 TLS resolver uses regparm(1), not cdecl
@@ -217,6 +206,39 @@ int rt_shim(CPU *c, const char *name) {
         c->eax = (uint32_t)puts(GPTR(a));
     } else if (!strcmp(name, "abort")) {
         rt_trap(c, c->eip, "guest libc abort");
-    } else return rt_format_shim(c, name) || rt_pthread_shim(c, name) || rt_libc_shim(c, name) || rt_scan_shim(c, name) || rt_loader_shim(c, name) || rt_stat_shim(c, name) || registered_shim(c, name);
+    } else return 0;
     return 1;
 }
+
+// Ordre d'aiguillage d'un nom : fournisseurs intégrés, puis fournisseurs
+// enregistrés (RT_SHIM_PROVIDER) dans l'ordre des constructeurs. Le premier
+// qui accepte le nom l'exécute ; c'est aussi lui que rt_dispatch met en cache.
+static const rt_shim_provider builtin[] = {core_shim, rt_format_shim, rt_pthread_shim, rt_libc_shim,
+                                           rt_scan_shim, rt_loader_shim, rt_stat_shim};
+enum { BUILTIN = sizeof(builtin) / sizeof(*builtin) };
+static rt_shim_provider providers[64];
+static rt_shim_resolver resolvers[64];
+static size_t provider_count;
+void rt_register_shim_resolver(rt_shim_provider provider, rt_shim_resolver resolver) {
+    if (provider_count == sizeof(providers) / sizeof(*providers)) abort();
+    resolvers[provider_count] = resolver;
+    providers[provider_count++] = provider;
+}
+void rt_register_shim_provider(rt_shim_provider provider) { rt_register_shim_resolver(provider, NULL); }
+
+int rt_shim_route(CPU *c, const char *name, RtShimRoute *route) {
+    for (size_t i = 0; i < BUILTIN + provider_count; ++i) {
+        rt_shim_provider provider = i < BUILTIN ? builtin[i] : providers[i - BUILTIN];
+        if (!provider(c, name)) continue;
+        if (route) {
+            rt_shim_resolver resolver = i < BUILTIN ? NULL : resolvers[i - BUILTIN];
+            RtShimRoute direct = {provider, NULL, NULL};
+            if (!resolver || !resolver(name, &direct) || !direct.handler) direct = (RtShimRoute){provider, NULL, NULL};
+            *route = direct;
+        }
+        return 1;
+    }
+    return 0;
+}
+
+int rt_shim(CPU *c, const char *name) { return rt_shim_route(c, name, NULL); }
