@@ -149,6 +149,14 @@ const char *rt_read_path(const char *path) {
 int rt_access_cached(const char *path,int mode) {
     if((mode!=F_OK && mode!=R_OK) || !game_root[0] || rt_is_proc_path(path))return -2;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return -2;
+    // Parent d'une racine (le correcteur de casse remonte jusqu'à « /volumes »
+    // à chaque fichier absent, 1,7 million d'appels en 150 s) : c'est un dossier
+    // existant et lisible, sans appel système.
+    const char *roots[3]={game_root,linux_root,user_root};
+    for(int i=0;i<3;++i){
+        size_t length=strlen(canonical);
+        if(length && !strncmp(roots[i],canonical,length) && (roots[i][length]=='/' || (length==1 && canonical[0]=='/')))return 0;
+    }
     if(!within(canonical,game_root))return -2;
     for(int attempt=0;attempt<2;++attempt){
         unsigned long now=generation; unsigned slot=read_slot(canonical);
