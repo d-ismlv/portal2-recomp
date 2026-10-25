@@ -258,3 +258,10 @@ RT_CHECK(sdl_input_joysticks_and_struct_return) {
     SDL_JoystickDetachVirtual(index);
     SDL_QuitSubSystem(SDL_INIT_JOYSTICK | SDL_INIT_GAMECONTROLLER | SDL_INIT_HAPTIC);
 }
+
+int rt_sdl_event_is_sdl2(uint32_t type);
+RT_CHECK(sdl_input_hides_sdl3_only_events) {
+    assert(rt_sdl_event_is_sdl2(SDL_WINDOWEVENT) && rt_sdl_event_is_sdl2(SDL_KEYDOWN));
+    assert(rt_sdl_event_is_sdl2(SDL_USEREVENT + 7) && rt_sdl_event_is_sdl2(SDL_DROPFILE));
+    assert(!rt_sdl_event_is_sdl2(0x205) && !rt_sdl_event_is_sdl2(0x202));  // événements fenêtre SDL3
+}

@@ -66,6 +66,17 @@ static int string_event(uint32_t type) {
     return type == SDL_DROPFILE || type == SDL_DROPTEXT || type == SDL_DROPBEGIN || type == SDL_DROPCOMPLETE;
 }
 
+// Types qu'un vrai SDL2 peut produire. sdl2-compat (SDL3 dessous) laisse
+// passer vers les observateurs certains événements SDL3 sans équivalent SDL2
+// (ex. 0x205, SDL_EVENT_WINDOW_MOVED) : un jeu SDL2 ne les verrait jamais,
+// ils ne lui sont donc pas transmis (ni par observateur ni par PollEvent).
+int rt_sdl_event_is_sdl2(uint32_t type);
+int rt_sdl_event_is_sdl2(uint32_t type) {
+    return plain_event(type) || string_event(type) || (type >= SDL_USEREVENT && type <= SDL_LASTEVENT) ||
+           type == SDL_TEXTEDITING_EXT || type == SDL_SENSORUPDATE || type == SDL_CONTROLLERSENSORUPDATE ||
+           type == SDL_SYSWMEVENT;
+}
+
 // Copie d'une chaîne hôte en mémoire invitée (rt_alloc) ; 0 pour NULL.
 static uint32_t guest_string(CPU *c, const char *text) {
     if (!text) return 0;
@@ -174,6 +185,7 @@ static Watch *watches;
 
 static int watch_trampoline(void *opaque, SDL_Event *event) {
     Watch *w = opaque;
+    if (!rt_sdl_event_is_sdl2(event->type)) return 1;   // inconnu de SDL2 : invisible pour l'invité
     CPU *c = rt_shim_cpu();
     if (!c) {
         fprintf(stderr, "SDL event watch %#x called on a host thread outside any guest SDL call\n", w->function);
@@ -254,8 +266,17 @@ static uint32_t intern_name(CPU *c, const char *text) {
 
 static void poll_into(CPU *c, uint32_t guest, int *got) {
     SDL_Event event;
-    *got = SDL_PollEvent(guest ? &event : NULL);
-    if (*got && guest) event_to_guest(c, &event, guest, 1);
+    if (!guest) {
+        // Simple test de présence : écarter d'abord les événements inconnus de SDL2.
+        SDL_PumpEvents();
+        while ((*got = SDL_PeepEvents(&event, 1, SDL_PEEKEVENT, SDL_FIRSTEVENT, SDL_LASTEVENT)) == 1 &&
+               !rt_sdl_event_is_sdl2(event.type))
+            SDL_PeepEvents(&event, 1, SDL_GETEVENT, event.type, event.type);
+        if (*got < 0) *got = 0;
+        return;
+    }
+    while ((*got = SDL_PollEvent(&event)) && !rt_sdl_event_is_sdl2(event.type)) {}
+    if (*got) event_to_guest(c, &event, guest, 1);
 }
 
 static int sdl_input_shim(CPU *c, const char *name) {
