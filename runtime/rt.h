@@ -252,19 +252,27 @@ uint32_t rt_compare_exchange32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t ex
 uint64_t rt_compare_exchange64(RT_NOESCAPE CPU *c, uint32_t address, uint64_t expected, uint64_t value);
 void rt_return(RT_NOESCAPE CPU *c);
 void rt_call(RT_NOESCAPE CPU *c, uint32_t target, uint32_t expected_return);
+void rt_guest_poll(void);
+// Threads bloqués sur le verrou invité (scheduler.c). Le code généré ne cède
+// que s'il y en a : test en ligne, sans appel ni accès _Thread_local.
+extern _Atomic unsigned rt_guest_waiting;
+static inline void rt_poll(void) {
+    if (__builtin_expect(atomic_load_explicit(&rt_guest_waiting, memory_order_relaxed) != 0, 0)) rt_guest_poll();
+}
 // Appel et saut directs du code généré vers une fonction traduite connue
 // (tools/lift.py, link_direct). Hors RT_TRACED_CALLS, ni verrou invité (le
 // code généré le tient déjà), ni pile d'appels de diagnostic, ni
 // P2_WATCH_CALL, ni recherche de la cible : l'adresse de retour est empilée
 // et la fonction appelée comme le ferait rt_dispatch. Le protocole des
 // transferts non locaux est inchangé : l'appelant compare c->eip à son
-// adresse de retour. Les branches arrière et rt_dispatch cèdent toujours le
-// verrou (rt_guest_poll).
+// adresse de retour. Chaque chemin rapide cède le verrou comme rt_dispatch
+// (rt_poll) : un cycle d'appels ou de sauts terminaux entre fonctions, sans
+// branche arrière, ne doit pas affamer les autres threads invités.
 static inline void rt_call_fn(CPU *c, gfn fn, uint32_t target, uint32_t expected_return) {
 #ifdef RT_TRACED_CALLS
     (void)fn; rt_call(c, target, expected_return);
 #else
-    PUSH(c, expected_return); c->eip = target; fn(c);
+    rt_poll(); PUSH(c, expected_return); c->eip = target; fn(c);
 #endif
 }
 // Appels et sauts indirects (fonctions virtuelles, pointeurs de fonction) :
@@ -273,14 +281,14 @@ static inline void rt_call_fn(CPU *c, gfn fn, uint32_t target, uint32_t expected
 static inline void rt_call_any(CPU *c, uint32_t target, uint32_t expected_return) {
 #ifndef RT_TRACED_CALLS
     gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
-    if (fn) { PUSH(c, expected_return); c->eip = target; fn(c); return; }
+    if (fn) { rt_poll(); PUSH(c, expected_return); c->eip = target; fn(c); return; }
 #endif
     rt_call(c, target, expected_return);
 }
 static inline void rt_jump_any(CPU *c, uint32_t target) {
 #ifndef RT_TRACED_CALLS
     gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
-    if (fn) { c->eip = target; fn(c); return; }
+    if (fn) { rt_poll(); c->eip = target; fn(c); return; }
 #endif
     rt_dispatch(c, target);
 }
@@ -291,7 +299,7 @@ static inline void rt_jump_fn(CPU *c, gfn fn, uint32_t target) {
 #ifdef RT_TRACED_CALLS
     (void)fn; rt_dispatch(c, target);
 #else
-    c->eip = target; fn(c);
+    rt_poll(); c->eip = target; fn(c);
 #endif
 }
 const char *rt_import_name(uint32_t target);
@@ -343,12 +351,6 @@ void rt_guest_leave(void);
 unsigned rt_guest_suspend(void);
 void rt_guest_resume(unsigned saved);
 void rt_guest_poll(void);
-// Threads bloqués sur le verrou invité (scheduler.c). Le code généré ne cède
-// que s'il y en a : test en ligne, sans appel ni accès _Thread_local.
-extern _Atomic unsigned rt_guest_waiting;
-static inline void rt_poll(void) {
-    if (__builtin_expect(atomic_load_explicit(&rt_guest_waiting, memory_order_relaxed) != 0, 0)) rt_guest_poll();
-}
 int rt_thread_shim(CPU *c, const char *name);
 void rt_thread_destructors(CPU *c);
 void rt_threads_destroy(void);
