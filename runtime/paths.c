@@ -11,6 +11,9 @@ static char game_root[PATH_MAX], linux_root[PATH_MAX], user_root[PATH_MAX];
 static _Thread_local char buffers[4][PATH_MAX];
 static _Thread_local unsigned next_buffer;
 static char *buffer(void) { return buffers[next_buffer++ % 4]; }
+static _Atomic unsigned long generation = 1;   // incrémenté à chaque écriture invitée
+unsigned long rt_paths_generation(void) { return generation; }
+static int insensitive[3];                       // volume de chaque racine insensible à la casse
 static int within(const char *path,const char *root) {
     size_t length=strlen(root);
     return length && !strncmp(path,root,length) && (!path[length] || path[length]=='/');
@@ -41,6 +44,16 @@ static int absolute_path(const char *path,char *output) {
     // (20 % du temps CPU du jeu). Les liens créés par l'invité sont résolus
     // à part (overlay_link).
     if(within(output,game_root)||within(output,linux_root)||within(output,user_root))return 0;
+    // Volume insensible à la casse (APFS par défaut) : le correcteur de casse
+    // de Source essaie des variantes (« /volumes/crucial p3/... ») ; elles
+    // désignent la même racine, réécrite dans sa casse canonique.
+    const char *roots[3]={game_root,linux_root,user_root};
+    for(int i=0;i<3;++i){
+        size_t length=strlen(roots[i]);
+        if(insensitive[i] && length && !strncasecmp(output,roots[i],length) && (!output[length]||output[length]=='/')){
+            memcpy(output,roots[i],length); return 0;
+        }
+    }
     // Resolve existing prefixes too: /tmp is /private/tmp on macOS, including
     // when the requested file has not been created yet.
     char prefix[PATH_MAX], resolved[PATH_MAX]; strcpy(prefix,output);
@@ -59,9 +72,12 @@ static int absolute_path(const char *path,char *output) {
     return 0;
 }
 int rt_paths_init(const char *game,const char *linux,const char *user) {
+    ++generation;   // nouvelles racines : caches invalides
     if(!realpath(game,game_root) || !realpath(linux,linux_root))return -1;
     if(absolute_path(user,user_root))return -1;
     if(mkdir(user_root,0755) && errno!=EEXIST)return -1;
+    const char *roots[3]={game_root,linux_root,user_root};
+    for(int i=0;i<3;++i)insensitive[i]=pathconf(roots[i],_PC_CASE_SENSITIVE)==0;
     return 0;
 }
 // Le répertoire des marques de suppression n'existe pas dans la vue invitée.
@@ -153,6 +169,7 @@ int rt_path_is_whiteout(const char *relative) {
     return !access(marker,F_OK);
 }
 int rt_path_whiteout(const char *relative) {
+    ++generation;
     char marker[PATH_MAX]; if(whiteout_marker(relative,marker))return -1;
     for(char *p=marker+strlen(user_root)+1;*p;++p)if(*p=='/'){
         *p=0; int error=mkdir(marker,0755); *p='/'; if(error && errno!=EEXIST)return -1;
@@ -161,6 +178,7 @@ int rt_path_whiteout(const char *relative) {
     return fclose(file)?-1:0;
 }
 int rt_path_clear_whiteout(const char *relative) {
+    ++generation;
     char marker[PATH_MAX]; if(whiteout_marker(relative,marker))return -1;
     return unlink(marker) && errno!=ENOENT?-1:0;
 }
@@ -218,6 +236,7 @@ static int overlay_link(const char *result,const char *relative,int preserve_exi
 const char *rt_write_path(const char *path,int preserve_existing) { return write_path(path,preserve_existing,1); }
 const char *rt_write_path_nofollow(const char *path) { return write_path(path,0,0); }
 static const char *write_path(const char *path,int preserve_existing,int follow_final) {
+    ++generation;   // toute écriture invalide les caches de lecture (listes de dossiers)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     if(!within(canonical,game_root))return path;

@@ -1,6 +1,7 @@
 // Fichiers et répertoires POSIX : vue fusionnée jeu / dépôt Linux / données
 // utilisateur, suppressions logiques, structures glibc i386 et rappels invités.
 #include "checks.h"
+#include <ctype.h>
 #include "posix.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -512,4 +513,21 @@ RT_CHECK(posix_windows_binaries_of_game_copy_are_invisible) {
     }
     rt_dir_entries_free(entries, count);
     assert(!asi && !dll && exe && x);
+}
+
+RT_CHECK(posix_case_variants_of_root_and_listing_cache) {
+    setup();
+    if (pathconf(game, _PC_CASE_SENSITIVE) == 0) {
+        // Variante de casse de la racine (correcteur de casse de Source) : même fichier.
+        char variant[PATH_MAX]; snprintf(variant, sizeof(variant), "%s/a.txt", game);
+        for (char *p = variant; *p; ++p) *p = (char)tolower((unsigned char)*p);
+        char relative[PATH_MAX];
+        assert(rt_path_relative(variant, relative) == 1 && !strcmp(relative, "a.txt"));
+    }
+    char names[256];
+    listing("dir", 0, names, sizeof(names)); assert(!strcmp(names, "x,y,z"));
+    // Création par le jeu : la liste mise en cache est invalidée.
+    uint32_t file = call("fopen", 2, gstr(game_path("dir/w")), gstr("w")); assert(file && call("fclose", 1, file) == 0);
+    listing("dir", 0, names, sizeof(names)); assert(!strcmp(names, "w,x,y,z"));
+    cleanup();
 }
