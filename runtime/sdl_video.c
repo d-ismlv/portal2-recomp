@@ -396,7 +396,12 @@ static int sdl_video(CPU *c, const char *name) {
         SDL_Window *w = WINDOW(0);
         r = (uint32_t)SDL_GL_MakeCurrent(w, handle(c, arg(c, 1), RT_SDL_GLCONTEXT, "SDL: invalid SDL_GLContext handle"));
     }
-    else if (!strcmp(n, "GL_SetSwapInterval")) r = (uint32_t)SDL_GL_SetSwapInterval((int)arg(c, 0));
+    else if (!strcmp(n, "GL_SetSwapInterval")) {
+        // Fenêtre cachée (diagnostic) : jamais rafraîchie par l'écran, la
+        // synchronisation verticale de SDL3/Cocoa y attend indéfiniment.
+        int interval = hidden_windows() ? 0 : (int)arg(c, 0);
+        r = (uint32_t)SDL_GL_SetSwapInterval(interval);
+    }
     else if (!strcmp(n, "GL_SwapWindow")) {
         SDL_Window *w = WINDOW(0);
         diagnose_frame(w);
