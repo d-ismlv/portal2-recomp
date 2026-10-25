@@ -244,7 +244,11 @@ static int dir_entries_uncached(const char *path, RtDirEntry **entries, size_t *
             // la copie utilisateur cache seulement le répertoire des marques.
             if (inside && (i ? rt_path_hidden_name(relative, entry->d_name)
                              : !*relative && !strcmp(entry->d_name, RT_WHITEOUTS))) continue;
-            if (inside && rt_path_is_game_source(sources[i]) && rt_path_windows_binary(entry->d_name)) continue;
+            if (inside && rt_path_is_game_source(sources[i])) {
+                char child[PATH_MAX];
+                int length = snprintf(child, sizeof(child), "%s%s%s", relative, *relative ? "/" : "", entry->d_name);
+                if (length < 0 || length >= (int)sizeof(child) || rt_path_windows_binary(child)) continue;
+            }
             if (listing_add(&l, entry)) { closedir(dir); errno = ENOMEM; goto fail; }
         }
         int error = errno;

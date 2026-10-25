@@ -70,6 +70,7 @@ int rt_munmap(uint32_t address, uint32_t length) {
     if (!length || address < RT_VM_BEGIN || address >= RT_VM_END || address % 4096 || length > RT_VM_END - address) { errno = EINVAL; return -1; }
     uint32_t size = align_up(length, 4096), end = address + size;
     if (end > RT_VM_END) { errno = EINVAL; return -1; }
+    rt_pe_forget(address, size);   // greffon PE projeté ici : plus reconnu
     memset(rt_vm_permissions + ((address - RT_VM_BEGIN) >> 12), 0, size / 4096);
     if (update_host_permissions(address, size, 1)) return -1;
     Mapping **link = &mappings;

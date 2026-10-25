@@ -515,6 +515,52 @@ RT_CHECK(posix_windows_binaries_of_game_copy_are_invisible) {
     assert(!asi && !dll && exe && x);
 }
 
+extern const uint8_t testpe_file[];
+extern const uint32_t testpe_file_size;
+static void put_bytes(const char *relative, const uint8_t *data, size_t size) {
+    char path[PATH_MAX]; snprintf(path, sizeof(path), "%s/%s", game, relative);
+    unlink(path);   // nouveau fichier : nouvelle identité pour le cache de pe.c
+    FILE *file = fopen(path, "wb"); assert(file);
+    assert(fwrite(data, 1, size, file) == size && !fclose(file));
+}
+
+// Seuls les greffons Miles traduits (build/pe-fixture.c enregistre testpe.asi),
+// à leur place bin/linux32 et identiques au fichier traduit, sont visibles.
+RT_CHECK(posix_translated_miles_plugins_are_visible) {
+    setup();
+    char path[PATH_MAX];
+    snprintf(path, sizeof(path), "%s/bin", game); assert(!mkdir(path, 0755));
+    snprintf(path, sizeof(path), "%s/bin/linux32", game); assert(!mkdir(path, 0755));
+    put_bytes("bin/linux32/testpe.asi", testpe_file, testpe_file_size);
+    put_bytes("bin/testpe.asi", testpe_file, testpe_file_size);          // dossier Windows de Miles
+    put_bytes("bin/linux32/mssmp3.asi", testpe_file, testpe_file_size);  // nom non traduit ici
+    put(game, "bin/linux32/engine.dll", "PE");
+    assert(rt_read_path(game_path("bin/linux32/testpe.asi")));
+    assert(rt_read_path(game_path("BIN/Linux32/TESTPE.ASI")));          // volume insensible à la casse
+    errno = 0;
+    assert(!rt_read_path(game_path("bin/testpe.asi")) && errno == ENOENT);
+    assert(!rt_read_path(game_path("bin/linux32/mssmp3.asi")));
+    assert(!rt_read_path(game_path("bin/linux32/engine.dll")));
+    char names[256];
+    listing("bin/linux32", 0, names, sizeof(names));
+    assert(!strcmp(names, "testpe.asi"));
+    listing("bin", 0, names, sizeof(names));
+    assert(!strcmp(names, "linux32"));
+    // Une autre version du greffon (un octet changé) reste invisible. Nouvelle
+    // racine : les listes de répertoires sont mémorisées entre écritures invitées.
+    cleanup();
+    setup();
+    snprintf(path, sizeof(path), "%s/bin", game); assert(!mkdir(path, 0755));
+    snprintf(path, sizeof(path), "%s/bin/linux32", game); assert(!mkdir(path, 0755));
+    uint8_t *copy = malloc(testpe_file_size);
+    memcpy(copy, testpe_file, testpe_file_size); copy[0x400] ^= 1;
+    put_bytes("bin/linux32/testpe.asi", copy, testpe_file_size);
+    free(copy);
+    assert(!rt_read_path(game_path("bin/linux32/testpe.asi")));
+    listing("bin/linux32", 0, names, sizeof(names));
+    assert(!strcmp(names, ""));    cleanup();
+}
+
 RT_CHECK(posix_case_variants_of_root_and_listing_cache) {
     setup();
     if (pathconf(game, _PC_CASE_SENSITIVE) == 0) {
@@ -529,5 +575,19 @@ RT_CHECK(posix_case_variants_of_root_and_listing_cache) {
     // Création par le jeu : la liste mise en cache est invalidée.
     uint32_t file = call("fopen", 2, gstr(game_path("dir/w")), gstr("w")); assert(file && call("fclose", 1, file) == 0);
     listing("dir", 0, names, sizeof(names)); assert(!strcmp(names, "w,x,y,z"));
+    cleanup();
+}
+
+RT_CHECK(posix_read_cache_sees_guest_creations) {
+    setup();
+    char host[PATH_MAX]; snprintf(host, sizeof(host), "%s/later.cfg", user);
+    const char *before = rt_read_path(game_path("later.cfg"));
+    assert(before && access(before, F_OK));                        // absent (résolution mise en cache)
+    assert(rt_read_path(game_path("later.cfg")));                  // deuxième sondage servi par le cache
+    uint32_t file = call("fopen", 2, gstr(game_path("later.cfg")), gstr("w"));
+    assert(file && call("fclose", 1, file) == 0);
+    const char *after = rt_read_path(game_path("later.cfg"));
+    char resolved[PATH_MAX];
+    assert(after && !access(after, F_OK) && realpath(after, resolved) && !strcmp(resolved, host)); // créé par le jeu : visible aussitôt
     cleanup();
 }

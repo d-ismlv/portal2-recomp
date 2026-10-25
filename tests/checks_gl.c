@@ -270,3 +270,16 @@ RT_CHECK(glx_fallback_reports_no_extensions) {
     assert(!rt_gl_proc_address("glXSwapIntervalEXT"));    // le reste de GLX est absent
     CGLSetCurrentContext(saved);
 }
+
+RT_CHECK(gl_call_without_context_is_a_noop_like_linux) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    uint32_t enabled = gl("glIsEnabled", 1, GL_BLEND);   // résolu tant qu'un contexte existe
+    (void)enabled;
+    CGLSetCurrentContext(NULL);
+    W32(DATA, 0x12345678);
+    assert(gl("glGetError", 0) == 0);                     // rend 0
+    gl("glGetIntegerv", 2, GL_VIEWPORT, DATA);            // n'écrit rien
+    assert(R32(DATA) == 0x12345678);
+    CGLSetCurrentContext(saved);
+}

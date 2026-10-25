@@ -29,8 +29,13 @@ build/abi-fixture.c: tests/generate_abi_fixture.py tools/lift.py tools/float_lif
 	@mkdir -p build
 	$(PYTHON) tests/generate_abi_fixture.py $@
 
-build/abi-smoke: build/abi-fixture.c tests/abi_smoke.c $(wildcard tests/*.h) $(CHECKS) $(RUNTIME) $(HEADERS)
-	$(CC) $(CFLAGS) -Iruntime -Itests $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c $(CHECKS) $(HOST_LIBS) -o $@
+# Greffon PE de test (DLL liée par tests/pe_fixture.py, traduite par lift.generate_pe).
+build/pe-fixture.c: tests/generate_pe_fixture.py tests/pe_fixture.py tests/pe_plugin.s tools/lift.py tools/float_lift.py tools/peprep.py
+	@mkdir -p build
+	$(PYTHON) tests/generate_pe_fixture.py $@
+
+build/abi-smoke: build/abi-fixture.c build/pe-fixture.c tests/abi_smoke.c $(wildcard tests/*.h) $(CHECKS) $(RUNTIME) $(HEADERS)
+	$(CC) $(CFLAGS) -Iruntime -Itests $(RUNTIME) build/abi-fixture.c build/pe-fixture.c tests/abi_smoke.c $(CHECKS) $(HOST_LIBS) -o $@
 
 test: build/tier0-smoke build/abi-smoke
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
@@ -53,8 +58,8 @@ progress: $(PREP)/layout.json
 build/tier0-smoke-ubsan: build/tier0.c $(RUNTIME) $(HEADERS) tests/tier0_smoke.c
 	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c $(HOST_LIBS) -o $@
 
-build/abi-smoke-ubsan: build/abi-fixture.c $(RUNTIME) $(HEADERS) tests/abi_smoke.c $(wildcard tests/*.h) $(CHECKS)
-	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime -Itests $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c $(CHECKS) $(HOST_LIBS) -o $@
+build/abi-smoke-ubsan: build/abi-fixture.c build/pe-fixture.c $(RUNTIME) $(HEADERS) tests/abi_smoke.c $(wildcard tests/*.h) $(CHECKS)
+	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime -Itests $(RUNTIME) build/abi-fixture.c build/pe-fixture.c tests/abi_smoke.c $(CHECKS) $(HOST_LIBS) -o $@
 
 sanitize: build/tier0-smoke-ubsan build/abi-smoke-ubsan
 	./build/tier0-smoke-ubsan $(PREP)

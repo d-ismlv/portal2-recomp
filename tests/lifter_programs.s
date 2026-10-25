@@ -385,3 +385,51 @@ lf_main:                                   # returns 40 + argc + (init ran)
     add eax, 40
     add eax, dword ptr [0x20019d00]
     ret
+
+.globl lf_x87_fcom
+lf_x87_fcom:                               # FCOM family: C3 C2 C0 of the status word (MSVC code)
+    fld qword ptr [0x20018e00]             # 1
+    fld qword ptr [0x20018e08]             # 2
+    fcom st(1)                             # 2 > 1: none
+    fnstsw ax
+    mov word ptr [0x20019e00], ax
+    fcom qword ptr [0x20018e10]            # 2 < 3: C0
+    fnstsw ax
+    mov word ptr [0x20019e02], ax
+    fcom dword ptr [0x20018e18]            # 2 == 2.0f: C3
+    fnstsw ax
+    mov word ptr [0x20019e04], ax
+    fld qword ptr [0x20018e20]             # NaN
+    fucomp st(1)                           # unordered: C3 C2 C0, pops
+    fnstsw ax
+    mov word ptr [0x20019e06], ax
+    fcomp                                  # 2 vs 1: none, pops
+    fnstsw ax
+    mov word ptr [0x20019e08], ax
+    test ah, 0x41                          # MSVC: ST(0) > operand when C3 = C0 = 0
+    setz byte ptr [0x20019e10]
+    ftst                                   # 1 vs 0: none
+    fnstsw ax
+    mov word ptr [0x20019e0a], ax
+    fld qword ptr [0x20018e10]             # 3 over 1
+    fcompp                                 # 3 vs 1, pops both
+    fnstsw ax
+    mov word ptr [0x20019e0c], ax
+    fld qword ptr [0x20018e00]             # 1
+    fcomp qword ptr [0x20018e10]           # 1 < 3: C0, pops
+    fnstsw ax
+    sahf                                   # C0 -> CF
+    setb byte ptr [0x20019e11]
+    ret
+
+.globl lf_cvtps2pi
+lf_cvtps2pi:                               # packed float -> MMX integers
+    movups xmm0, xmmword ptr [0x20018e40]
+    cvtps2pi mm0, xmm0                     # round to nearest even
+    movq qword ptr [0x20019e40], mm0
+    cvttps2pi mm1, qword ptr [0x20018e40]  # truncate
+    movq qword ptr [0x20019e48], mm1
+    cvtps2pi mm2, qword ptr [0x20018e48]   # NaN, out of range: integer indefinite
+    movq qword ptr [0x20019e50], mm2
+    emms
+    ret

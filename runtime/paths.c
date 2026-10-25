@@ -5,6 +5,7 @@ const char *rt_ios_case_path(const char *canonical, size_t trusted);
 #endif
 #include <errno.h>
 #include <limits.h>
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <strings.h>
@@ -106,17 +107,57 @@ static int reserved(const char *relative) {
     return !strncmp(relative,RT_WHITEOUTS,length) && (!relative[length] || relative[length]=='/');
 }
 static int overlay_link(const char *result,const char *relative,int preserve_existing,int follow_final,const char **out);
+// Cache des résolutions de lecture sous la racine du jeu : le menu sonde en
+// boucle des fichiers absents (cartes du workshop...) et chaque résolution
+// coûte cinq à six appels système. Une entrée vaut pour une génération : toute
+// écriture invitée (write_path, marques de suppression) ou changement de
+// racines l'invalide. Les changements faits hors du jeu ne sont pas vus.
+#define READ_CACHE 4096u
+typedef struct { unsigned long generation; int error; char canonical[PATH_MAX]; char result[PATH_MAX]; } ReadEntry;
+static ReadEntry *read_cache;
+static pthread_mutex_t read_lock=PTHREAD_MUTEX_INITIALIZER;
+static unsigned read_slot(const char *canonical) {
+    unsigned h=2166136261u; for(const char *p=canonical;*p;++p)h=(h^(unsigned char)*p)*16777619u;
+    return h&(READ_CACHE-1);
+}
+static const char *read_path_uncached(const char *path);
 const char *rt_read_path(const char *path) {
     if(rt_is_proc_path(path))return rt_proc_path(path);   // fichiers /proc générés (procfs.c)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     if(!within(canonical,game_root)) {
 #if TARGET_OS_IPHONE
+        // iOS compare la casse : chemin résolu composant par composant (case_path.c).
         if(within(canonical,linux_root))return rt_ios_case_path(canonical,strlen(linux_root));
         if(within(canonical,user_root))return rt_ios_case_path(canonical,strlen(user_root));
 #endif
         return path;
     }
+    unsigned long now=generation; unsigned slot=read_slot(canonical);
+    pthread_mutex_lock(&read_lock);
+    if(!read_cache)read_cache=calloc(READ_CACHE,sizeof(*read_cache));
+    ReadEntry *e=read_cache?&read_cache[slot]:NULL;
+    if(e && e->generation==now && !strcmp(e->canonical,canonical)){
+        int error=e->error; char *result=error?NULL:buffer();
+        if(result)strcpy(result,e->result);
+        pthread_mutex_unlock(&read_lock);
+        if(error){errno=error;return NULL;}
+        return result;
+    }
+    pthread_mutex_unlock(&read_lock);
+    const char *result=read_path_uncached(path); int error=result?0:errno;
+    if(!result && error!=ENOENT)return NULL;   // erreurs inattendues : non mémorisées
+    pthread_mutex_lock(&read_lock);
+    if(e && strlen(canonical)<PATH_MAX && (!result || strlen(result)<PATH_MAX)){
+        e->generation=now; e->error=error; strcpy(e->canonical,canonical);
+        if(result)strcpy(e->result,result);
+    }
+    pthread_mutex_unlock(&read_lock);
+    if(!result)errno=error;
+    return result;
+}
+static const char *read_path_uncached(const char *path) {
+    char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     const char *relative=canonical+strlen(game_root); while(*relative=='/')++relative;
     if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer();
@@ -124,12 +165,19 @@ const char *rt_read_path(const char *path) {
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
     const char *linked;
     if(*relative && overlay_link(result,relative,-1,1,&linked))return linked;
+#if TARGET_OS_IPHONE
+    // Chaque couche est sondée dans sa casse réelle, pas dans celle demandée.
+    {const char *c=rt_ios_case_path(result,strlen(user_root)); if(c && c!=result)strcpy(result,c);}
+#endif
     struct stat info;
     if(!stat(result,&info) && (!S_ISDIR(info.st_mode) || access(canonical,F_OK)))return result;
     // Supprimé par l'invité : la copie utilisateur absente donne ENOENT.
     if(lstat(result,&info) && rt_path_is_whiteout(relative)==1)return result;
     count=snprintf(result,PATH_MAX,"%s/%s",linux_root,relative);
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
+#if TARGET_OS_IPHONE
+    {const char *c=rt_ios_case_path(result,strlen(linux_root)); if(c && c!=result)strcpy(result,c);}
+#endif
     if(!stat(result,&info) && (!S_ISDIR(info.st_mode) || access(canonical,F_OK)))return result;
     const char *base=strrchr(relative,'/');
     if(base && strstr(relative,"bin/")) {
@@ -172,15 +220,32 @@ static int join(char out[PATH_MAX],const char *root,const char *relative) {
 }
 int rt_path_overlay(const char *relative,char out[PATH_MAX]) { return join(out,user_root,relative); }
 int rt_path_absolute(const char *path,char out[PATH_MAX]) { return absolute_path(path,out); }
+static int join(char out[PATH_MAX],const char *root,const char *relative);
+// Greffon Miles de bin/linux32 traduit d'avance (pe.c) : visible seulement si
+// le fichier de la copie du jeu est exactement celui qui a été traduit.
+static int translated_plugin(const char *relative) {
+    static const char prefix[]="bin/linux32/";
+    if(strncasecmp(relative,prefix,sizeof(prefix)-1))return 0;
+    const char *name=relative+sizeof(prefix)-1;
+    if(!*name || strchr(name,'/'))return 0;
+    const RtPeImage *image=rt_pe_image_named(name);
+    char host[PATH_MAX];
+    if(!image || !game_root[0] || join(host,game_root,relative))return 0;
+    return rt_pe_file_matches(image,host);
+}
 // La copie du jeu est l'installation Windows : ses binaires (DLL, EXE, greffons
 // Miles .asi/.flt) n'existent pas dans une installation Linux et ne doivent pas
-// être vus par le jeu Linux (Miles chargeait mssmp3.asi, un greffon PE).
-int rt_path_windows_binary(const char *name) {
-    const char *base=strrchr(name,'/'); base=base?base+1:name;
+// être vus par le jeu Linux (Miles chargeait mssmp3.asi, un greffon PE, et
+// sautait dans son code non traduit). Exception : les greffons de bin/linux32
+// traduits d'avance, que Miles charge comme sous Linux. `relative` est relatif
+// à la racine du jeu.
+int rt_path_windows_binary(const char *relative) {
+    const char *base=strrchr(relative,'/'); base=base?base+1:relative;
     const char *dot=strrchr(base,'.');
     if(!dot)return 0;
     static const char *const ext[]={".dll",".exe",".asi",".flt",".pdb",".sys"};
-    for(size_t i=0;i<sizeof(ext)/sizeof(*ext);++i)if(!strcasecmp(dot,ext[i]))return 1;
+    for(size_t i=0;i<sizeof(ext)/sizeof(*ext);++i)
+        if(!strcasecmp(dot,ext[i]))return !translated_plugin(relative);
     return 0;
 }
 int rt_path_is_game_source(const char *host) { return game_root[0] && within(host,game_root); }
@@ -264,8 +329,14 @@ static int overlay_link(const char *result,const char *relative,int preserve_exi
         prefix[i]=saved;
     }
 }
-const char *rt_write_path(const char *path,int preserve_existing) { return write_path(path,preserve_existing,1); }
-const char *rt_write_path_nofollow(const char *path) { return write_path(path,0,0); }
+// Génération incrémentée aussi en sortie : write_path résout l'original en
+// lecture (copie préalable), ce qui pourrait sinon rester en cache alors que la
+// copie utilisateur vient d'être créée. Le fichier lui-même est créé ensuite
+// par le même shim, verrou d'exécution invité tenu.
+const char *rt_write_path(const char *path,int preserve_existing) {
+    const char *result=write_path(path,preserve_existing,1); ++generation; return result;
+}
+const char *rt_write_path_nofollow(const char *path) { const char *result=write_path(path,0,0); ++generation; return result; }
 static const char *write_path(const char *path,int preserve_existing,int follow_final) {
     ++generation;   // toute écriture invalide les caches de lecture (listes de dossiers)
     if(!game_root[0])return path;
