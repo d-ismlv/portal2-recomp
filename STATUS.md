@@ -1,11 +1,11 @@
-# État — 25 octobre 2026, soir (reprise Claude)
+# État — 25 octobre 2026, 21 h (reprise Claude)
 
-**Le menu principal de Portal 2 s'affiche**, rendu nativement (ARM64, OpenGL
-legacy d'Apple via togl), après initialisation complète du moteur, du client,
-du serveur, de Steam (vrai client, `SteamAppId=620`) et du son. Mesuré en
-build `-O0` avec fenêtre cachée : ~10 images/s en 1280×720, aucune erreur
-pendant 400 s. Pas encore vérifié : une partie (chargement de carte),
-l'audio audible, la souris/clavier en fenêtre visible, la vitesse en `-O1`.
+**On entre en jeu.** Le build natif ARM64 charge le menu puis la première
+carte (`sp_a1_intro1`, chambre de repos, « LOOK UP ») et la rend sans
+erreur, en fenêtre cachée (vérifié sur `cc21499`, -O1). En fenêtre cachée le
+moteur dort 50 ms par image faute de focus (~15 fps) ; sans ce sommeil
+(chargement) on mesure 200-250 fps. Pas encore vérifié : contrôles
+clavier/souris, son audible, cadence réelle avec focus, suite de la partie.
 
 Lancer (depuis ce dossier, client Steam ouvert) :
 
