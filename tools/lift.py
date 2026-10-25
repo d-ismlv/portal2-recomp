@@ -9,6 +9,8 @@ dispatch table. SSE and x87 are outside this milestone.
 import argparse
 import json
 import hashlib
+import marshal
+import os
 import shutil
 from pathlib import Path
 import re
@@ -412,12 +414,24 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
     return code + ' ' + end, [nxt]
 
 
+class _Without:
+    """`entries - {own}` for membership tests, without copying a large set."""
+    __slots__ = ('entries', 'own')
+
+    def __init__(self, entries, own):
+        self.entries, self.own = entries, own
+
+    def __contains__(self, address):
+        return address != self.own and address in self.entries
+
+
 def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=None):
     """Translate one function. `setjmp(target)` tells whether a direct call
     target is setjmp; its return sites become resume points for longjmp."""
     pending = [entry]
     translated = {}
     resume = set()
+    others = _Without(entries, entry)
     while pending:
         pc = pending.pop()
         if pc in translated:
@@ -425,7 +439,7 @@ def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=No
         if pc not in insns:
             raise Unsupported(f'no instruction at {pc:#x}')
         try:
-            code, successors = translate(pc, insns[pc], entries - {entry}, callees,
+            code, successors = translate(pc, insns[pc], others, callees,
                                          tables(pc) if tables else None)
         except (Unsupported, IndexError) as exc:
             raise Unsupported(f'{pc:#x}: {exc}') from exc
@@ -492,7 +506,10 @@ class JumpTables:
         return None
 
     def before(self, pc, count):
-        if self.previous is None or len(self.previous) < len(self.insns):
+        shared = getattr(self.insns, 'previous', None)   # LazyInsns : tenue à jour au chargement
+        if shared is not None:
+            self.previous = shared
+        elif self.previous is None or len(self.previous) < len(self.insns):
             self.previous = {nxt: start for start, (nxt, _, _) in self.insns.items()}
         out = []
         while len(out) < count and pc in self.previous:
@@ -713,13 +730,24 @@ def module_instructions(mod, objdump, disasm_cache=None):
                     f'{tool.stat().st_mtime_ns}:{tool.stat().st_size}').encode()
         digest = hashlib.sha256(identity + Path(mod['image']).read_bytes()).hexdigest()
         cache_path = Path(disasm_cache) / (digest + '.json')
+        fast_path = cache_path.with_suffix('.marshal')   # même contenu, chargé ~5x plus vite
+        if fast_path.exists():
+            return marshal.loads(fast_path.read_bytes())
         if cache_path.exists():
-            return {int(pc): tuple(value) for pc, value in json.loads(cache_path.read_text()).items()}
+            decoded = {int(pc): tuple(value) for pc, value in json.loads(cache_path.read_text()).items()}
+            _write_atomic(fast_path, marshal.dumps(decoded))
+            return decoded
     decoded = disassemble(mod['image'], mod['base'], objdump)
     if cache_path is not None:
         cache_path.parent.mkdir(parents=True, exist_ok=True)
-        cache_path.write_text(json.dumps(decoded))
+        _write_atomic(fast_path, marshal.dumps(decoded))
     return decoded
+
+
+def _write_atomic(path, data):
+    temporary = path.with_name(f'.{path.name}.{os.getpid()}.tmp')
+    temporary.write_bytes(data)
+    os.replace(temporary, path)
 
 
 def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=None):
@@ -773,6 +801,365 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
     for entry in sorted(compiled):
         code.append(f'case {entry:#x}u: return fn_{entry:x};')
     code.extend(['default: return NULL; } }', 'uint32_t rt_export(const char *name) {'])
+    for name, entry in selected:
+        code.append(f'if (!strcmp(name, {json.dumps(name)})) return {entry:#x}u;')
+    code.extend(['return 0; }', 'const char *rt_import_name(uint32_t target) { switch (target) {'])
+    for addr, name in sorted(imports.items()):
+        code.append(f'case {addr:#x}u: return {json.dumps(name)};')
+    code.extend(['default: return NULL; } }', 'int rt_load_images(const char *directory) {'])
+    for mod in layout['modules']:
+        for seg in mod['loads']:
+            code.append(f'if (rt_load_segment(directory, {json.dumps(mod["name"])}, '
+                        f'{seg["off"]}u, {seg["vaddr"]:#x}u, {seg["filesz"]}u, {seg["memsz"]}u)) return -1;')
+        tls = mod.get('tls')
+        if tls:
+            code.append(f'if (rt_register_tls(directory, {json.dumps(mod["name"])}, {mod["modid"]}u, '
+                        f'{tls["off"]}u, {tls["filesz"]}u, {tls["memsz"]}u, {tls["align"]}u)) return -1;')
+    for item in layout.get('data_imports', []):
+        code.append(f'if (rt_init_import_data({json.dumps(item["name"])}, {item["addr"]:#x}u, {item["size"]}u)) return -1;')
+    code.extend(['return 0; }', ''])
+    code.append(registry.generate(layout))
+    return '\n'.join(code)
+
+
+# ---------------------------------------------------------------------------
+# Génération répartie (tools/build_game.py) : tout le jeu en fichiers C stables.
+
+def executable(module, address):
+    return any(s['flags'] & 1 and s['vaddr'] <= address < s['vaddr'] + s['filesz'] for s in module['loads'])
+
+
+def module_roots(module):
+    """Every known function start of one module: symbols/entries, exports,
+    DT_INIT/FINI, init/fini arrays and code pointers found in data."""
+    roots = set(module['entries']) | set(module.get('data_ptrs', []))
+    roots |= set(module['exports'].values())
+    roots |= {a for a in module['init_array'] + module.get('fini_array', []) if a not in (0, 0xffffffff)}
+    roots |= {a for a in (module['init'], module['fini']) if a}
+    return sorted(a for a in roots if executable(module, a))
+
+
+_GOTOFF = re.compile(r'\[(e[a-z]{2}) ([+-]) (0x[0-9a-f]+)\]$')
+
+
+def code_pointer_roots(module, insns):
+    """Function addresses taken in code rather than stored in data: relocated
+    immediates (`push imm`, `mov r/m, imm`) and PIC `lea r, [R + GOTOFF]`
+    (R holds the GOT; |offset| >= 0x1000 to avoid stack/field offsets).
+    Only instruction boundaries of executable segments of the same module
+    qualify. Extra roots only add compiled code; they never change control
+    flow (a direct jump to a root goes through the checked dispatcher)."""
+    found = set()
+    for pc, (_, op, args) in insns.items():
+        if not executable(module, pc):
+            continue
+        candidates = []
+        if op == 'lea':
+            m = _GOTOFF.search(args)
+            if m and m[1] not in ('esp', 'ebp'):
+                offset = int(m[3], 16) * (1 if m[2] == '+' else -1)
+                if abs(offset) >= 0x1000:
+                    candidates.append((module['gotplt'] + offset) & 0xffffffff)
+        elif op in ('push', 'mov'):
+            candidates += [int(x, 16) for x in (o.strip() for o in args.split(','))
+                           if re.fullmatch(r'0x[0-9a-f]+', x)]
+        found.update(a for a in candidates if a in insns and executable(module, a))
+    return found
+
+
+def _code_pointer_job(name):
+    module = next(m for m in _JOB['layout']['modules'] if m['name'] == name)
+    insns = _JOB['insns']
+    try:
+        insns.load(module, transient=True)
+        return name, sorted(code_pointer_roots(module, insns.modules[name]))
+    finally:
+        insns.drop_transient()
+
+
+def owner(layout, address):
+    return next((m for m in layout['modules'] if executable(m, address)), None)
+
+
+class LazyInsns(dict):
+    """Instruction map that disassembles (through the cache) the module owning
+    an address on first use, and keeps the reverse map JumpTables needs."""
+
+    def __init__(self, layout, objdump, disasm_cache):
+        super().__init__()
+        self.layout, self.objdump, self.disasm_cache = layout, objdump, disasm_cache
+        self.loaded, self.transient, self.previous, self.modules = set(), {}, {}, {}
+
+    def load(self, module, transient=False):
+        if module['name'] in self.loaded:
+            return False
+        decoded = module_instructions(module, self.objdump, self.disasm_cache)
+        self.update(decoded)
+        self.previous.update({nxt: start for start, (nxt, _, _) in decoded.items()})
+        self.loaded.add(module['name'])
+        self.modules[module['name']] = decoded
+        if transient:
+            self.transient[module['name']] = decoded
+        return True
+
+    def drop_transient(self):
+        """Forget modules loaded by one job (bounded memory per worker)."""
+        for name, decoded in self.transient.items():
+            for pc, (nxt, _, _) in decoded.items():
+                dict.pop(self, pc, None)
+                self.previous.pop(nxt, None)
+            self.loaded.discard(name)
+            self.modules.pop(name, None)
+        self.transient.clear()
+
+    def _fault(self, pc):
+        module = owner(self.layout, pc)
+        return module is not None and self.load(module, transient=True)
+
+    def __contains__(self, pc):
+        return dict.__contains__(self, pc) or (self._fault(pc) and dict.__contains__(self, pc))
+
+    def __getitem__(self, pc):
+        try:
+            return dict.__getitem__(self, pc)
+        except KeyError:
+            if self._fault(pc):
+                return dict.__getitem__(self, pc)
+            raise
+
+    def get(self, pc, default=None):
+        return self[pc] if pc in self else default
+
+
+_JOB = {}   # état partagé par fork avec les processus de génération
+
+
+def _claim(address):
+    """Atomically reserve one function entry across all worker processes."""
+    index = address - _JOB['low']
+    if not 0 <= index < _JOB['span']:
+        raise Unsupported(f'function {address:#x} outside prepared code')
+    bits, lock = _JOB['claims'], _JOB['lock']
+    with lock:
+        byte = bits[index >> 3]
+        if byte & (1 << (index & 7)):
+            return False
+        bits[index >> 3] = byte | (1 << (index & 7))
+        return True
+
+
+def _generate_job(job):
+    """Lift the closure of some roots; entries claimed elsewhere are skipped."""
+    number, roots = job
+    insns, imports, tables = _JOB['insns'], _JOB['imports'], _JOB['tables']
+    setjmp = lambda t: import_called(t, insns, imports, tables) in SETJMP_IMPORTS
+    functions, used_imports, pending = {}, set(), list(reversed(roots))
+    initial, optional, skipped, failed = set(roots), _JOB['optional'], [], []
+    try:
+        while pending:
+            entry = pending.pop()
+            if entry in imports:
+                used_imports.add(entry)
+                continue
+            if entry in initial and entry in optional and entry not in insns:
+                # Root from symbols/data pointers that is not code (an object
+                # in .rodata of an executable segment): nothing to compile; a
+                # guest transfer there would still trap in rt_dispatch.
+                skipped.append(entry)
+                continue
+            if entry in functions:
+                continue
+            callees = set()
+            try:
+                if not _claim(entry):
+                    continue
+                functions[entry] = lift(entry, insns, _JOB['entries'], callees, tables, setjmp)
+            except Unsupported as exc:
+                if entry in _JOB['named']:
+                    raise Unsupported(f'{exc} (function {entry:#x})') from None
+                # Not compiled: rt_dispatch traps ("target not recompiled") if
+                # the guest ever transfers there. Reported, never skipped silently.
+                failed.append((entry, str(exc)))
+                continue
+            pending.extend(sorted(callees, reverse=True))
+    finally:
+        insns.drop_transient()
+        tables.cache.clear()
+    part = Path(_JOB['parts']) / f'{number:05d}.part'
+    _write_atomic(part, marshal.dumps(functions))
+    return number, {entry: count for entry, (_, count) in functions.items()}, sorted(used_imports), skipped, failed
+
+
+SHARD_BITS = 17   # 128 Kio de code invité par fichier : une nouvelle racine ne touche qu'un fichier
+
+
+def shard_name(module, entry):
+    return f'{module["name"].replace(".", "_")}.{(entry - module["base"]) >> SHARD_BITS:03x}.c'
+
+
+def generate_sharded(layout, specs, whole_game, objdump, disasm_cache, out_dir, jobs, log=print):
+    """Lift every function reachable from `specs` (and, with whole_game, from
+    every known root of every module) into C files grouped by guest address.
+
+    Returns a manifest: shard name -> sorted function entries, plus counts.
+    Generated code is identical to `generate` for the same entry set; only
+    the file layout differs (functions are extern, looked up by dispatch.c).
+    """
+    import gc
+    import multiprocessing
+    import time
+    started = time.time()
+    selected = [(name, resolve_export(layout, name)) for name in specs]
+    imports = {item['addr']: item['name'] for item in layout['imports']}
+    roots = {entry for _, entry in selected}
+    named = set(roots)
+    if whole_game:
+        for module in layout['modules']:
+            roots.update(module_roots(module))
+    context = multiprocessing.get_context('fork')
+    insns = LazyInsns(layout, objdump, disasm_cache)
+    for module in layout['modules']:
+        # Gros modules : désassemblés une fois dans le parent, partagés par fork
+        # (gc.freeze : le ramasse-miettes ne recopie pas leurs pages).
+        if sum(s['filesz'] for s in module['loads'] if s['flags'] & 1) > 0x100000:
+            insns.load(module)
+    gc.collect()
+    gc.freeze()
+    taken = 0
+    if whole_game:
+        _JOB.update(layout=layout, insns=insns)
+        try:
+            with context.Pool(jobs) as pool:
+                for name, found in pool.imap_unordered(_code_pointer_job, [m['name'] for m in layout['modules']]):
+                    taken += len(set(found) - roots)
+                    roots.update(found)
+        finally:
+            _JOB.clear()
+    entries = {e for m in layout['modules'] for e in m['entries']} | roots | set(imports)
+    by_module = {}
+    for entry in sorted(roots):
+        if entry in imports:
+            continue
+        module = owner(layout, entry)
+        if module is None:
+            raise Unsupported(f'root {entry:#x} lies outside executable segments')
+        by_module.setdefault(module['name'], []).append(entry)
+    big = insns.loaded - set(insns.transient)
+    load_time = time.time() - started
+    work, number = [], 0
+    target = max(1, len(roots) // max(1, 6 * jobs))
+    for name, module_roots_list in sorted(by_module.items(), key=lambda kv: -len(kv[1])):
+        step = target if name in big else len(module_roots_list)
+        for i in range(0, len(module_roots_list), step):
+            work.append((number, module_roots_list[i:i + step]))
+            number += 1
+    executable_ranges = [(s['vaddr'], s['vaddr'] + s['filesz']) for m in layout['modules']
+                         for s in m['loads'] if s['flags'] & 1]
+    low = min(a for a, _ in executable_ranges)
+    span = max(b for _, b in executable_ranges) - low
+    parts = Path(out_dir) / 'parts'
+    shutil.rmtree(parts, ignore_errors=True)
+    parts.mkdir(parents=True)
+    _JOB.update(insns=insns, imports=imports, entries=frozenset(entries), low=low, span=span,
+                optional=frozenset(roots - named), named=frozenset(named),
+                claims=context.RawArray('B', (span + 7) // 8), lock=context.Lock(), parts=str(parts),
+                tables=JumpTables(layout, insns))
+    counts, used_imports, not_code, failures = {}, set(), set(), {}
+    try:
+        with context.Pool(jobs) as pool:
+            for done, (_, functions, used, skipped, failed) in enumerate(pool.imap_unordered(_generate_job, work), 1):
+                counts.update(functions)
+                failures.update(failed)
+                used_imports.update(used)
+                not_code.update(skipped)
+                if done % 10 == 0 or done == len(work):
+                    log(f'  lifted {done}/{len(work)} jobs: {len(counts)} functions, '
+                        f'{sum(counts.values())} instructions, {time.time() - started:.0f} s')
+    finally:
+        gc.unfreeze()
+        _JOB.clear()
+    del insns
+    gc.collect()
+    lift_time = time.time() - started - load_time
+    # Regroupement stable par adresse : le contenu d'un fichier ne dépend que
+    # des fonctions de sa plage.
+    shards = {}
+    for part in sorted(parts.glob('*.part')):
+        for entry, (body, _) in marshal.loads(part.read_bytes()).items():
+            module = owner(layout, entry)
+            shards.setdefault(shard_name(module, entry), {})[entry] = body
+    out_dir = Path(out_dir)
+    sources = out_dir / 'src'
+    sources.mkdir(parents=True, exist_ok=True)
+    manifest = dict(shards={}, functions=len(counts), instructions=sum(counts.values()),
+                    used_imports=sorted(used_imports), roots=len(roots), code_pointer_roots=taken, c_bytes=0,
+                    non_code_roots=[f'{a:#x}' for a in sorted(not_code)],
+                    not_compiled={f'{a:#x}': why for a, why in sorted(failures.items()) if a not in counts})
+    for name, bodies in sorted(shards.items()):
+        text = '/* Generated by tools/lift.py. Do not edit. */\n#include "rt.h"\n' + '\n'.join(
+            bodies[entry].replace('static void fn_', 'void fn_', 1) for entry in sorted(bodies)) + '\n'
+        data = text.encode()
+        path = sources / name
+        if not path.exists() or path.stat().st_size != len(data) or path.read_bytes() != data:
+            _write_atomic(path, data)
+        manifest['shards'][name] = sorted(bodies)
+        manifest['c_bytes'] += len(data)
+    for stale in sources.glob('*.c'):
+        if stale.name not in manifest['shards'] and stale.name != 'dispatch.c':
+            stale.unlink()
+    dispatch = dispatch_source(layout, selected, imports, sorted(counts))
+    data = dispatch.encode()
+    path = sources / 'dispatch.c'
+    if not path.exists() or path.read_bytes() != data:
+        _write_atomic(path, data)
+    manifest['c_bytes'] += len(data)
+    shutil.rmtree(parts, ignore_errors=True)
+    manifest['timing'] = dict(load=round(load_time, 1), lift=round(lift_time, 1),
+                              write=round(time.time() - started - load_time - lift_time, 1))
+    log(f'{len(selected)} named roots, {len(roots)} roots ({taken} from code pointers), {len(counts)} native functions, '
+        f'{manifest["instructions"]} instructions, {len(used_imports)} direct imports, '
+        f'{len(shards)} files, {manifest["c_bytes"] / 1e6:.0f} MB of C, {len(not_code)} non-code roots ignored '
+        f'(load {load_time:.0f} s, lift {lift_time:.0f} s)')
+    if manifest['not_compiled']:
+        log(f'{len(manifest["not_compiled"])} functions NOT compiled (runtime trap if reached), e.g. '
+            + '; '.join(f'{a}: {why}' for a, why in list(manifest['not_compiled'].items())[:5]))
+    return manifest
+
+
+def dispatch_source(layout, selected, imports, functions):
+    """rt_lookup over every compiled function: a page index over the guest
+    code range, then a binary search among the few entries of that page."""
+    code = ['/* Generated by tools/lift.py. Do not edit. */', '#include "rt.h"']
+    code += [f'void fn_{entry:x}(CPU *c);' for entry in functions]
+    code.append(f'static const uint32_t entry_address[{max(1, len(functions))}] = {{')
+    code += [f'{entry:#x}u,' for entry in functions] or ['0']
+    code.append('};')
+    code.append(f'static const gfn entry_function[{max(1, len(functions))}] = {{')
+    code += [f'fn_{entry:x},' for entry in functions] or ['0']
+    code.append('};')
+    if functions:
+        first, last = functions[0] >> 12, functions[-1] >> 12
+        starts, index = [], 0
+        for page in range(first, last + 2):
+            while index < len(functions) and functions[index] >> 12 < page:
+                index += 1
+            starts.append(index)
+        code.append(f'static const uint32_t page_start[{len(starts)}] = {{')
+        code += [', '.join(f'{v}u' for v in starts[i:i + 16]) + ',' for i in range(0, len(starts), 16)]
+        code.append('};')
+        code += ['gfn rt_lookup(uint32_t target) {',
+                 f'    uint32_t page = target >> 12;',
+                 f'    if (page < {first:#x}u || page > {last:#x}u) return NULL;',
+                 f'    uint32_t lo = page_start[page - {first:#x}u], hi = page_start[page - {first:#x}u + 1];',
+                 '    while (lo < hi) {',
+                 '        uint32_t mid = lo + (hi - lo) / 2;',
+                 '        if (entry_address[mid] < target) lo = mid + 1; else hi = mid;',
+                 '    }',
+                 '    return lo < ' + str(len(functions)) + 'u && entry_address[lo] == target ? entry_function[lo] : NULL;',
+                 '}']
+    else:
+        code.append('gfn rt_lookup(uint32_t target) { (void)target; (void)entry_address; (void)entry_function; return NULL; }')
+    code.append('uint32_t rt_export(const char *name) {')
     for name, entry in selected:
         code.append(f'if (!strcmp(name, {json.dumps(name)})) return {entry:#x}u;')
     code.extend(['return 0; }', 'const char *rt_import_name(uint32_t target) { switch (target) {'])
