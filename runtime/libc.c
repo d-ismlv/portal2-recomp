@@ -457,7 +457,8 @@ int rt_libc_shim(CPU *c, const char *name) {
     } else if (!strcmp(name, "readlink")) {
         const char *path=string(c,argument(c,0)); a=argument(c,1); n=argument(c,2);
         ssize_t result;
-        if(!strcmp(path,"/proc/self/exe")) {
+        char own_exe[48]; snprintf(own_exe,sizeof(own_exe),"/proc/%d/exe",(int)getpid());
+        if(!strcmp(path,"/proc/self/exe") || !strcmp(path,own_exe)) {
             const char *program=rt_program_path(); size_t count=strlen(program);if(count>n)count=n;
             memcpy(rt_write_span(c,a,count),program,count);result=(ssize_t)count;
         } else {const char *resolved=rt_read_path(path);result=resolved?readlink(resolved,rt_write_span(c,a,n),n):-1;}

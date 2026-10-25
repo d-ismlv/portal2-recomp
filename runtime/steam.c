@@ -300,6 +300,33 @@ void *steam_proxy_host(uint32_t proxy) {
     return rt_handle_get(R32(proxy + 4), KIND_INTERFACE);
 }
 
+// Interfaces absentes de l'API flat mais servies par steamclient : appel de la
+// méthode virtuelle de l'objet hôte (ABI C++ ARM64 : this en premier argument).
+// ISteamGameCoordinator001 : SendMessage, IsMessageAvailable, RetrieveMessage.
+static int virtual_bridge(CPU *c, const char *name, uint32_t table, long iface) {
+    unsigned slot;
+    if (sscanf(name, "SteamGameCoordinator001::slot%u", &slot) != 1 || slot > 2) return 0;
+    uint32_t object = R32(c->esp + 4), args = c->esp + 8;
+    void *host = object && R32(object) == table ? steam_proxy_host(object) : NULL;
+    if (!host) fail(c, "Steam: %s called on an object that is not a %s proxy", name, interface_version((size_t)iface));
+    void **methods = *(void ***)host;
+    if (slot == 0) {
+        typedef int32_t (*Send)(void *, uint32_t, const void *, uint32_t);
+        uint32_t size = R32(args + 8);
+        c->eax = (uint32_t)((Send)methods[0])(host, R32(args), steam_in_buffer(c, R32(args + 4), size, 1), size);
+    } else if (slot == 1) {
+        typedef bool (*Available)(void *, uint32_t *);
+        c->eax = ((Available)methods[1])(host, steam_out(c, R32(args), 4)) ? 1u : 0u;
+    } else {
+        typedef int32_t (*Retrieve)(void *, uint32_t *, void *, uint32_t, uint32_t *);
+        uint32_t capacity = R32(args + 8);
+        c->eax = (uint32_t)((Retrieve)methods[2])(host, steam_out(c, R32(args), 4),
+                                                  steam_out_buffer(c, R32(args + 4), capacity, 1), capacity,
+                                                  steam_out(c, R32(args + 12), 4));
+    }
+    return 1;
+}
+
 // Appel invité d'un emplacement de vtable : "Version::Méthode" ou "Version::slotN".
 static int method_shim(CPU *c, const char *name) {
     const char *separator = strstr(name, "::");
@@ -310,6 +337,7 @@ static int method_shim(CPU *c, const char *name) {
     pthread_mutex_unlock(&lock);
     if (iface < 0) return 0;
     const SteamMethodInfo *m = find_method(name);
+    if (!m && virtual_bridge(c, name, table, iface)) return 1;
     if (!m) fail(c, "Steam: %s has no flat function in SDK 1.53a%s", name, "");
     if (!m->fn) {
         snprintf(message, sizeof(message), "Steam: %s (vtable slot %u) is not bridged: %s", name, m->slot, m->why);

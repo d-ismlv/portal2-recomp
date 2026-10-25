@@ -107,6 +107,28 @@ static int write_cmdline(FILE *out) {
 
 static int write_overcommit(FILE *out) { return fputs("0\n", out) < 0 ? -1 : 0; }
 
+// /proc/<pid>/cmdline d'un autre processus : arguments réels via KERN_PROCARGS2.
+static int other_pid;
+static int write_other_cmdline(FILE *out) {
+    int mib[3] = {CTL_KERN, KERN_PROCARGS2, other_pid};
+    size_t size = 0;
+    if (sysctl(mib, 3, NULL, &size, NULL, 0) || size < sizeof(int)) return -1;
+    char *buffer = malloc(size);
+    if (!buffer) return -1;
+    if (sysctl(mib, 3, buffer, &size, NULL, 0)) { free(buffer); return -1; }
+    int argc; memcpy(&argc, buffer, sizeof(argc));
+    char *at = buffer + sizeof(int), *end = buffer + size;
+    while (at < end && *at) ++at;          // chemin de l'exécutable
+    while (at < end && !*at) ++at;         // remplissage
+    for (int i = 0; i < argc && at < end; ++i) {
+        size_t n = strnlen(at, (size_t)(end - at));
+        fwrite(at, 1, n, out); fputc(0, out);
+        at += n + 1;
+    }
+    free(buffer);
+    return 0;
+}
+
 typedef struct { const char *path, *file; int (*writer)(FILE *); } ProcFile;
 static const ProcFile files[] = {
     {"/proc/meminfo", "meminfo", write_meminfo},
@@ -128,8 +150,17 @@ const char *rt_proc_path(const char *path) {
     if (!strncmp(path, self, strlen(self)))   // /proc/<notre pid>/x == /proc/self/x
         snprintf(normalized, sizeof(normalized), "/proc/self/%s", path + strlen(self));
     else snprintf(normalized, sizeof(normalized), "%s", path);
-    for (size_t i = 0; i < sizeof(files) / sizeof(*files); ++i) {
-        if (strcmp(normalized, files[i].path)) continue;
+    int pid; char tail[32];
+    ProcFile other = {0};
+    const ProcFile *table = files; size_t table_size = sizeof(files) / sizeof(*files);
+    if (sscanf(normalized, "/proc/%d/%31s", &pid, tail) == 2 && !strcmp(tail, "cmdline") && pid > 0) {
+        pthread_mutex_lock(&lock); other_pid = pid; pthread_mutex_unlock(&lock);
+        other = (ProcFile){normalized, "other_cmdline", write_other_cmdline};
+        table = &other; table_size = 1;
+    }
+    for (size_t i = 0; i < table_size; ++i) {
+        const ProcFile *entry = &table[i];
+        if (strcmp(normalized, entry->path)) continue;
         pthread_mutex_lock(&lock);
         if (!directory[0]) {
             const char *tmp = getenv("TMPDIR");
@@ -138,12 +169,12 @@ const char *rt_proc_path(const char *path) {
         }
         pthread_mutex_unlock(&lock);
         static _Thread_local char result[1100];
-        snprintf(result, sizeof(result), "%s/%s", directory, files[i].file);
+        snprintf(result, sizeof(result), "%s/%s", directory, entry->file);
         char temporary[1120];
         snprintf(temporary, sizeof(temporary), "%s.%p", result, (void *)&result);
         FILE *out = fopen(temporary, "wb");
         if (!out) return NULL;
-        int failed = files[i].writer(out);
+        int failed = entry->writer(out);
         if (fclose(out) || failed || rename(temporary, result)) { unlink(temporary); errno = EIO; return NULL; }
         return result;
     }

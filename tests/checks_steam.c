@@ -336,3 +336,36 @@ RT_CHECK(steam_warning_hook_reaches_guest_from_steam_thread) {
     assert(!pthread_create(&thread, NULL, hook_thread, NULL) && !pthread_join(thread, NULL));
     assert(hook_severity == 1 && strstr(hook_text, "warn") && !strstr(hook_text, "76561197960287930"));
 }
+
+// Faux ISteamGameCoordinator001 hôte : vraie table de méthodes virtuelles.
+static uint32_t gc_sent_type, gc_sent_size; static uint8_t gc_sent[8];
+static int32_t gc_send(void *self, uint32_t type, const void *data, uint32_t size) {
+    (void)self; gc_sent_type = type; gc_sent_size = size; memcpy(gc_sent, data, size < 8 ? size : 8); return 0;
+}
+static bool gc_available(void *self, uint32_t *size) { (void)self; *size = 3; return true; }
+static int32_t gc_retrieve(void *self, uint32_t *type, void *dest, uint32_t capacity, uint32_t *size) {
+    (void)self; *type = 77; *size = 3; if (capacity >= 3) memcpy(dest, "abc", 3); return capacity >= 3 ? 0 : 2;
+}
+static void *gc_vtable[] = {(void *)gc_send, (void *)gc_available, (void *)gc_retrieve};
+static struct { void **vtable; } gc_object = {gc_vtable};
+
+static uint32_t gc_call(uint32_t proxy, unsigned slot, unsigned n, const uint32_t *args) {
+    CPU c; rt_cpu_reset(&c); c.esp = 0x20010000;
+    W32(c.esp, proxy);
+    for (unsigned i = 0; i < n; ++i) W32(c.esp + 4 + 4 * i, args[i]);
+    rt_call(&c, R32(R32(proxy) + 4 * slot), RT_RETURN_SENTINEL);
+    assert(c.esp == 0x20010000);
+    return c.eax;
+}
+RT_CHECK(steam_game_coordinator_uses_host_vtable) {
+    CPU c; rt_cpu_reset(&c);
+    uint32_t proxy = steam_proxy(&c, &gc_object, "SteamGameCoordinator001");
+    assert(proxy);
+    memcpy(GPTR(0x20011000), "hello", 5);
+    uint32_t send[] = {42, 0x20011000, 5};
+    assert(gc_call(proxy, 0, 3, send) == 0 && gc_sent_type == 42 && gc_sent_size == 5 && !memcmp(gc_sent, "hello", 5));
+    uint32_t avail[] = {0x20011100};
+    assert(gc_call(proxy, 1, 1, avail) == 1 && R32(0x20011100) == 3);
+    uint32_t get[] = {0x20011200, 0x20011300, 16, 0x20011400};
+    assert(gc_call(proxy, 2, 4, get) == 0 && R32(0x20011200) == 77 && R32(0x20011400) == 3 && !memcmp(GPTR(0x20011300), "abc", 3));
+}
