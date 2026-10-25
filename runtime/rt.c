@@ -1,4 +1,5 @@
 #include "rt.h"
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/mman.h>
@@ -75,19 +76,66 @@ __attribute__((noreturn)) void rt_trap(CPU *c, uint32_t pc, const char *why) {
 static _Thread_local CPU *shim_cpu;
 CPU *rt_shim_cpu(void) { return shim_cpu; }
 
+// Cache d'aiguillage des imports (statiques 0xf0000000+, dynamiques
+// 0xf8000000+, pas de 16) : pour chaque adresse, le nom et la route du
+// fournisseur qui l'a accepté (rt_shim_route). Les entrées sont immuables,
+// publiées par échange atomique et jamais libérées (les noms sont statiques
+// ou conservés par bridge.c). Un nom inconnu n'est jamais mis en cache.
+#define ROUTE_BASE 0xf0000000u
+#define ROUTE_CHUNK_BITS 16
+typedef struct { const char *name; RtShimRoute route; } ImportRoute;
+typedef ImportRoute *_Atomic RouteSlot;
+static RouteSlot *_Atomic route_chunks[((UINT64_C(1) << 32) - ROUTE_BASE) >> (4 + ROUTE_CHUNK_BITS)];
+
+static RouteSlot *route_slot(uint32_t target, int create) {
+    if (target < ROUTE_BASE || (target & 15)) return NULL;
+    uint32_t index = (target - ROUTE_BASE) >> 4;
+    RouteSlot *_Atomic *chunk = &route_chunks[index >> ROUTE_CHUNK_BITS];
+    RouteSlot *slots = atomic_load_explicit(chunk, memory_order_acquire);
+    if (!slots && create) {
+        RouteSlot *fresh = calloc((size_t)1 << ROUTE_CHUNK_BITS, sizeof(*fresh));
+        if (!fresh) return NULL;
+        if (atomic_compare_exchange_strong_explicit(chunk, &slots, fresh, memory_order_acq_rel, memory_order_acquire))
+            slots = fresh;
+        else free(fresh);  // un autre thread l'a installé : slots le désigne
+    }
+    return slots ? &slots[index & ((1u << ROUTE_CHUNK_BITS) - 1)] : NULL;
+}
+
+static int run_shim(CPU *c, const char *name, const RtShimRoute *route, RtShimRoute *learned) {
+    CPU *outer = shim_cpu;
+    shim_cpu = c;
+    int handled = route ? rt_route_call(route, c, name) : rt_shim_route(c, name, learned);
+    shim_cpu = outer;
+    return handled;
+}
+
 void rt_dispatch(CPU *c, uint32_t target) {
     rt_guest_poll();
     c->eip = target;
     gfn fn = rt_lookup(target);
     if (fn) { fn(c); return; }
-    const char *name = rt_import_name(target);
+    RouteSlot *slot = route_slot(target, 0);
+    ImportRoute *cached = slot ? atomic_load_explicit(slot, memory_order_acquire) : NULL;
+    // Route connue : même fournisseur que la chaîne complète (contrat dans
+    // rt.h) ; s'il refuse malgré tout, la chaîne est reprise ci-dessous.
+    if (cached && run_shim(c, cached->name, &cached->route, NULL)) { rt_return(c); return; }
+    const char *name = cached ? cached->name : rt_import_name(target);
     if (!name) name = rt_dynamic_import_name(target);
     if (name) {
-        CPU *outer = shim_cpu;
-        shim_cpu = c;
-        int handled = rt_shim(c, name);
-        shim_cpu = outer;
-        if (handled) { rt_return(c); return; }
+        RtShimRoute route;
+        if (run_shim(c, name, NULL, &route)) {
+            if ((slot = route_slot(target, 1))) {
+                ImportRoute *entry = malloc(sizeof(*entry));
+                if (entry) {
+                    *entry = (ImportRoute){name, route};
+                    ImportRoute *old = atomic_exchange_explicit(slot, entry, memory_order_acq_rel);
+                    (void)old;  // éventuel lecteur concurrent : l'ancienne entrée reste valide, jamais libérée
+                }
+            }
+            rt_return(c);
+            return;
+        }
     }
     rt_trap(c, target, name ? name : "target not recompiled");
 }

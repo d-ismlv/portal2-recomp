@@ -40,7 +40,13 @@ test: build/tier0-smoke build/abi-smoke
 clean:
 	rm -rf build
 
-.PHONY: progress sanitize
+.PHONY: progress sanitize game
+# Jeu complet : toutes les fonctions connues, C réparti et compilé en parallèle
+# avec cache d'objets (build/game/obj). GAME_OPT=0 pour un binaire de diagnostic.
+GAME_OPT ?= 1
+game:
+	$(PYTHON) tools/build_game.py --opt $(GAME_OPT)
+
 progress: $(PREP)/layout.json
 	$(PYTHON) tools/progress.py --layout $(PREP)/layout.json --out build/progress.json
 

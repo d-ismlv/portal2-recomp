@@ -73,14 +73,7 @@ def operand_form(args):
     return ', '.join(forms)
 
 
-def module_roots(module):
-    def executable(address):
-        return any(s['flags'] & 1 and s['vaddr'] <= address < s['vaddr'] + s['filesz'] for s in module['loads'])
-    roots = set(module['entries']) | set(module.get('data_ptrs', []))
-    roots |= set(module['exports'].values())
-    roots |= {a for a in module['init_array'] + module.get('fini_array', []) if a not in (0, 0xffffffff)}
-    roots |= {a for a in (module['init'], module['fini']) if a}
-    return sorted(a for a in roots if executable(a))
+module_roots = lift.module_roots   # mêmes racines que build_game.py
 
 
 def audit_module(job):
