@@ -39,6 +39,14 @@ RESPONSES = {
     'SteamAPI_ISteamFriends_GetPersonaName': 'return "Player";',
     'SteamAPI_ISteamFriends_GetPersonaState': 'return 1;',
     'SteamAPI_ISteamFriends_GetFriendPersonaName': 'return "Player";',
+    # Connexion au serveur local (aussi en solo) : ticket factice non vide.
+    'SteamAPI_ISteamUser_InitiateGameConnection_DEPRECATED': 'return steam_stub_ticket(a1, a2);',
+    'SteamAPI_ISteamUser_GetAuthSessionTicket':
+        'int32_t n = steam_stub_ticket(a1, a2); if (a3) *(uint32_t *)a3 = (uint32_t)n; return n > 0 ? 1u : 0u;',
+    'SteamAPI_ISteamGameServer_GetAuthSessionTicket':
+        'int32_t n = steam_stub_ticket(a1, a2); if (a3) *(uint32_t *)a3 = (uint32_t)n; return n > 0 ? 1u : 0u;',
+    'SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate_DEPRECATED':
+        f'if (a4) *(uint64_t *)a4 = {STEAM_ID}ull; return true;',
 }
 
 
@@ -77,7 +85,8 @@ def main():
              '#include <TargetConditionals.h>', '#if TARGET_OS_IPHONE',
              '#include <stdbool.h>', '#include <stdint.h>', '#include <stddef.h>', '#include <time.h>',
              '#define EXPORT __attribute__((visibility("default"), used))',
-             'void *steam_stub_interface(const char *version);']
+             'void *steam_stub_interface(const char *version);',
+             'int32_t steam_stub_ticket(void *buffer, int32_t capacity);']
     count = 0
     for name, (ret, args) in sorted(signatures().items()):
         if name in skip:

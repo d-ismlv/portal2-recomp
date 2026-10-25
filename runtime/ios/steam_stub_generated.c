@@ -8,6 +8,7 @@
 #include <time.h>
 #define EXPORT __attribute__((visibility("default"), used))
 void *steam_stub_interface(const char *version);
+int32_t steam_stub_ticket(void *buffer, int32_t capacity);
 EXPORT int32_t SteamAPI_ISteamAppList_GetAppBuildId(void *a0, uint32_t a1) { (void)a0; (void)a1; return 0; }
 EXPORT int32_t SteamAPI_ISteamAppList_GetAppInstallDir(void *a0, uint32_t a1, void *a2, int32_t a3) { (void)a0; (void)a1; (void)a2; (void)a3; return 0; }
 EXPORT int32_t SteamAPI_ISteamAppList_GetAppName(void *a0, uint32_t a1, void *a2, int32_t a3) { (void)a0; (void)a1; (void)a2; (void)a3; return 0; }
@@ -217,7 +218,7 @@ EXPORT void SteamAPI_ISteamGameServer_ClearAllKeyValues(void *a0) { (void)a0;  }
 EXPORT uint64_t SteamAPI_ISteamGameServer_ComputeNewPlayerCompatibility(void *a0, uint64_t a1) { (void)a0; (void)a1; return 0; }
 EXPORT uint64_t SteamAPI_ISteamGameServer_CreateUnauthenticatedUserConnection(void *a0) { (void)a0; return 0; }
 EXPORT void SteamAPI_ISteamGameServer_EndAuthSession(void *a0, uint64_t a1) { (void)a0; (void)a1;  }
-EXPORT uint32_t SteamAPI_ISteamGameServer_GetAuthSessionTicket(void *a0, void *a1, int32_t a2, void *a3) { (void)a0; (void)a1; (void)a2; (void)a3; return 0; }
+EXPORT uint32_t SteamAPI_ISteamGameServer_GetAuthSessionTicket(void *a0, void *a1, int32_t a2, void *a3) { (void)a0; (void)a1; (void)a2; (void)a3; int32_t n = steam_stub_ticket(a1, a2); if (a3) *(uint32_t *)a3 = (uint32_t)n; return n > 0 ? 1u : 0u; }
 EXPORT void SteamAPI_ISteamGameServer_GetGameplayStats(void *a0) { (void)a0;  }
 EXPORT int32_t SteamAPI_ISteamGameServer_GetNextOutgoingPacket(void *a0, void *a1, int32_t a2, void *a3, void *a4) { (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; return 0; }
 EXPORT uint64_t SteamAPI_ISteamGameServer_GetServerReputation(void *a0) { (void)a0; return 0; }
@@ -227,7 +228,7 @@ EXPORT void SteamAPI_ISteamGameServer_LogOff(void *a0) { (void)a0;  }
 EXPORT void SteamAPI_ISteamGameServer_LogOn(void *a0, const char *a1) { (void)a0; (void)a1;  }
 EXPORT void SteamAPI_ISteamGameServer_LogOnAnonymous(void *a0) { (void)a0;  }
 EXPORT bool SteamAPI_ISteamGameServer_RequestUserGroupStatus(void *a0, uint64_t a1, uint64_t a2) { (void)a0; (void)a1; (void)a2; return false; }
-EXPORT bool SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate_DEPRECATED(void *a0, uint32_t a1, void *a2, uint32_t a3, void *a4) { (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; return false; }
+EXPORT bool SteamAPI_ISteamGameServer_SendUserConnectAndAuthenticate_DEPRECATED(void *a0, uint32_t a1, void *a2, uint32_t a3, void *a4) { (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; if (a4) *(uint64_t *)a4 = 76561197960265729ull; return true; }
 EXPORT void SteamAPI_ISteamGameServer_SendUserDisconnect_DEPRECATED(void *a0, uint64_t a1) { (void)a0; (void)a1;  }
 EXPORT void SteamAPI_ISteamGameServer_SetAdvertiseServerActive(void *a0, bool a1) { (void)a0; (void)a1;  }
 EXPORT void SteamAPI_ISteamGameServer_SetBotPlayerCount(void *a0, int32_t a1) { (void)a0; (void)a1;  }
@@ -674,7 +675,7 @@ EXPORT int32_t SteamAPI_ISteamUser_BeginAuthSession(void *a0, void *a1, int32_t 
 EXPORT void SteamAPI_ISteamUser_CancelAuthTicket(void *a0, uint32_t a1) { (void)a0; (void)a1;  }
 EXPORT int32_t SteamAPI_ISteamUser_DecompressVoice(void *a0, void *a1, uint32_t a2, void *a3, uint32_t a4, void *a5, uint32_t a6) { (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; return 0; }
 EXPORT void SteamAPI_ISteamUser_EndAuthSession(void *a0, uint64_t a1) { (void)a0; (void)a1;  }
-EXPORT uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void *a0, void *a1, int32_t a2, void *a3) { (void)a0; (void)a1; (void)a2; (void)a3; return 0; }
+EXPORT uint32_t SteamAPI_ISteamUser_GetAuthSessionTicket(void *a0, void *a1, int32_t a2, void *a3) { (void)a0; (void)a1; (void)a2; (void)a3; int32_t n = steam_stub_ticket(a1, a2); if (a3) *(uint32_t *)a3 = (uint32_t)n; return n > 0 ? 1u : 0u; }
 EXPORT uint64_t SteamAPI_ISteamUser_GetDurationControl(void *a0) { (void)a0; return 0; }
 EXPORT bool SteamAPI_ISteamUser_GetEncryptedAppTicket(void *a0, void *a1, int32_t a2, void *a3) { (void)a0; (void)a1; (void)a2; (void)a3; return false; }
 EXPORT int32_t SteamAPI_ISteamUser_GetGameBadgeLevel(void *a0, int32_t a1, bool a2) { (void)a0; (void)a1; (void)a2; return 0; }
@@ -684,7 +685,7 @@ EXPORT int32_t SteamAPI_ISteamUser_GetPlayerSteamLevel(void *a0) { (void)a0; ret
 EXPORT uint64_t SteamAPI_ISteamUser_GetSteamID(void *a0) { (void)a0; return 76561197960265729ull; }
 EXPORT bool SteamAPI_ISteamUser_GetUserDataFolder(void *a0, void *a1, int32_t a2) { (void)a0; (void)a1; (void)a2; return false; }
 EXPORT uint32_t SteamAPI_ISteamUser_GetVoiceOptimalSampleRate(void *a0) { (void)a0; return 0; }
-EXPORT int32_t SteamAPI_ISteamUser_InitiateGameConnection_DEPRECATED(void *a0, void *a1, int32_t a2, uint64_t a3, uint32_t a4, uint16_t a5, bool a6) { (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; return 0; }
+EXPORT int32_t SteamAPI_ISteamUser_InitiateGameConnection_DEPRECATED(void *a0, void *a1, int32_t a2, uint64_t a3, uint32_t a4, uint16_t a5, bool a6) { (void)a0; (void)a1; (void)a2; (void)a3; (void)a4; (void)a5; (void)a6; return steam_stub_ticket(a1, a2); }
 EXPORT uint64_t SteamAPI_ISteamUser_RequestEncryptedAppTicket(void *a0, void *a1, int32_t a2) { (void)a0; (void)a1; (void)a2; return 0; }
 EXPORT uint64_t SteamAPI_ISteamUser_RequestStoreAuthURL(void *a0, const char *a1) { (void)a0; (void)a1; return 0; }
 EXPORT void SteamAPI_ISteamUser_StartVoiceRecording(void *a0) { (void)a0;  }

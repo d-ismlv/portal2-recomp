@@ -72,6 +72,19 @@ EXPORT bool SteamAPI_ManualDispatch_GetAPICallResult(int32_t pipe, uint64_t call
     (void)pipe; (void)call; (void)out; (void)size; (void)expected; if (failed) *failed = true; return false;
 }
 
+// ---- tickets d'authentification ----
+// En solo, le client se connecte quand même au serveur local et exige un
+// ticket non vide (« STEAM certificate length error 0/2048 »). Ticket
+// factice, reconnu par le côté serveur du stub ; jamais envoyé ailleurs.
+int32_t steam_stub_ticket(void *buffer, int32_t capacity) {
+    static const unsigned char magic[16] = "P2-iOS-offline";
+    if (!buffer || capacity < (int32_t)sizeof(magic) + 8) return 0;
+    memcpy(buffer, magic, sizeof(magic));
+    uint64_t id = 76561197960265729ull;
+    memcpy((unsigned char *)buffer + sizeof(magic), &id, sizeof(id));
+    return (int32_t)sizeof(magic) + 8;
+}
+
 // ---- crochets d'avertissement (appelés par steam.c hors code généré) ----
 EXPORT void SteamAPI_ISteamClient_SetWarningMessageHook(void *self, void *hook) { (void)self; (void)hook; }
 EXPORT void SteamAPI_ISteamUtils_SetWarningMessageHook(void *self, void *hook) { (void)self; (void)hook; }
