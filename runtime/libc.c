@@ -1,10 +1,11 @@
 // Explicit guest handles and i386 layouts: no native FILE/DIR/timeval pointer
 // or structure is ever cast to the guest ABI.
-#include "rt.h"
+#include "posix.h"
 #include <dirent.h>
 #include <ctype.h>
 #include <errno.h>
 #include <fcntl.h>
+#include <sys/stat.h>
 #include <sys/sysctl.h>
 #include <limits.h>
 #include <stdio.h>
@@ -17,8 +18,10 @@
 typedef struct Stream {
     uint32_t handle;
     FILE *file;
-    DIR *dir;
-    uint32_t dirent;
+    int directory;         // flux de répertoire : liste fusionnée figée à l'ouverture
+    RtDirEntry *entries;
+    size_t entry_count, position;
+    uint32_t dirent, dirent64;
     int standard;
     struct Stream *next;
 } Stream;
@@ -29,21 +32,42 @@ typedef struct Environment { char *name; uint32_t value; struct Environment *nex
 static Environment *environment;
 static uint32_t argument(CPU *c, unsigned i) { return R32(c->esp + 4 + 4 * i); }
 
-static int linux_errno(int value) {
-    switch (value) {
-    case EAGAIN: return 11;
-    case EDEADLK: return 35;
-    case ENOSYS: return 38;
-    case ENOTSUP: return 95;
-    case ENAMETOOLONG: return 36;
-    case ELOOP: return 40;
-    case ENOTEMPTY: return 39;
-    case EOVERFLOW: return 75;
-    case ETIMEDOUT: return 110;
-    case ECONNREFUSED: return 111;
-    default: return value;
-    }
+// errno Darwin et Linux coïncident de 1 à 34 (sauf EAGAIN/EDEADLK : 11/35 inversés).
+static const struct { int darwin, linux_value; } errno_table[] = {
+    {EDEADLK, 35}, {EAGAIN, 11}, {EINPROGRESS, 115}, {EALREADY, 114}, {ENOTSOCK, 88},
+    {EDESTADDRREQ, 89}, {EMSGSIZE, 90}, {EPROTOTYPE, 91}, {ENOPROTOOPT, 92},
+    {EPROTONOSUPPORT, 93}, {ESOCKTNOSUPPORT, 94}, {ENOTSUP, 95}, {EOPNOTSUPP, 95},
+    {EPFNOSUPPORT, 96}, {EAFNOSUPPORT, 97}, {EADDRINUSE, 98}, {EADDRNOTAVAIL, 99},
+    {ENETDOWN, 100}, {ENETUNREACH, 101}, {ENETRESET, 102}, {ECONNABORTED, 103},
+    {ECONNRESET, 104}, {ENOBUFS, 105}, {EISCONN, 106}, {ENOTCONN, 107}, {ESHUTDOWN, 108},
+    {ETOOMANYREFS, 109}, {ETIMEDOUT, 110}, {ECONNREFUSED, 111}, {ELOOP, 40},
+    {ENAMETOOLONG, 36}, {EHOSTDOWN, 112}, {EHOSTUNREACH, 113}, {ENOTEMPTY, 39},
+    {EUSERS, 87}, {EDQUOT, 122}, {ESTALE, 116}, {EREMOTE, 66}, {ENOLCK, 37}, {ENOSYS, 38},
+    {EOVERFLOW, 75}, {ECANCELED, 125}, {EIDRM, 43}, {ENOMSG, 42}, {EILSEQ, 84},
+    {ENOATTR, 61}, {EBADMSG, 74}, {EMULTIHOP, 72}, {ENODATA, 61}, {ENOLINK, 67},
+    {ENOSR, 63}, {ENOSTR, 60}, {EPROTO, 71}, {ETIME, 62}, {ENOTRECOVERABLE, 131},
+    {EOWNERDEAD, 130}, {EPROCLIM, 11}, {EBADEXEC, 8}, {EBADARCH, 8}, {EBADMACHO, 8},
+    {ESHLIBVERS, 8}, {EFTYPE, 22}, {EAUTH, 13}, {ENEEDAUTH, 13}, {EPWROFF, 5}, {EDEVERR, 5},
+    {EBADRPC, 5}, {ERPCMISMATCH, 5}, {EPROGUNAVAIL, 5}, {EPROGMISMATCH, 5}, {EPROCUNAVAIL, 5},
+    {ENOPOLICY, 1}, {EQFULL, 105},
+};
+int rt_linux_errno(int value) {
+    if (value == EDEADLK) return 35;
+    if (value == EAGAIN) return 11;
+    if (value > 0 && value <= 34) return value;
+    for (size_t i = 0; i < sizeof(errno_table) / sizeof(*errno_table); ++i)
+        if (errno_table[i].darwin == value) return errno_table[i].linux_value;
+    return 5; // erreur Darwin sans équivalent Linux : EIO
 }
+int rt_darwin_errno(int value) {
+    if (value == 11) return EAGAIN;
+    if (value == 35) return EDEADLK;
+    if (value > 0 && value <= 34) return value;
+    for (size_t i = 0; i < sizeof(errno_table) / sizeof(*errno_table); ++i)
+        if (errno_table[i].linux_value == value) return errno_table[i].darwin;
+    return 0;
+}
+#define linux_errno rt_linux_errno
 static uint32_t errno_slot(CPU *c) {
     if (!errno_address) {
         errno_address = rt_alloc(4);
@@ -58,16 +82,125 @@ void rt_save_errno(CPU *c) { rt_set_errno(c, linux_errno(errno)); }
 static const char *string(CPU *c, uint32_t address) { rt_string_length(c, address); return GPTR(address); }
 static Stream *lookup(CPU *c, uint32_t handle, int directory) {
     for (Stream *s = streams; s; s = s->next)
-        if (s->handle == handle && (directory ? s->dir != NULL : s->file != NULL)) return s;
+        if (s->handle == handle && (directory ? s->directory : s->file != NULL)) return s;
     rt_trap(c, c->eip, directory ? "unknown guest DIR handle" : "unknown guest FILE handle");
 }
 void *rt_stream_file(CPU *c, uint32_t handle) { return lookup(c, handle, 0)->file; }
-static uint32_t new_stream(FILE *file, DIR *dir) {
+static Stream *new_stream_record(void) {
     Stream *s = calloc(1, sizeof(*s));
-    if (!s) return 0;
+    if (!s) return NULL;
     s->handle = next_handle; next_handle += 0x100;
-    s->file = file; s->dir = dir; s->next = streams; streams = s;
+    s->next = streams; streams = s;
+    return s;
+}
+static uint32_t new_stream(FILE *file) {
+    Stream *s = new_stream_record();
+    if (!s) return 0;
+    s->file = file;
     return s->handle;
+}
+uint32_t rt_stream_new(FILE *file) { return new_stream(file); }
+FILE *rt_stream_take(CPU *c, uint32_t handle) {
+    Stream *s = lookup(c, handle, 0);
+    if (s->standard) rt_trap(c, c->eip, "standard stream cannot be detached");
+    FILE *file = s->file; s->file = NULL;
+    return file;
+}
+
+// Liste fusionnée d'un répertoire invité : copie utilisateur, dépôt Linux,
+// copie du jeu. Un nom n'apparaît qu'une fois ; la première source gagne.
+typedef struct { RtDirEntry *items; size_t count, capacity; uint32_t *table; size_t buckets; } Listing;
+static uint32_t name_hash(const char *name) {
+    uint32_t h = 2166136261u;
+    while (*name) h = (h ^ (uint8_t)*name++) * 16777619u;
+    return h;
+}
+static int listing_has(Listing *l, const char *name) {
+    if (!l->buckets) return 0;
+    for (size_t i = name_hash(name) & (l->buckets - 1);; i = (i + 1) & (l->buckets - 1)) {
+        if (!l->table[i]) return 0;
+        if (!strcmp(l->items[l->table[i] - 1].name, name)) return 1;
+    }
+}
+static int listing_add(Listing *l, const struct dirent *entry) {
+    if (l->count + 1 > l->buckets / 2) {
+        size_t buckets = l->buckets ? l->buckets * 2 : 64;
+        uint32_t *table = calloc(buckets, sizeof(*table));
+        if (!table) return -1;
+        for (size_t i = 0; i < l->count; ++i) {
+            size_t j = name_hash(l->items[i].name) & (buckets - 1);
+            while (table[j]) j = (j + 1) & (buckets - 1);
+            table[j] = (uint32_t)i + 1;
+        }
+        free(l->table); l->table = table; l->buckets = buckets;
+    }
+    if (l->count == l->capacity) {
+        size_t capacity = l->capacity ? l->capacity * 2 : 32;
+        RtDirEntry *items = realloc(l->items, capacity * sizeof(*items));
+        if (!items) return -1;
+        l->items = items; l->capacity = capacity;
+    }
+    char *name = strdup(entry->d_name);
+    if (!name) return -1;
+    l->items[l->count] = (RtDirEntry){name, entry->d_ino, entry->d_type};
+    size_t j = name_hash(name) & (l->buckets - 1);
+    while (l->table[j]) j = (j + 1) & (l->buckets - 1);
+    l->table[j] = (uint32_t)++l->count;
+    return 0;
+}
+void rt_dir_entries_free(RtDirEntry *entries, size_t count) {
+    for (size_t i = 0; i < count; ++i) free(entries[i].name);
+    free(entries);
+}
+int rt_dir_entries(const char *path, RtDirEntry **entries, size_t *count) {
+    char relative[PATH_MAX], sources[3][PATH_MAX];
+    int inside = rt_path_relative(path, relative), source_count = 0;
+    if (inside < 0) return -1;
+    if (inside) {
+        // Même règle que rt_read_path : le répertoire doit être visible.
+        const char *visible = rt_read_path(path); struct stat info;
+        if (!visible) return -1;
+        if (stat(visible, &info)) return -1;
+        if (!S_ISDIR(info.st_mode)) { errno = ENOTDIR; return -1; }
+        if (rt_path_overlay(relative, sources[0])) return -1;
+        source_count = 1;
+        char lower[2][PATH_MAX]; int lower_count = rt_path_lower(relative, lower);
+        for (int i = 0; i < lower_count; ++i) strcpy(sources[source_count++], lower[i]);
+    } else {
+        if (strlen(path) >= PATH_MAX) { errno = ENAMETOOLONG; return -1; }
+        strcpy(sources[0], path); source_count = 1;
+    }
+    Listing l = {0};
+    int opened = 0;
+    for (int i = 0; i < source_count; ++i) {
+        DIR *dir = opendir(sources[i]);
+        if (!dir) {
+            if (!inside || (errno != ENOENT && errno != ENOTDIR)) goto fail;
+            continue;
+        }
+        ++opened;
+        struct dirent *entry;
+        for (errno = 0; (entry = readdir(dir)); errno = 0) {
+            if (listing_has(&l, entry->d_name)) continue;
+            // Les sources originales (i > 0) respectent les suppressions ;
+            // la copie utilisateur cache seulement le répertoire des marques.
+            if (inside && (i ? rt_path_hidden_name(relative, entry->d_name)
+                             : !*relative && !strcmp(entry->d_name, RT_WHITEOUTS))) continue;
+            if (listing_add(&l, entry)) { closedir(dir); errno = ENOMEM; goto fail; }
+        }
+        int error = errno;
+        closedir(dir);
+        if (error) { errno = error; goto fail; }
+    }
+    if (!opened) { errno = ENOENT; goto fail; }
+    free(l.table);
+    *entries = l.items; *count = l.count;
+    return 0;
+fail:;
+    int error = errno;
+    free(l.table); rt_dir_entries_free(l.items, l.count);
+    errno = error;
+    return -1;
 }
 uint32_t rt_standard_stream(int index) {
     uint32_t handle = 0xd1000000u + (uint32_t)index * 0x100;
@@ -82,7 +215,7 @@ void rt_libc_destroy(void) {
     while (streams) {
         Stream *next = streams->next;
         if (streams->file && !streams->standard) fclose(streams->file);
-        if (streams->dir) closedir(streams->dir);
+        rt_dir_entries_free(streams->entries, streams->entry_count);
         free(streams); streams = next;
     }
     while (environment) { Environment *next = environment->next; free(environment->name); free(environment); environment = next; }
@@ -217,7 +350,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         }
         if (!file) { save_errno(c); c->eax = 0; }
         else {
-            c->eax = new_stream(file, NULL);
+            c->eax = new_stream(file);
             if (!c->eax) { fclose(file); errno = ENOMEM; save_errno(c); }
         }
     } else if (!strcmp(name, "fclose")) {
@@ -355,35 +488,42 @@ int rt_libc_shim(CPU *c, const char *name) {
         if (result) save_errno(c);
         c->eax = (uint32_t)result;
     } else if (!strcmp(name, "opendir")) {
-        const char *resolved=rt_read_path(string(c,argument(c,0)));
-        DIR *dir = resolved?opendir(resolved):NULL;
-        if (!dir) { save_errno(c); c->eax = 0; }
-        else {
-            c->eax = new_stream(NULL, dir);
-            if (!c->eax) { closedir(dir); errno = ENOMEM; save_errno(c); }
-        }
+        RtDirEntry *entries; size_t count;
+        if (rt_dir_entries(string(c, argument(c, 0)), &entries, &count)) { save_errno(c); c->eax = 0; return 1; }
+        Stream *s = new_stream_record();
+        if (!s) { rt_dir_entries_free(entries, count); errno = ENOMEM; save_errno(c); c->eax = 0; return 1; }
+        s->directory = 1; s->entries = entries; s->entry_count = count;
+        c->eax = s->handle;
     } else if (!strcmp(name, "closedir")) {
         Stream *s = lookup(c, argument(c, 0), 1);
-        int result = closedir(s->dir); s->dir = NULL;
-        if (result) save_errno(c);
-        c->eax = (uint32_t)result;
-    } else if (!strcmp(name, "readdir")) {
-        Stream *s = lookup(c, argument(c, 0), 1);
-        errno = 0;
-        struct dirent *entry = readdir(s->dir);
+        rt_dir_entries_free(s->entries, s->entry_count);
+        s->entries = NULL; s->entry_count = 0; s->directory = 0;
+        if (s->dirent) rt_free(s->dirent);
+        if (s->dirent64) rt_free(s->dirent64);
+        s->dirent = s->dirent64 = 0;
         c->eax = 0;
-        if (!entry) { if (errno) save_errno(c); }
-        else {
-            if (!s->dirent) s->dirent = rt_alloc(280);
-            if (!s->dirent) { errno = ENOMEM; save_errno(c); return 1; }
-            uint32_t address = s->dirent;
-            size_t len = strlen(entry->d_name);
-            if (len > 255) { errno = ENAMETOOLONG; save_errno(c); return 1; }
-            memset(GPTR(address), 0, 280);
-            W32(address, (uint32_t)entry->d_ino); W32(address + 4, (uint32_t)telldir(s->dir));
-            W16(address + 8, (uint32_t)((12 + len + 3) & ~(size_t)3)); W8(address + 10, entry->d_type);
-            memcpy(GPTR(address + 11), entry->d_name, len + 1); c->eax = address;
-        }
+    } else if (!strcmp(name, "readdir") || !strcmp(name, "readdir64")) {
+        // glibc i386 : dirent {ino32, off32, reclen16, type8, name[256]} (268 octets),
+        // dirent64 {ino64, off64, reclen16, type8, name[256]} (280 octets).
+        Stream *s = lookup(c, argument(c, 0), 1);
+        int wide = !strcmp(name, "readdir64");
+        c->eax = 0;
+        if (s->position >= s->entry_count) return 1; // fin : errno inchangé
+        RtDirEntry *entry = &s->entries[s->position];
+        size_t len = strlen(entry->name);
+        if (len > 255) { errno = ENAMETOOLONG; save_errno(c); return 1; }
+        if (!wide && entry->ino > UINT32_MAX) { ++s->position; errno = EOVERFLOW; save_errno(c); return 1; }
+        uint32_t *slot = wide ? &s->dirent64 : &s->dirent, size = wide ? 280 : 268;
+        if (!*slot) *slot = rt_alloc(size);
+        if (!*slot) { errno = ENOMEM; save_errno(c); return 1; }
+        uint32_t address = *slot, header = wide ? 19 : 11;
+        memset(GPTR(address), 0, size);
+        ++s->position;
+        if (wide) { W64(address, entry->ino); W64(address + 8, s->position); }
+        else { W32(address, (uint32_t)entry->ino); W32(address + 4, (uint32_t)s->position); }
+        W16(address + header - 3, (uint32_t)((header + len + 1 + (wide ? 7 : 3)) & ~(size_t)(wide ? 7 : 3)));
+        W8(address + header - 1, entry->type);
+        memcpy(GPTR(address + header), entry->name, len + 1); c->eax = address;
     } else if (!strcmp(name, "strpbrk") || !strcmp(name, "strstr") || !strcmp(name, "strcasestr") || !strcmp(name, "strchr") || !strcmp(name, "strrchr")) {
         a = argument(c, 0); const char *source = string(c, a); const char *result;
         if (!strcmp(name, "strchr")) result = strchr(source, (int)argument(c, 1));
@@ -421,14 +561,8 @@ int rt_libc_shim(CPU *c, const char *name) {
         if (errno) save_errno(c);
         fpush(c, value);
     } else if (!strcmp(name, "strerror")) {
-        int code = (int32_t)argument(c, 0);
-        switch (code) {
-        case 11: code = EAGAIN; break; case 35: code = EDEADLK; break;
-        case 38: code = ENOSYS; break; case 95: code = ENOTSUP; break;
-        case 36: code = ENAMETOOLONG; break; case 40: code = ELOOP; break;
-        case 39: code = ENOTEMPTY; break; case 75: code = EOVERFLOW; break;
-        case 110: code = ETIMEDOUT; break; case 111: code = ECONNREFUSED; break;
-        }
+        int code = (int32_t)argument(c, 0), native = rt_darwin_errno(code);
+        if (native) code = native; else if (code > 0) code = -1; // message « Unknown error »
         const char *message = strerror(code); size_t size = strlen(message) + 1;
         c->eax = rt_alloc((uint32_t)size);
         if (c->eax) memcpy(GPTR(c->eax), message, size);
