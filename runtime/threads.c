@@ -1,9 +1,16 @@
 // i386 pthread_t is a guest TCB address; Darwin pthread_t never crosses the ABI.
+// SHIMS: pthread_detach pthread_kill pthread_yield pthread_setaffinity_np pthread_timedjoin_np pthread_tryjoin_np sched_yield
+// pthread_cancel is deliberately not declared: it traps with an explicit reason
+// (asynchronous cancellation of AOT code cannot be honoured). Only weak
+// references exist in the game (libstdc++'s __gthread_active_p probe).
 #include "modules.h"
 #include <errno.h>
 #include <pthread.h>
+#include <sched.h>
 #include <stdlib.h>
 #include <stdio.h>
+#include <sys/sysctl.h>
+#include <time.h>
 
 typedef struct ThreadAttr {
     uint32_t address,size;
@@ -13,7 +20,7 @@ typedef struct Thread {
     CPU cpu;
     pthread_t native;
     uint32_t handle,entry,argument,stack,length,result;
-    int finished,joining,joined;
+    int finished,joining,joined,detached,foreign;
     struct Thread *next;
 } Thread;
 static ThreadAttr *attributes;
@@ -21,17 +28,58 @@ static Thread *threads;
 static uint32_t next_tid=2,main_handle;
 static pthread_t main_native;
 static _Thread_local Thread *current;
+// Completion of a worker is published under join_lock so that timed and
+// non-blocking joins can wait without polling. Lock order: gate, then join_lock.
+static pthread_mutex_t join_lock=PTHREAD_MUTEX_INITIALIZER;
+static pthread_cond_t join_cond=PTHREAD_COND_INITIALIZER;
+static pthread_key_t foreign_key;
 static uint32_t argument(CPU *c,unsigned index){return R32(c->esp+4+index*4);}
 static ThreadAttr *find_attr(uint32_t address){for(ThreadAttr *a=attributes;a;a=a->next)if(a->address==address)return a;return NULL;}
 static Thread *find_thread(uint32_t handle){for(Thread *t=threads;t;t=t->next)if(t->handle==handle)return t;return NULL;}
+static void unlink_thread(Thread *t){Thread **link=&threads;while(*link && *link!=t)link=&(*link)->next;if(*link)*link=t->next;}
+// Gate held. Frees a detached or foreign record once its guest code is over.
+static void release(Thread *t){unlink_thread(t);if(t->stack)rt_munmap(t->stack,t->length);rt_tls_release(t->cpu.tid);free(t);}
+static void finish(Thread *t){
+    pthread_mutex_lock(&join_lock);t->finished=1;pthread_cond_broadcast(&join_cond);pthread_mutex_unlock(&join_lock);
+    if(t->detached)release(t);
+}
 static void *thread_entry(void *opaque) {
     Thread *t=opaque;current=t;
     rt_guest_enter();
     t->result=rt_invoke(&t->cpu,t->entry,&t->argument,1);
     rt_thread_destructors(&t->cpu);
-    t->finished=1;
+    finish(t);current=NULL;
     rt_guest_leave();
     return NULL;
+}
+// Allocate a guest stack with a guard page below and above. Gate held.
+static int map_stack(CPU *c,Thread *t,uint32_t size){
+    size=(size+4095)&~4095u;
+    t->length=(size+8192+16383)&~16383u;
+    t->stack=rt_mmap(c,0,t->length,3,0x22,-1,0);
+    if(t->stack==UINT32_MAX){t->stack=0;return -1;}
+    if(rt_mprotect(t->stack,4096,0) || rt_mprotect(t->stack+4096+size,t->length-4096-size,0))rt_trap(c,c->eip,"guest thread stack protection failed");
+    t->cpu.esp=t->stack+4096+size;
+    return 0;
+}
+static int linux_signal_valid(uint32_t signal){return signal<=64;}
+// Gate held; waits for t to finish (deadline NULL = no wait), then reaps it.
+static int join(Thread *t,uint32_t output,const struct timespec *deadline,int nonblocking){
+    if(t==current)return 35;                                   // EDEADLK
+    if(t->joined || t->joining || t->detached || t->foreign)return EINVAL;
+    if(!t->finished && nonblocking)return 16;                  // EBUSY
+    t->joining=1;
+    unsigned saved;int error=0;
+    if(deadline){
+        pthread_mutex_lock(&join_lock);saved=rt_guest_suspend();
+        while(!t->finished && !error)error=pthread_cond_timedwait(&join_cond,&join_lock,deadline);
+        if(t->finished)error=0;
+        pthread_mutex_unlock(&join_lock);rt_guest_resume(saved);
+    }
+    if(!error){saved=rt_guest_suspend();error=pthread_join(t->native,NULL);rt_guest_resume(saved);}
+    t->joining=0;
+    if(!error){t->joined=1;if(output)W32(output,t->result);rt_munmap(t->stack,t->length);t->stack=0;}
+    return error==ETIMEDOUT?110:error;
 }
 int rt_thread_shim(CPU *c,const char *name) {
     if(!c->tid)c->tid=1;
@@ -54,14 +102,10 @@ int rt_thread_shim(CPU *c,const char *name) {
         uint32_t attr_address=argument(c,1);ThreadAttr *attr=find_attr(attr_address);
         if(attr_address && !attr){c->eax=EINVAL;return 1;}
         Thread *t=calloc(1,sizeof(*t));if(!t){c->eax=ENOMEM;return 1;}
-        uint32_t size=attr?attr->size:8*1024*1024;size=(size+4095)&~4095u;
         rt_cpu_reset(&t->cpu);t->cpu.tid=next_tid++;
         t->cpu.fcw=c->fcw;t->cpu.mxcsr=c->mxcsr;
-        t->length=(size+8192+16383)&~16383u;
-        t->stack=rt_mmap(c,0,t->length,3,0x22,-1,0);
-        if(t->stack==UINT32_MAX){free(t);c->eax=EAGAIN;return 1;}
-        if(rt_mprotect(t->stack,4096,0) || rt_mprotect(t->stack+4096+size,t->length-4096-size,0))rt_trap(c,c->eip,"guest thread stack protection failed");
-        t->cpu.esp=t->stack+4096+size;t->handle=rt_thread_pointer(&t->cpu);
+        if(map_stack(c,t,attr?attr->size:8*1024*1024)){free(t);c->eax=11;return 1;}
+        t->handle=rt_thread_pointer(&t->cpu);
         t->entry=argument(c,2);t->argument=argument(c,3);
         pthread_attr_t native_attr;error=pthread_attr_init(&native_attr);
         if(!error){
@@ -72,20 +116,50 @@ int rt_thread_shim(CPU *c,const char *name) {
         if(error){rt_munmap(t->stack,t->length);free(t);}
         else {t->next=threads;threads=t;W32(address,t->handle);}
         c->eax=error==EAGAIN?11:(uint32_t)error;
-    } else if(!strcmp(name,"pthread_join")) {
+    } else if(!strcmp(name,"pthread_join") || !strcmp(name,"pthread_tryjoin_np") || !strcmp(name,"pthread_timedjoin_np")) {
         Thread *t=find_thread(address);uint32_t output=argument(c,1);
-        if(!t)error=ESRCH;
-        else if(t==current)error=EDEADLK;
-        else if(t->joined || t->joining)error=EINVAL;
-        else {t->joining=1;unsigned saved=rt_guest_suspend();error=pthread_join(t->native,NULL);rt_guest_resume(saved);
-            t->joining=0;
-            if(!error){t->joined=1;if(output)W32(output,t->result);rt_munmap(t->stack,t->length);}}
-        c->eax=error==EDEADLK?35:(uint32_t)error;
+        if(!t){c->eax=3;return 1;}                             // ESRCH
+        struct timespec deadline={0};int timed=!strcmp(name,"pthread_timedjoin_np");
+        if(timed && !t->finished){
+            uint32_t pointer=argument(c,2);deadline.tv_sec=(int32_t)R32(pointer);deadline.tv_nsec=(int32_t)R32(pointer+4);
+            if(deadline.tv_nsec<0 || deadline.tv_nsec>=1000000000){c->eax=EINVAL;return 1;}
+        }
+        c->eax=(uint32_t)join(t,output,timed?&deadline:NULL,!strcmp(name,"pthread_tryjoin_np"));
+    } else if(!strcmp(name,"pthread_detach")) {
+        Thread *t=find_thread(address);
+        if(!t)error=address==main_handle?0:3;
+        else if(t->joined || t->joining || t->detached || t->foreign)error=EINVAL;
+        else {
+            error=pthread_detach(t->native);
+            if(!error){t->detached=1;if(t->finished)release(t);}
+        }
+        c->eax=(uint32_t)error;
+    } else if(!strcmp(name,"pthread_kill")) {
+        Thread *t=find_thread(address);uint32_t signal=argument(c,1);
+        int alive=address==main_handle || (t && !t->finished && !t->joined);
+        if(!alive)c->eax=3;
+        else if(!linux_signal_valid(signal))c->eax=EINVAL;
+        else if(signal)rt_trap(c,c->eip,signal==9?"pthread_kill(SIGKILL) terminates the whole Linux process; not emulated":"guest signal delivery to a thread is not implemented");
+        else c->eax=0;
+    } else if(!strcmp(name,"pthread_cancel")) {
+        rt_trap(c,c->eip,"pthread_cancel: asynchronous cancellation of recompiled code is not supported");
+    } else if(!strcmp(name,"pthread_yield")) {
+        unsigned saved=rt_guest_suspend();sched_yield();rt_guest_resume(saved);c->eax=0;
+    } else if(!strcmp(name,"pthread_setaffinity_np")) {
+        // Darwin has no CPU pinning on Apple silicon. The mask is validated as
+        // Linux would (ESRCH, EINVAL for no online CPU), then left as a hint.
+        Thread *t=find_thread(address);uint32_t size=argument(c,1);
+        if(!(address==main_handle || (t && !t->joined && !t->finished))){c->eax=3;return 1;}
+        const uint8_t *mask=rt_span(c,argument(c,2),size);
+        int cpus=1;size_t length=sizeof(cpus);
+        if(sysctlbyname("hw.logicalcpu",&cpus,&length,NULL,0) || cpus<1)cpus=1;
+        int any=0;for(uint32_t bit=0;bit<(uint32_t)cpus && bit/8<size;++bit)if(mask[bit/8]>>(bit%8)&1)any=1;
+        c->eax=any?0:EINVAL;
     } else if(!strcmp(name,"pthread_getschedparam") || !strcmp(name,"pthread_setschedparam")) {
         Thread *t=find_thread(address);pthread_t native;
-        if(t && !t->joined)native=t->native;
+        if(t && !t->joined && !t->foreign)native=t->native;
         else if(address==main_handle)native=main_native;
-        else {c->eax=ESRCH;return 1;}
+        else {c->eax=3;return 1;}
         struct sched_param param;int policy;
         if(!strcmp(name,"pthread_getschedparam")){
             error=pthread_getschedparam(native,&policy,&param);
@@ -100,14 +174,58 @@ int rt_thread_shim(CPU *c,const char *name) {
         c->eax=(uint32_t)error;
     } else if(!strcmp(name,"pthread_exit")) {
         if(!current)rt_trap(c,c->eip,"pthread_exit outside worker thread");
-        current->result=address;rt_thread_destructors(c);current->finished=1;
+        if(current->foreign)rt_trap(c,c->eip,"pthread_exit on a foreign host thread (would end a library thread)");
+        Thread *t=current;t->result=address;rt_thread_destructors(c);current=NULL;finish(t);
         rt_guest_suspend();pthread_exit(NULL);
     } else return 0;
     return 1;
 }
+// sched_yield is not a pthread_* name, so it needs its own provider.
+static int sched_shim(CPU *c,const char *name){
+    if(strcmp(name,"sched_yield"))return 0;
+    unsigned saved=rt_guest_suspend();sched_yield();rt_guest_resume(saved);c->eax=0;
+    return 1;
+}
+RT_SHIM_PROVIDER(sched_shim)
+
+// Foreign host threads (CoreAudio/SDL audio threads...) calling guest code.
+static void foreign_release(Thread *t){
+    rt_guest_enter();
+    current=t;rt_thread_destructors(&t->cpu);current=NULL;
+    release(t);
+    rt_guest_leave();
+}
+// Runs at host thread exit if the bridge never detached. _Thread_local data may
+// already be reset here; the guest gate and errno simply start from zero.
+// Darwin clears TSD slots in ascending key order, even slots without a native
+// destructor: creating this key before main makes it run while the guest
+// pthread_key values of the thread are still readable.
+static void foreign_exit(void *opaque){foreign_release(opaque);}
+__attribute__((constructor)) static void foreign_key_create(void){if(pthread_key_create(&foreign_key,foreign_exit))abort();}
+CPU *rt_foreign_thread_attach(void){
+    if(current)return &current->cpu;
+    rt_guest_enter();
+    Thread *t=calloc(1,sizeof(*t));
+    if(!t){fputs("cannot attach foreign thread\n",stderr);abort();}
+    rt_cpu_reset(&t->cpu);t->cpu.tid=next_tid++;t->foreign=1;t->native=pthread_self();
+    if(map_stack(&t->cpu,t,1024*1024)){fputs("cannot map foreign thread guest stack\n",stderr);abort();}
+    t->handle=rt_thread_pointer(&t->cpu);
+    t->next=threads;threads=t;current=t;
+    rt_guest_leave();
+    if(pthread_setspecific(foreign_key,t))abort();
+    return &t->cpu;
+}
+void rt_foreign_thread_detach(void){
+    Thread *t=current;
+    if(!t || !t->foreign)return;
+    pthread_setspecific(foreign_key,NULL);
+    foreign_release(t);
+}
 void rt_threads_destroy(void) {
     // Refuse to unmap a CPU or TLS while a native worker can still access it.
-    for(Thread *t=threads;t;t=t->next)if(!t->joined){
+    for(Thread *t=threads;t;t=t->next){
+        if(t->foreign){fputs("cannot destroy runtime with an attached foreign thread\n",stderr);abort();}
+        if(t->joined)continue;
         if(!t->finished){fputs("cannot destroy runtime with a live guest worker\n",stderr);abort();}
         unsigned saved=rt_guest_suspend();pthread_join(t->native,NULL);rt_guest_resume(saved);
     }
