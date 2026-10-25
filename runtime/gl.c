@@ -15,9 +15,7 @@
 // Seuls les pointeurs hôtes renvoyés par GL (glMapBuffer, glGetString,
 // GLsync) demandent une copie ou un handle.
 #include "rt.h"
-#include <OpenGL/OpenGL.h>
-#include <OpenGL/gl.h>
-#include <OpenGL/glext.h>
+#include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -41,7 +39,7 @@ static void *library;
 static void **hosts;  // pointeur hôte par entrée, résolu à la demande
 
 static void open_library(void) {
-    library = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_LAZY | RTLD_LOCAL);
+    library = rt_host_gl_open();
     hosts = calloc(rt_gl_entry_count, sizeof(*hosts));
 }
 
@@ -58,7 +56,7 @@ static void *host_function(const RtGlEntry *entry) {
     size_t index = (size_t)(entry - rt_gl_entries);
     void *fn = __atomic_load_n(&hosts[index], __ATOMIC_ACQUIRE);
     if (!fn) {
-        fn = dlsym(library, entry->name);
+        fn = rt_host_gl_symbol(library, entry->name);
         __atomic_store_n(&hosts[index], fn, __ATOMIC_RELEASE);
     }
     return fn;

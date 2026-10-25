@@ -7,6 +7,7 @@
 // SHIMS: fork execvp popen pclose system _exit exit alarm uuid_generate mallinfo mount
 #include "posix.h"
 #include "modules.h"
+#include <TargetConditionals.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <pwd.h>
@@ -213,7 +214,11 @@ static int process_shim(CPU *c, const char *name) {
         if (!command) { c->eax = !access("/bin/sh", X_OK); return 1; }
         const char *text = string(c, command);
         unsigned saved = rt_guest_suspend();
+#if TARGET_OS_IPHONE
+        int status = -1, error = ENOSYS; (void)text;   // pas de shell ni de processus fils sur iOS
+#else
         int status = system(text), error = errno;
+#endif
         rt_guest_resume(saved);
         errno = error;
         if (status == -1) finish(c, -1); else c->eax = rt_linux_wait_status(status);

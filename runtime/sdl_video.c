@@ -24,8 +24,7 @@
 // SHIMS: SDL_CreateColorCursor SDL_CreateSystemCursor SDL_SetCursor SDL_FreeCursor SDL_ShowCursor
 // SHIMS: SDL_GetClipboardText SDL_SetClipboardText SDL_HasClipboardText
 #include "rt.h"
-#include <OpenGL/gl.h>
-#include <OpenGL/glext.h>
+#include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
 #include "sdl_common.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
