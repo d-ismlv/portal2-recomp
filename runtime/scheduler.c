@@ -4,6 +4,7 @@
 #include "rt.h"
 #include <pthread.h>
 #include <sched.h>
+#include <stdatomic.h>
 #include <stdlib.h>
 
 static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
@@ -39,7 +40,7 @@ void rt_guest_resume(unsigned saved) {
 }
 void rt_guest_poll(void) {
     // Test global d'abord : les _Thread_local coûtent un appel _tlv_get_addr sur macOS.
-    if(!__atomic_load_n(&rt_guest_waiting,__ATOMIC_RELAXED))return;
+    if(!atomic_load_explicit(&rt_guest_waiting,memory_order_relaxed))return;
     if(!depth || (++ticks & 1023))return;
     unsigned saved=rt_guest_suspend();
     sched_yield();
