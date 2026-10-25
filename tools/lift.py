@@ -103,7 +103,7 @@ class Operand:
 
 
 def disassemble(image, base, objdump):
-    result = subprocess.run([objdump, '-d', '--x86-asm-syntax=intel',
+    result = subprocess.run([objdump, '-d', '-z', '--x86-asm-syntax=intel',
                              f'--adjust-vma={base:#x}', str(image)],
                             check=True, capture_output=True, text=True)
     insns = {}
@@ -168,7 +168,7 @@ def string_instruction(op, args, nxt):
     return text + f' goto L{nxt:x};', [nxt]
 
 
-def translate(pc, insn, entries=frozenset(), callees=None):
+def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
     if callees is None:
         callees = set()
     nxt, op, args = insn
@@ -178,6 +178,12 @@ def translate(pc, insn, entries=frozenset(), callees=None):
     string = string_instruction(op, args, nxt)
     if string is not None:
         return string
+    if op in ('rep', 'repz', 'repe') and args == 'ret':
+        op, args = 'ret', ''  # AMD branch-predictor idiom: REP is ignored on RET
+    if op.startswith('prefetch') or op in ('lfence', 'sfence', 'mfence'):
+        # Hints and fences: guest instructions are serialised on one logical CPU.
+        fence = '' if op.startswith('prefetch') else '__atomic_thread_fence(__ATOMIC_SEQ_CST); '
+        return fence + end, [nxt]
     if op == 'ret':
         adjustment = int(args, 0) if args else 0
         if not 0 <= adjustment <= 65535:
@@ -192,12 +198,21 @@ def translate(pc, insn, entries=frozenset(), callees=None):
         elif target.width != 32:
             raise Unsupported('call operand width')
         return (f'a = {target.read()}; c->flags = f; rt_call(c, a, {nxt:#x}u); '
-                f'f = c->flags; {end}'), [nxt]
+                f'if (c->eip != {nxt:#x}u) goto resume; f = c->flags; {end}'), [nxt]
     if op == 'jmp' or (op.startswith('j') and op[1:] in CC):
         target = Operand(args)
         if target.imm is None:
             if op != 'jmp' or target.width != 32:
                 raise Unsupported('indirect control flow')
+            if cases:
+                # Statically recovered jump table: the guest still computes the
+                # target; known values become local gotos, anything else goes
+                # through the checked dispatcher exactly as before.
+                local = sorted(t for t in set(cases) if t not in entries)
+                callees.update(t for t in cases if t in entries)
+                labels = ' '.join(f'case {t:#x}u: goto L{t:x};' for t in local)
+                return (f'a = {target.read()}; rt_guest_poll(); switch (a) {{ {labels} '
+                        'default: c->flags = f; rt_dispatch(c, a); return; }'), local
             return f'a = {target.read()}; c->flags = f; rt_dispatch(c, a); return;', []
         if target.imm in entries:
             callees.add(target.imm)
@@ -225,6 +240,45 @@ def translate(pc, insn, entries=frozenset(), callees=None):
         code = '{ uint64_t ticks = rt_rdtsc(); c->eax = (uint32_t)ticks; c->edx = (uint32_t)(ticks >> 32); }'
     elif op == 'cdq' and not operands:
         code = 'c->edx = 0u - (c->eax >> 31);'
+    elif op == 'cbw' and not operands:
+        code = 'c->eax = (c->eax & 0xffff0000u) | (sx(c->eax & 0xffu, 8) & 0xffffu);'
+    elif op == 'cwd' and not operands:
+        code = 'c->edx = (c->edx & 0xffff0000u) | ((c->eax & 0x8000u) ? 0xffffu : 0u);'
+    elif op == 'sahf' and not operands:
+        code = ('a = c->eax >> 8; f.cf = a & 1; f.pf = (a >> 2) & 1 ? 0 : 1; f.af = (a >> 4) & 1; '
+                'f.zf = (a >> 6) & 1; f.sf = (a >> 7) & 1;')
+    elif op == 'lahf' and not operands:
+        code = 'c->eax = (c->eax & 0xffff00ffu) | ((get_eflags(c, &f) & 0xd5u) | 2u) << 8;'
+    elif op in ('bt', 'bts', 'btr', 'btc') and len(operands) == 2 and operands[0].width in (16, 32):
+        base, index = operands
+        n = base.width
+        update = {'bt': None, 'bts': 'a | mask', 'btr': 'a & ~mask', 'btc': 'a ^ mask'}[op]
+        if base.addr is not None and index.reg:
+            # Bit-string form: a register offset may address any byte (signed).
+            offset = f'(uint32_t)((int32_t)sx({index.read()}, {index.width}) >> {5 if n == 32 else 4}) * {n // 8}u'
+            location = f'(uint32_t)({base.addr} + {offset})'
+            store = f'W{n}(address, {update});' if update else ''
+            code = (f'{{ uint32_t address = {location}; uint32_t mask = 1u << ({index.read()} & {n - 1}u); '
+                    f'a = R{n}(address); f.cf = (a & mask) != 0; {store} }}')
+        else:
+            code = (f'{{ uint32_t mask = 1u << ({index.read()} & {n - 1}u); a = {base.read()}; '
+                    f'f.cf = (a & mask) != 0; {base.write(update) if update else ""} }}')
+    elif op in ('mul', 'imul') and len(operands) == 1 and operands[0].width in (8, 16):
+        n = operands[0].width
+        src = operands[0].read()
+        if n == 8:
+            value = (f'(uint32_t)((c->eax & 0xffu) * {src})' if op == 'mul'
+                     else f'(uint32_t)((int32_t)(int8_t)(c->eax & 0xffu) * (int8_t){src})')
+            code = (f'r = {value} & 0xffffu; c->eax = (c->eax & 0xffff0000u) | r; '
+                    + ('f.cf = f.of = (r >> 8) != 0;' if op == 'mul' else 'f.cf = f.of = r != (sx(r & 0xffu, 8) & 0xffffu);'))
+        else:
+            value = (f'(uint32_t)((c->eax & 0xffffu) * {src})' if op == 'mul'
+                     else f'(uint32_t)((int32_t)(int16_t)(c->eax & 0xffffu) * (int16_t){src})')
+            code = (f'r = {value}; c->eax = (c->eax & 0xffff0000u) | (r & 0xffffu); '
+                    'c->edx = (c->edx & 0xffff0000u) | (r >> 16); '
+                    + ('f.cf = f.of = (r >> 16) != 0;' if op == 'mul' else 'f.cf = f.of = r != sx(r & 0xffffu, 16);'))
+    elif op in ('div', 'idiv') and len(operands) == 1 and operands[0].width in (8, 16):
+        code = f'rt_div_narrow(c, {operands[0].read()}, {operands[0].width}, {int(op == "idiv")}, {pc:#x}u);'
     elif op == 'cwde' and not operands:
         code = 'c->eax = sx(c->eax & 0xffffu, 16);'
     elif op == 'fxsave' and len(operands) == 1 and operands[0].addr:
@@ -358,9 +412,12 @@ def translate(pc, insn, entries=frozenset(), callees=None):
     return code + ' ' + end, [nxt]
 
 
-def lift(entry, insns, entries=frozenset(), callees=None):
+def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=None):
+    """Translate one function. `setjmp(target)` tells whether a direct call
+    target is setjmp; its return sites become resume points for longjmp."""
     pending = [entry]
     translated = {}
+    resume = set()
     while pending:
         pc = pending.pop()
         if pc in translated:
@@ -368,17 +425,222 @@ def lift(entry, insns, entries=frozenset(), callees=None):
         if pc not in insns:
             raise Unsupported(f'no instruction at {pc:#x}')
         try:
-            code, successors = translate(pc, insns[pc], entries - {entry}, callees)
+            code, successors = translate(pc, insns[pc], entries - {entry}, callees,
+                                         tables(pc) if tables else None)
         except (Unsupported, IndexError) as exc:
             raise Unsupported(f'{pc:#x}: {exc}') from exc
         translated[pc] = code
         pending.extend(successors)
+        nxt, op, args = insns[pc]
+        if op == 'call' and setjmp is not None:
+            try:
+                target = int(args, 0)
+            except ValueError:
+                target = None
+            if target is not None and setjmp(target):
+                resume.add(nxt)
     lines = [f'static void fn_{entry:x}(CPU *c) {{',
              '    FL f = c->flags; uint32_t a, b, r; int64_t product;',
              '    (void)f; (void)a; (void)b; (void)r; (void)product;', f'    goto L{entry:x};']
     lines.extend(f'L{pc:x}: {code}' for pc, code in sorted(translated.items()))
+    if any('goto resume;' in code for code in translated.values()):
+        # A call returned elsewhere (non-local transfer): resume here when the
+        # target belongs to this function, otherwise drop this host frame.
+        cases = ' '.join(f'case {pc:#x}u: goto L{pc:x};' for pc in sorted(resume))
+        lines.append(f'resume: f = c->flags; switch (c->eip) {{ {cases} default: return; }}' if resume
+                     else 'resume: return;')
     lines.append('}')
     return '\n'.join(lines), len(translated)
+
+
+class JumpTables:
+    """Recover candidate targets of switch jumps from the prepared images.
+
+    Recognised forms (GCC, i386):
+      jmp dword ptr [4*I + T]                          absolute table (relocated)
+      mov R, dword ptr [B + 4*I + D]; add R, B; jmp R  PIC table of GOT offsets, B = GOT
+    The bound comes from a preceding `cmp I, N; ja/jae`; otherwise entries are
+    read while they remain plausible code addresses. Candidates are only an
+    optimisation: the generated code compares the real computed target with
+    them and falls back to the checked dispatcher, so an imprecise table can
+    add dead labels but never change control flow.
+    """
+    MAX_ENTRIES = 1024
+    MAX_DISTANCE = 0x100000
+
+    def __init__(self, layout, insns):
+        self.layout, self.insns = layout, insns
+        self.images, self.previous, self.cache = {}, None, {}
+
+    def module(self, address):
+        for mod in self.layout['modules']:
+            if any(s['vaddr'] <= address < s['vaddr'] + s['filesz'] for s in mod['loads']):
+                return mod
+        return None
+
+    def read32(self, address):
+        mod = self.module(address)
+        if mod is None or self.module(address + 3) is not mod:
+            return None
+        if mod['name'] not in self.images:
+            self.images[mod['name']] = Path(mod['image']).read_bytes()
+        data = self.images[mod['name']]
+        for s in mod['loads']:
+            if s['vaddr'] <= address and address + 4 <= s['vaddr'] + s['filesz']:
+                offset = s['off'] + address - s['vaddr']
+                return int.from_bytes(data[offset:offset + 4], 'little')
+        return None
+
+    def before(self, pc, count):
+        if self.previous is None or len(self.previous) < len(self.insns):
+            self.previous = {nxt: start for start, (nxt, _, _) in self.insns.items()}
+        out = []
+        while len(out) < count and pc in self.previous:
+            pc = self.previous[pc]
+            out.append((pc,) + tuple(self.insns[pc]))
+        return out
+
+    def bound(self, history, index):
+        """Number of table entries implied by `cmp index, N; ja` (None if unknown)."""
+        aliases = {index}
+        for i, (_, _, op, args) in enumerate(history):
+            parts = [x.strip() for x in args.split(',')]
+            if op == 'movzx' and len(parts) == 2 and REGS.get(parts[0], ('',))[0] in aliases and parts[1] in REGS:
+                aliases.add(REGS[parts[1]][0])
+            if op in ('ja', 'jae', 'jnbe', 'jnb') and i + 1 < len(history):
+                _, _, cop, cargs = history[i + 1]
+                cparts = [x.strip() for x in cargs.split(',')]
+                if cop == 'cmp' and len(cparts) == 2 and cparts[0] in REGS and REGS[cparts[0]][0] in aliases:
+                    try:
+                        limit = int(cparts[1], 0) & MSK_BITS[REGS[cparts[0]][1]]
+                    except ValueError:
+                        return None
+                    return limit + 1 if op in ('ja', 'jnbe') else limit
+                return None
+            if op in ('call', 'ret', 'jmp') or op.startswith('j'):
+                return None
+        return None
+
+    def __call__(self, pc):
+        if pc not in self.cache:
+            self.cache[pc] = self.resolve(pc)
+        return self.cache[pc]
+
+    def resolve(self, pc):
+        nxt, op, args = self.insns[pc]
+        if op != 'jmp':
+            return None
+        history = self.before(pc, 8)
+        pattern = r'(?:dword ptr )?\[(?:4\*(\w+) \+ (0x[0-9a-f]+)|(0x[0-9a-f]+) \+ 4\*(\w+))\]'
+        m = re.fullmatch(pattern, args)
+        if m:
+            index = m[1] or m[4]; table = int(m[2] or m[3], 16); base = 0; rest = history
+        elif args in REGS and REGS[args][1] == 32 and len(history) >= 2:
+            (_, _, add_op, add_args), (_, _, mov_op, mov_args) = history[0], history[1]
+            add = [x.strip() for x in add_args.split(',')]
+            m = re.fullmatch(r'dword ptr \[(\w+) \+ 4\*(\w+) ([+-]) (0x[0-9a-f]+)\]',
+                             mov_args.split(',', 1)[-1].strip())
+            if not (add_op == 'add' and add[0] == args and mov_op == 'mov' and m
+                    and mov_args.split(',')[0].strip() == args and add[1] == m[1]):
+                return None
+            mod = self.module(pc)
+            base = mod['gotplt'] if mod else 0
+            displacement = int(m[4], 16) * (-1 if m[3] == '-' else 1)
+            table, index, rest = (base + displacement) & 0xffffffff, m[2], history[2:]
+        else:
+            return None
+        if index not in REGS:
+            return None
+        count = self.bound(rest, REGS[index][0])
+        exact = count is not None
+        count = min(count if exact else self.MAX_ENTRIES, self.MAX_ENTRIES)
+        targets = []
+        for i in range(count):
+            value = self.read32(table + 4 * i)
+            if value is None:
+                break
+            target = (value + base) & 0xffffffff
+            far = not exact and abs(target - pc) > self.MAX_DISTANCE   # cold parts may be far away
+            if target not in self.insns or far or self.module(target) is not self.module(pc):
+                if exact:
+                    return None   # a declared case does not land on code: do not guess
+                break
+            targets.append(target)
+        return targets or None
+
+
+MSK_BITS = {8: 0xff, 16: 0xffff, 32: 0xffffffff}
+SETJMP_IMPORTS = frozenset({'_setjmp', 'setjmp', '__sigsetjmp', 'sigsetjmp'})
+
+
+def import_called(target, insns, imports, tables):
+    """Import reached by a direct call: its thunk, or a PLT stub jumping through
+    a GOT slot (`jmp [ebx + X]` with EBX = GOT, or `jmp [X]`) holding the thunk."""
+    if target in imports:
+        return imports[target]
+    insn = insns.get(target)
+    if not insn or insn[1] != 'jmp':
+        return None
+    m = re.fullmatch(r'dword ptr \[(?:(ebx) \+ )?(0x[0-9a-f]+)\]', insn[2])
+    if not m:
+        return None
+    mod = tables.module(target)
+    if m[1] and not mod:
+        return None
+    value = tables.read32(((mod['gotplt'] if m[1] else 0) + int(m[2], 16)) & 0xffffffff)
+    return imports.get(value)
+
+
+def _guessed_successors(pc, insn):
+    """Control-flow successors of an instruction the lifter rejected (audit only)."""
+    nxt, op, args = insn
+    if op in ('ret', 'jmp', 'int3', 'ud2', 'hlt', 'retf', 'iret', 'iretd') or op.startswith('ljmp'):
+        targets = []
+    else:
+        targets = [nxt]
+    if op.startswith('j') or op.startswith('loop'):
+        try:
+            targets.append(int(args, 0))
+        except ValueError:
+            pass
+    return targets
+
+
+def scan(entry, insns, entries=frozenset(), callees=None, visited=None, tables=None):
+    """Collect-mode audit of one function: never emits code, never stops early.
+
+    Returns (instruction count, [(pc, op, args, reason)] for every rejected
+    instruction, [pc of every indirect jmp]). `lift` itself stays fail-closed.
+    """
+    if callees is None:
+        callees = set()
+    pending, seen, failures, indirect = [entry], set(), [], []
+    others = entries - {entry}
+    while pending:
+        pc = pending.pop()
+        if pc in seen:
+            continue
+        seen.add(pc)
+        if pc not in insns:
+            failures.append((pc, '<none>', '', 'no instruction boundary'))
+            continue
+        insn = insns[pc]
+        try:
+            code, successors = translate(pc, insn, others, callees, tables(pc) if tables else None)
+            if 'rt_dispatch(c, a)' in code and insn[1] == 'jmp':
+                indirect.append((pc, 'switch (a)' in code))
+        except Exception as exc:  # noqa: BLE001 - every rejection is data here
+            failures.append((pc, insn[1], insn[2], f'{type(exc).__name__}: {exc}'))
+            successors = _guessed_successors(pc, insn)
+            if insn[1] == 'call':
+                try:
+                    callees.add(int(insn[2], 0))
+                except ValueError:
+                    pass
+        pending.extend(successors)
+    if visited is not None:
+        visited |= seen
+    return len(seen), failures, indirect
 
 
 # Keep this list synchronized with runtime/shims.c. Unknown imports fail closed.
@@ -442,6 +704,24 @@ def resolve_export(layout, spec):
     return matches[0]['exports'][spec]
 
 
+def module_instructions(mod, objdump, disasm_cache=None):
+    """Disassemble one prepared module, through the optional content-addressed cache."""
+    cache_path = None
+    if disasm_cache is not None:
+        tool = Path(shutil.which(objdump) or objdump).resolve()
+        identity = (f'parser-v2:{mod["base"]}:{tool}:'
+                    f'{tool.stat().st_mtime_ns}:{tool.stat().st_size}').encode()
+        digest = hashlib.sha256(identity + Path(mod['image']).read_bytes()).hexdigest()
+        cache_path = Path(disasm_cache) / (digest + '.json')
+        if cache_path.exists():
+            return {int(pc): tuple(value) for pc, value in json.loads(cache_path.read_text()).items()}
+    decoded = disassemble(mod['image'], mod['base'], objdump)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(json.dumps(decoded))
+    return decoded
+
+
 def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=None):
     code = ['/* Generated by tools/lift.py. Do not edit. */', '#include "rt.h"']
     selected = [(name, resolve_export(layout, name)) for name in exports]
@@ -451,22 +731,7 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
         for mod in layout['modules']:
             if any(s['flags'] & 1 and s['vaddr'] <= entry < s['vaddr'] + s['filesz'] for s in mod['loads']):
                 if mod['name'] not in loaded:
-                    decoded = None
-                    cache_path = None
-                    if disasm_cache is not None:
-                        tool = Path(shutil.which(objdump) or objdump).resolve()
-                        identity = (f'parser-v1:{mod["base"]}:{tool}:'
-                                    f'{tool.stat().st_mtime_ns}:{tool.stat().st_size}').encode()
-                        digest = hashlib.sha256(identity + Path(mod['image']).read_bytes()).hexdigest()
-                        cache_path = Path(disasm_cache) / (digest + '.json')
-                        if cache_path.exists():
-                            decoded = {int(pc): tuple(value) for pc,value in json.loads(cache_path.read_text()).items()}
-                    if decoded is None:
-                        decoded = disassemble(mod['image'], mod['base'], objdump)
-                        if cache_path is not None:
-                            cache_path.parent.mkdir(parents=True, exist_ok=True)
-                            cache_path.write_text(json.dumps(decoded))
-                    insns.update(decoded)
+                    insns.update(module_instructions(mod, objdump, disasm_cache))
                     loaded.add(mod['name'])
                 return
         raise Unsupported(f'entry {entry:#x} lies outside executable segments')
@@ -475,6 +740,7 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
     entries.update(entry for _, entry in selected)
     entries.update(imports)
     pending = [entry for _, entry in selected]
+    tables = JumpTables(layout, insns)
     compiled = set()
     used_imports = set()
     unimplemented = set()
@@ -493,7 +759,8 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
             continue
         ensure_module(entry)
         callees = set()
-        body, count = lift(entry, insns, entries, callees)
+        body, count = lift(entry, insns, entries, callees, tables,
+                           lambda t: import_called(t, insns, imports, tables) in SETJMP_IMPORTS)
         code.append(body)
         compiled.add(entry)
         total += count

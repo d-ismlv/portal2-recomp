@@ -25,7 +25,7 @@ build/tier0.c: Makefile tools/lift.py tools/float_lift.py tools/registry.py $(PR
 build/tier0-smoke: build/tier0.c $(RUNTIME) $(HEADERS) tests/tier0_smoke.c
 	$(CC) $(CFLAGS) -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c $(HOST_LIBS) -o $@
 
-build/abi-fixture.c: tests/generate_abi_fixture.py tools/lift.py tools/float_lift.py tools/registry.py
+build/abi-fixture.c: tests/generate_abi_fixture.py tools/lift.py tools/float_lift.py tools/registry.py tests/lifter_programs.s
 	@mkdir -p build
 	$(PYTHON) tests/generate_abi_fixture.py $@
 

@@ -113,15 +113,56 @@ programs[0x28000] = [('lock_add','dword ptr [0x2000b104], 1'),
     ('call','0xf1000090'), ('add','esp, 20'), ('ret','')]
 fixture_imports = {0xf1000000:'pthread_mutex_lock', 0xf1000010:'pthread_mutex_unlock',
     0xf1000020:'pthread_cond_wait',0xf1000040:'pthread_setspecific',
-    0xf1000050:'pthread_self',0xf1000070:'__errno_location',0xf1000080:'pthread_once',0xf1000090:'syscall'}
+    0xf1000050:'pthread_self',0xf1000070:'__errno_location',0xf1000080:'pthread_once',0xf1000090:'syscall',
+    0xf10000a0:'_setjmp',0xf10000b0:'longjmp'}
 insns = {base + i: (base + i + 1, op, args)
          for base, instructions in programs.items() for i, (op, args) in enumerate(instructions)}
-code = ['#include "modules.h"', 'const GuestModule rt_modules[1] = {{0}};', 'const size_t rt_module_count = 0;']
-for entry in programs:
-    body, _ = lift.lift(entry, insns, set(programs), set())
+
+# Real x86 bytes: tests/lifter_programs.s is assembled for i386 Linux and goes
+# through the same objdump parser as the game modules.
+import re
+import subprocess
+ASM_BASE = 0x400000
+source = Path(__file__).with_name('lifter_programs.s')
+obj = Path(sys.argv[1]).with_name('lifter_programs.o')
+subprocess.run(['clang', '-target', 'i386-linux-gnu', '-c', str(source), '-o', str(obj)], check=True)
+asm_insns = lift.disassemble(obj, ASM_BASE, 'objdump')
+table = subprocess.run(['objdump', '-t', str(obj)], check=True, capture_output=True, text=True).stdout
+asm_entries = {m[2]: int(m[1], 16) + ASM_BASE
+               for m in re.finditer(r'^([0-9a-f]{8}) g\s+\S*\s+\.text\s+[0-9a-f]+ (\S+)$', table, re.M)}
+assert asm_entries, 'no global symbols in lifter_programs.s'
+insns.update(asm_insns)
+labels = {name: address for name, address in asm_entries.items() if name.startswith('lfl_')}
+functions = {name: address for name, address in asm_entries.items() if name.startswith('lf_')}
+entries = set(programs) | set(functions.values())
+
+# Jump tables: the guest table at 0x20018810 is written by checks_lifter.c with
+# the three case labels; the generator sees the same contents.
+class FixtureTables(lift.JumpTables):
+    def read32(self, address):
+        table = {0x20018810 + 4 * i: labels[f'lfl_case{i}'] for i in range(3)}
+        table.update({0x20018a00: 0xf10000a0, 0x20018a04: 0xf10000b0})   # GOT slots of the PLT stubs
+        return table.get(address)
+tables = FixtureTables({'modules': []}, insns)
+# One synthetic guest module for the loader checks (image built in guest
+# memory at 0x2001c000 by checks_lifter.c).
+f = functions
+code = ['#include "modules.h"',
+        f'static const uint32_t fake_constructors[] = {{{f["lf_log_ctor"]:#x}u}};',
+        'static const GuestSymbol fake_symbols[] = {{"fake_symbol", 0x2001c400u}, {NULL, 0}};',
+        'const GuestModule rt_modules[1] = {{"libfake.so", 7, 0x2001c000u, 0x2001c000u, '
+        f'{f["lf_log_init"]:#x}u, {f["lf_log_fini"]:#x}u, fake_constructors, 1, fake_symbols, 1, NULL, 0}}}};',
+        'const size_t rt_module_count = 1;']
+is_setjmp = lambda target: lift.import_called(target, insns, fixture_imports, tables) in lift.SETJMP_IMPORTS
+for entry in sorted(entries):
+    body, _ = lift.lift(entry, insns, entries, set(), tables, is_setjmp)
     code.append(body)
+code.append('uint32_t lifter_entry(const char *name);')
+code.append('uint32_t lifter_entry(const char *name) {')
+code += [f'if (!strcmp(name, "{name}")) return {address:#x}u;' for name, address in sorted(asm_entries.items())]
+code.append('return 0; }')
 code.append('gfn rt_lookup(uint32_t target) { switch (target) {')
-for entry in programs:
+for entry in sorted(entries):
     code.append(f'case {entry:#x}: return fn_{entry:x};')
 code += ['default: return NULL; } }',
          'const char *rt_import_name(uint32_t target) { switch(target) {' + ''.join(f'case {address:#x}u: return {name!r};'.replace(chr(39),chr(34)) for address,name in fixture_imports.items()) + 'default: return NULL; } }']

@@ -22,6 +22,13 @@ int rt_init(void) {
                    MAP_PRIVATE | MAP_ANON, -1, 0);
     if (p == MAP_FAILED) { perror("guest address space"); return -1; }
     M = p;
+    // RT_RETURN_SENTINEL is the return address of every outermost guest
+    // frame. Unwinders (libgcc's fallback for frames without FDE) read the
+    // code at a return address to detect signal trampolines: back it with a
+    // readable page of HLT bytes, which matches no trampoline and has no
+    // unwind data, so stack walks end there as at the bottom of a process.
+    if (rt_map(RT_RETURN_SENTINEL & ~UINT32_C(0xfff), 0x1000)) { perror("guest sentinel page"); return -1; }
+    memset(M + (RT_RETURN_SENTINEL & ~UINT32_C(0xfff)), 0xf4, 0x1000);
     return 0;
 }
 
@@ -87,14 +94,32 @@ void rt_dispatch(CPU *c, uint32_t target) {
 
 void rt_return(CPU *c) { c->eip = POP(c); }
 
+// Non-local control flow (longjmp, an unwinder installing a landing pad):
+// the guest resumes at an address other than the return site of the call in
+// progress. Each lifted call site compares c->eip with its own return site;
+// on mismatch it either resumes at a known point of its function (setjmp
+// return sites, see tools/lift.py) or returns, so host C frames are dropped
+// one by one until a frame expects that address. Every C frame can run any
+// guest code because all guest state lives in CPU and guest memory. Calls
+// made by native code use RT_RETURN_SENTINEL and never let a transfer escape.
+static _Thread_local struct { uint32_t from_target, expected, actual; unsigned depth; } nonlocal;
+
 void rt_call(CPU *c, uint32_t target, uint32_t expected_return) {
     rt_guest_enter();
     if(frame_depth<256)frames[frame_depth]=(GuestFrame){target,expected_return};
     ++frame_depth;
     PUSH(c, expected_return);
     rt_dispatch(c, target);
-    if (c->eip != expected_return)
-        rt_trap(c, c->eip, "guest callee returned to unexpected address");
+    if (c->eip != expected_return) {
+        if (!nonlocal.actual || nonlocal.actual != c->eip)
+            nonlocal = (typeof(nonlocal)){target, expected_return, c->eip, frame_depth};
+        if (expected_return == RT_RETURN_SENTINEL) {
+            fprintf(stderr, "non-local transfer to %#x (first seen returning from %#x, expected %#x, depth %u) "
+                    "is not resumable by any recompiled frame\n", nonlocal.actual, nonlocal.from_target,
+                    nonlocal.expected, nonlocal.depth);
+            rt_trap(c, c->eip, "guest control left a native call boundary");
+        }
+    } else nonlocal.actual = 0;
     --frame_depth;
     rt_guest_leave();
 }
