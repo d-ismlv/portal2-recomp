@@ -189,6 +189,7 @@ void rt_vm_destroy(void);
 int rt_load_segment(const char *directory, const char *name, uint32_t offset,
                     uint32_t addr, uint32_t filesz, uint32_t memsz);
 int rt_init_import_data(const char *name, uint32_t address, uint32_t size);
+int rt_time_data_import(const char *name, uint32_t address);  // time.c
 int rt_load_images(const char *directory);  // généré par lift.py
 uint32_t rt_export(const char *name);       // 0 si export non recompilé
 gfn rt_lookup(uint32_t target);

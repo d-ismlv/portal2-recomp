@@ -484,11 +484,8 @@ int rt_init_import_data(const char *name, uint32_t address, uint32_t size) {
         }
         W32(array + (uint32_t)count * 4, 0); W32(address, array); return 0;
     }
-    if (!strcmp(name, "timezone") || !strcmp(name, "daylight")) {
-        extern long timezone; extern int daylight;
-        tzset(); W32(address, (uint32_t)(!strcmp(name, "timezone") ? timezone : daylight));
-        return 0;
-    }
+    if (!strcmp(name, "timezone") || !strcmp(name, "daylight"))
+        return rt_time_data_import(name, address);   // time.c : rafraîchi par tzset
     fprintf(stderr, "unimplemented imported object: %s\n", name);
     return -1;
 }
