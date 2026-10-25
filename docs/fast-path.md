@@ -31,7 +31,7 @@ invités après chaque écriture en mémoire invitée.
 |---|---|---|
 | (défaut) | contrôle mémoire au grain de 4 Kio, appels directs | développement |
 | `--fast-memory` | `-DRT_FAST_MEMORY` | mesures, une fois le jeu validé |
-| `--traced-calls` | `-DRT_TRACED_CALLS` : tout appel par `rt_call` | pile invitée complète dans les fautes, `P2_WATCH_CALL` |
+| `--traced-calls` (alias `--debug-traces`) | `-DRT_TRACED_CALLS` : tout appel par `rt_call` | pile invitée complète dans les fautes, `P2_WATCH_CALL` |
 
 `make test` reste en mode contrôlé : `tests/vm_checks.h` vérifie le grain de
 4 Kio et échoue avec `RT_FAST_MEMORY`, comme attendu.

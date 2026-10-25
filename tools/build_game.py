@@ -202,7 +202,7 @@ def main():
                         help='sans contrôle logiciel des accès invités (RT_FAST_MEMORY) : plus rapide, mais '
                              'seules les pages hôtes de 16 Kio protègent, voir rt.h ; par défaut, contrôle '
                              'au grain des pages Linux de 4 Kio')
-    parser.add_argument('--traced-calls', action='store_true',
+    parser.add_argument('--traced-calls', '--debug-traces', dest='traced_calls', action='store_true',
                         help='tous les appels invités par rt_call : pile invitée complète dans les '
                              'diagnostics et P2_WATCH_CALL (par défaut, appels directs, voir rt.h)')
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
