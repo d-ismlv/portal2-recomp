@@ -829,6 +829,15 @@ def executable(module, address):
     return any(s['flags'] & 1 and s['vaddr'] <= address < s['vaddr'] + s['filesz'] for s in module['loads'])
 
 
+def module_boundaries(module):
+    """Strong function starts of one module: symbols/entries, exports,
+    DT_INIT/FINI and init/fini arrays (not code pointers found in data)."""
+    starts = set(module['entries']) | set(module['exports'].values())
+    starts |= {a for a in module['init_array'] + module.get('fini_array', []) if a not in (0, 0xffffffff)}
+    starts |= {a for a in (module['init'], module['fini']) if a}
+    return {a for a in starts if executable(module, a)}
+
+
 def module_roots(module):
     """Every known function start of one module: symbols/entries, exports,
     DT_INIT/FINI, init/fini arrays and code pointers found in data."""
@@ -1035,7 +1044,13 @@ def generate_sharded(layout, specs, whole_game, objdump, disasm_cache, out_dir, 
                     roots.update(found)
         finally:
             _JOB.clear()
-    entries = {e for m in layout['modules'] for e in m['entries']} | roots | set(imports)
+    # Frontières de fonction : seulement les vrais débuts (symboles, exports,
+    # constructeurs, racines nommées). Les adresses de code trouvées dans les
+    # données ou le code (tables de switch, pointeurs) sont compilées comme
+    # points d'entrée mais ne coupent pas une fonction : un saut interne vers
+    # elles reste un goto, au lieu d'un rt_dispatch imbriqué à chaque tour de
+    # boucle (pile hôte qui croît, cas du traducteur de shaders de togl).
+    entries = {e for m in layout['modules'] for e in module_boundaries(m)} | named | set(imports)
     by_module = {}
     for entry in sorted(roots):
         if entry in imports:

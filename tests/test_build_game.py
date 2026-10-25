@@ -55,6 +55,15 @@ class DispatchTableTests(unittest.TestCase):
                       init=0x10000050, fini=0)
         self.assertEqual(lift.module_roots(module), [0x10000010, 0x10000020, 0x10000030, 0x10000040, 0x10000050])
 
+    def test_code_pointers_in_data_are_roots_but_not_function_boundaries(self):
+        # Les cibles de tables de switch sont dans data_ptrs : compilées, mais un
+        # saut interne vers elles doit rester un goto local.
+        module = dict(FAKE_MODULE, entries=[0x10000010], data_ptrs=[0x10000020],
+                      exports={'f': 0x10000030}, init_array=[0x10000040], fini_array=[],
+                      init=0x10000050, fini=0)
+        self.assertIn(0x10000020, lift.module_roots(module))
+        self.assertEqual(lift.module_boundaries(module), {0x10000010, 0x10000030, 0x10000040, 0x10000050})
+
 
 class CompileCacheTests(unittest.TestCase):
     def test_unchanged_sources_are_not_recompiled_and_headers_count(self):
