@@ -160,9 +160,15 @@ static int pthread_objects(CPU *c, const char *name) {
             struct timespec deadline={0};int timed=!strcmp(name,"pthread_cond_timedwait");
             if(timed){uint32_t pointer=argument(c,2);deadline.tv_sec=(int32_t)R32(pointer);deadline.tv_nsec=(int32_t)R32(pointer+4);}
             if(timed && (deadline.tv_nsec<0 || deadline.tv_nsec>=1000000000))error=EINVAL;
-            else {unsigned saved=rt_guest_suspend();
+            else {
+                // The wait releases the mutex: an error-checking owner record must
+                // not survive it, or another thread's lock would be misattributed.
+                int held=mutex->kind==2 && mutex->owned && pthread_equal(mutex->owner,pthread_self());
+                if(held)mutex->owned=0;
+                unsigned saved=rt_guest_suspend();
                 error=timed?pthread_cond_timedwait(&item->native,&mutex->native,&deadline):pthread_cond_wait(&item->native,&mutex->native);
                 rt_guest_resume(saved);
+                if(held && error!=EPERM && error!=EINVAL)lock_acquired(mutex);
             }
         }
     } else if (!strcmp(name, "pthread_once")) {
