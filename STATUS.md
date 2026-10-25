@@ -1,3 +1,32 @@
+# État — 25 octobre 2026, soir (reprise Claude)
+
+**Le menu principal de Portal 2 s'affiche**, rendu nativement (ARM64, OpenGL
+legacy d'Apple via togl), après initialisation complète du moteur, du client,
+du serveur, de Steam (vrai client, `SteamAppId=620`) et du son. Mesuré en
+build `-O0` avec fenêtre cachée : ~10 images/s en 1280×720, aucune erreur
+pendant 400 s. Pas encore vérifié : une partie (chargement de carte),
+l'audio audible, la souris/clavier en fenêtre visible, la vitesse en `-O1`.
+
+Lancer (depuis ce dossier, client Steam ouvert) :
+
+```sh
+python3 tools/build_game.py            # tout le jeu, -O1 (≈ 10 min à froid)
+SteamAppId=620 python3 tools/run_game.py --show --timeout 3600
+```
+
+Diagnostics : `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
+(capture du tampon arrière), `P2_WATCH_CALL=0x<adresse>` (arguments d'un
+appel invité), fautes hôtes traduites en adresse invitée + pile invitée.
+Sans `--show`, la fenêtre est cachée et la synchro verticale désactivée.
+
+Corrections décisives de la soirée : tas invité O(1) (l'ancien était
+quadratique), tables de switch non coupées en fonctions, portées de symboles
+façon ld.so (libprotobuf de client.so/server.so), /proc générés depuis
+l'hôte, binaires Windows de la copie du jeu invisibles (Miles chargeait un
+.asi PE), GLX minimal, événements SDL3 filtrés, Steam GameCoordinator.
+
+---
+
 # Point de reprise — 25 octobre 2026
 
 Travail mis en pause à la demande de l’utilisateur après la validation de la
