@@ -427,6 +427,12 @@ def _lower_extended(op, args, Operand, Unsupported):
         dst = xmm_dst(parts[0])
         return (f'{{ XMM v = {vread(parts[1], 64)}; c->xmm[{dst}].f[0] = (float)v.i[0]; '
                 f'c->xmm[{dst}].f[1] = (float)v.i[1]; }}' + mmx_state(parts[1]))
+    if op in ('cvtps2pi', 'cvttps2pi') and two and reg(parts[0], 'mm') is not None:
+        # Deux flottants bas vers deux entiers (MXCSR ou troncature) ; hors
+        # plage ou NaN : entier indéfini 0x80000000.
+        value = 'v.f[i]' if op == 'cvttps2pi' else 'rt_sse_round(c, v.f[i])'
+        return (f'{{ XMM v = {vread(parts[1], 64)}, out = {{0}}; for (unsigned i = 0; i < 2u; ++i) '
+                f'out.i[i] = cvt_trunc32({value}); {vwrite(parts[0], "out")} }}')
     if op in ('cvtps2pd', 'cvtpd2ps') and two:
         dst = xmm_dst(parts[0])
         if op == 'cvtps2pd':
@@ -498,6 +504,28 @@ def _lower_extended(op, args, Operand, Unsupported):
         other = st(parts[-1]) if parts[-1] != 'st' or len(parts) == 1 else 'ST(1)'
         code = f'f_comi(&f, ST(0), {other});'
         return code + (' fpop(c);' if op.endswith('pi') or op.endswith('ip') else '')
+    if op in ('fcom', 'fcomp', 'fucom', 'fucomp', 'fcompp', 'fucompp', 'ftst'):
+        # Comparaison x87 vers le mot d'état : C3 (0x4000), C2 (0x400), C0 (0x100) ;
+        # C1 effacé. Lue ensuite par fnstsw (+ sahf ou test ah).
+        if op == 'ftst' and not parts:
+            other = '0.0'
+        elif op.endswith('pp') and not parts:
+            other = 'ST(1)'
+        elif op not in ('ftst', 'fcompp', 'fucompp') and len(parts) <= 1:
+            if not parts:
+                other = 'ST(1)'
+            elif parts[0].startswith('st'):
+                other = st(parts[0])
+            else:
+                mem = Operand(parts[0])
+                if mem.addr is None or mem.width not in (32, 64):
+                    raise Unsupported('x87 compare operand')
+                other = f'(double){"RD" if mem.width == 64 else "RF"}({mem.addr})'
+        else:
+            raise Unsupported(f'x87 compare form {op} {args}')
+        pops = 2 if op.endswith('pp') else 1 if op.endswith('p') else 0
+        return (f'{{ double x = ST(0), y = {other}; c->fsw = (uint16_t)((c->fsw & ~0x4700u) | '
+                '(x > y ? 0u : x < y ? 0x100u : x == y ? 0x4000u : 0x4500u)); }' + ' fpop(c);' * pops)
     if op in FCMOV and len(parts) == 2:
         return f'if (cond(&f, CC_{FCMOV[op]})) ST(0) = {st(parts[1])};'
     if op in ('fldcw',) and len(parts) == 1:

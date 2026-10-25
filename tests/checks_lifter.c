@@ -137,6 +137,32 @@ RT_CHECK(lifter_x87_compare) {
     assert(c.ftop == 0 && c.ftags == 0);
 }
 
+RT_CHECK(lifter_x87_status_compare) {
+    clear();
+    WD(IN + 0xe00, 1); WD(IN + 0xe08, 2); WD(IN + 0xe10, 3); WF(IN + 0xe18, 2.0f); WD(IN + 0xe20, NAN);
+    CPU c = run_named("lf_x87_fcom");
+    const uint16_t conditions = 0x4700;
+    assert((R16(OUT + 0xe00) & conditions) == 0);                 // greater
+    assert((R16(OUT + 0xe02) & conditions) == 0x100);             // less: C0
+    assert((R16(OUT + 0xe04) & conditions) == 0x4000);            // equal: C3
+    assert((R16(OUT + 0xe06) & conditions) == 0x4500);            // unordered: C3 C2 C0
+    assert((R16(OUT + 0xe08) & conditions) == 0 && R8(OUT + 0xe10) == 1);
+    assert((R16(OUT + 0xe0a) & conditions) == 0);                 // FTST 1 > 0
+    assert((R16(OUT + 0xe0c) & conditions) == 0);                 // FCOMPP 3 > 1
+    assert(R8(OUT + 0xe11) == 1);                                 // SAHF: C0 -> CF
+    assert(c.ftop == 0 && c.ftags == 0);                          // every push popped
+}
+
+RT_CHECK(lifter_cvtps2pi) {
+    clear();
+    put_floats(IN + 0xe40, 2.5f, -1.5f, NAN, 3e9f);
+    CPU c = run_named("lf_cvtps2pi");
+    assert(R32(OUT + 0xe40) == 2u && R32(OUT + 0xe44) == (uint32_t)-2);   // nearest even
+    assert(R32(OUT + 0xe48) == 2u && R32(OUT + 0xe4c) == (uint32_t)-1);   // truncation
+    assert(R32(OUT + 0xe50) == 0x80000000u && R32(OUT + 0xe54) == 0x80000000u);
+    assert(c.ftags == 0);
+}
+
 RT_CHECK(lifter_x87_math) {
     clear();
     WD(IN + 0x600, -2.75); W32(IN + 0x608, 5); WD(IN + 0x610, 1); WD(IN + 0x618, 8);
