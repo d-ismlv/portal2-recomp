@@ -4,10 +4,13 @@
 #include "posix.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <pwd.h>
+#include <signal.h>
 #include <stdarg.h>
 #include <stdlib.h>
 #include <sys/file.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 
 #define STACK 0x20010000u
@@ -319,4 +322,112 @@ RT_CHECK(posix_statfs_layouts_are_i386) {
     assert(call("pathconf", 2, path, 99) == UINT32_MAX && guest_errno() == 22);
     assert(call("faccessat", 4, (uint32_t)-100, path, 4, 0) == 0);
     assert(call("faccessat", 4, (uint32_t)-100, gstr("/nonexistent-portal2"), 4, 0) == UINT32_MAX && guest_errno() == 2);
+}
+
+// ---- Processus et environnement ----
+static int exit_pipe = -1;
+static int test_exit_handlers(CPU *c, const char *name) {
+    if (strncmp(name, "test_exit_handler", 17)) return 0;
+    char tag = (char)R32(c->esp + 4);
+    assert(write(exit_pipe, &tag, 1) == 1);
+    if (tag == '2') {  // un handler qui en enregistre un autre, exécuté juste après
+        uint32_t saved = c->esp;
+        c->esp -= 16; W32(c->esp + 4, rt_dynamic_import("test_exit_handler3")); W32(c->esp + 8, '3'); W32(c->esp + 12, 0);
+        assert(rt_shim(c, "__cxa_atexit") && c->eax == 0);
+        c->esp = saved;
+    }
+    c->eax = 0; return 1;
+}
+RT_SHIM_PROVIDER(test_exit_handlers)
+
+RT_CHECK(process_environment_and_identity) {
+    strings_top = STR;
+    uint32_t environ_object = 0x2001fffcu;
+    assert(!rt_init_import_data("environ", environ_object, 4));
+    assert(call("setenv", 3, gstr("P2_POSIX_TEST"), gstr("one"), 1) == 0 && !strcmp(getenv("P2_POSIX_TEST"), "one"));
+    assert(call("setenv", 3, gstr("P2_POSIX_TEST"), gstr("two"), 0) == 0 && !strcmp(getenv("P2_POSIX_TEST"), "one"));
+    uint32_t value = call("getenv", 1, gstr("P2_POSIX_TEST")); assert(value && !strcmp(GPTR(value), "one"));
+    int seen = 0;
+    for (uint32_t p = R32(environ_object); R32(p); p += 4) seen |= !strcmp(GPTR(R32(p)), "P2_POSIX_TEST=one");
+    assert(seen);
+    assert(call("setenv", 3, gstr("BAD=NAME"), gstr("x"), 1) == UINT32_MAX && guest_errno() == 22);
+    assert(call("setenv", 3, gstr(""), gstr("x"), 1) == UINT32_MAX && guest_errno() == 22);
+    unsetenv("P2_POSIX_TEST");
+    assert(call("getpid", 0) == (uint32_t)getpid() && call("getuid", 0) == (uint32_t)getuid());
+    uint32_t pw = call("getpwuid", 1, (uint32_t)getuid());
+    struct passwd *host = getpwuid(getuid());
+    assert(pw && host && !strcmp(GPTR(R32(pw)), host->pw_name) && R32(pw + 8) == (uint32_t)getuid());
+    assert(!strcmp(GPTR(R32(pw + 20)), host->pw_dir) && !strcmp(GPTR(R32(pw + 24)), host->pw_shell));
+    uint32_t name = 0x2001f000u; char hostname[256]; assert(!gethostname(hostname, sizeof(hostname)));
+    assert(call("gethostname", 2, name, 256) == 0 && !strcmp(GPTR(name), hostname));
+    if (hostname[0]) assert(call("gethostname", 2, name, 1) == UINT32_MAX && guest_errno() == 36);
+    uint32_t usage = 0x2001f100u; memset(GPTR(usage), 0xa5, 80);
+    assert(call("getrusage", 2, 0, usage) == 0 && R32(usage + 16) > 0 && R32(usage + 16) < 64 * 1024 * 1024);
+    assert(R32(usage + 4) < 1000000 && R8(usage + 72) == 0xa5);
+    assert(call("getrusage", 2, 7, usage) == UINT32_MAX && guest_errno() == 22);
+    assert(call("getloadavg", 2, 0x2001f200u, 3) == 3 && RD(0x2001f200u) >= 0);
+    uint32_t uuid = 0x2001f300u;
+    call("uuid_generate", 1, uuid);
+    assert((R8(uuid + 6) >> 4) == 4 && (R8(uuid + 8) >> 6) == 2);
+    assert(call("mount", 5, gstr("a"), gstr("b"), gstr("c"), 0, 0) == UINT32_MAX && guest_errno() == (geteuid() ? 1u : 0u));
+    assert(call("alarm", 1, 0) == 0);
+}
+
+RT_CHECK(process_mallinfo_pops_hidden_pointer) {
+    uint32_t keep = rt_alloc(4096), out = 0x2001f000u;
+    rt_cpu_reset(&cpu); cpu.esp = STACK; W32(STACK, 0x1234); W32(STACK + 4, out);
+    assert(rt_shim(&cpu, "mallinfo"));
+    assert(cpu.eax == out && cpu.esp == STACK + 4 && R32(cpu.esp) == 0x1234); // ret $4 après le pop
+    assert(R32(out) > 0 && R32(out + 28) >= 4096 && R32(out + 8) == 0);
+    rt_free(keep);
+}
+
+RT_CHECK(process_children_and_linux_wait_status) {
+    strings_top = STR;
+    uint32_t status = 0x2001f000u;
+    // fork réel + _exit dans le fils ; statut Linux.
+    uint32_t pid = call("fork", 0);
+    if (pid == 0) { CPU child; rt_cpu_reset(&child); child.esp = STACK; W32(STACK + 4, 42); rt_shim(&child, "_exit"); }
+    assert((int32_t)pid > 0);
+    assert(call("waitpid", 3, pid, status, 0) == pid && R32(status) == 42u << 8);
+    // Signal : SIGUSR1 Linux (10) livré au fils et rapporté avec le numéro Linux.
+    pid_t child = fork();
+    if (!child) { for (;;) pause(); }
+    assert(call("kill", 2, (uint32_t)child, 10) == 0);
+    assert(call("wait", 1, status) == (uint32_t)child && (R32(status) & 0x7f) == 10);
+    assert(call("kill", 2, (uint32_t)getpid(), 99) == UINT32_MAX && guest_errno() == 22);
+    assert(call("waitpid", 3, (uint32_t)-1, status, 1) == UINT32_MAX && guest_errno() == 10); // ECHILD
+    // execvp : échec réel dans le fils (ENOENT), rapporté par le code de sortie.
+    pid = call("fork", 0);
+    if (pid == 0) {
+        uint32_t argv = 0x2001f100u; W32(argv, gstr("p2-no-such-program")); W32(argv + 4, 0);
+        uint32_t result = call("execvp", 2, R32(argv), argv);
+        _exit(result == UINT32_MAX ? (int)guest_errno() : 100);
+    }
+    assert(call("waitpid", 3, pid, status, 0) == pid && R32(status) == 2u << 8);
+    // system et popen exécutent réellement la commande hôte.
+    assert(call("system", 1, gstr("exit 5")) == 5u << 8 && call("system", 1, 0) != 0);
+    uint32_t stream = call("popen", 2, gstr("echo hi; exit 3"), gstr("re")); assert(stream);
+    uint32_t line = 0x2001f200u;
+    assert(call("fgets", 3, line, 16, stream) == line && !strcmp(GPTR(line), "hi\n"));
+    assert(call("pclose", 1, stream) == 3u << 8);
+    assert(call("popen", 2, gstr("true"), gstr("rw")) == 0 && guest_errno() == 22);
+    // exit : handlers invités du plus récent au plus ancien, puis sortie hôte.
+    int fds[2]; assert(!pipe(fds));
+    pid_t exiting = fork();
+    if (!exiting) {
+        close(fds[0]); exit_pipe = fds[1];
+        size_t before = rt_atexit_count();
+        if (before) _exit(99);
+        call("__cxa_atexit", 3, rt_dynamic_import("test_exit_handler1"), '1', 0);
+        call("__cxa_atexit", 3, rt_dynamic_import("test_exit_handler2"), '2', 0);
+        call("exit", 1, 9);
+        _exit(98);
+    }
+    close(fds[1]);
+    char order[8] = {0}; ssize_t got = 0, n;
+    while ((n = read(fds[0], order + got, sizeof(order) - 1 - (size_t)got)) > 0) got += n;
+    close(fds[0]);
+    int host_status; assert(waitpid(exiting, &host_status, 0) == exiting);
+    assert(WIFEXITED(host_status) && WEXITSTATUS(host_status) == 9 && !strcmp(order, "231"));
 }

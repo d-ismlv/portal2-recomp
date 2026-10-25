@@ -30,6 +30,8 @@ static uint32_t next_handle = 0xd0000100u;
 static _Thread_local uint32_t errno_address;
 typedef struct Environment { char *name; uint32_t value; struct Environment *next; } Environment;
 static Environment *environment;
+static uint32_t environ_slots[4];
+static size_t environ_slot_count;
 static uint32_t argument(CPU *c, unsigned i) { return R32(c->esp + 4 + 4 * i); }
 
 // errno Darwin et Linux coïncident de 1 à 34 (sauf EAGAIN/EDEADLK : 11/35 inversés).
@@ -219,7 +221,7 @@ void rt_libc_destroy(void) {
         free(streams); streams = next;
     }
     while (environment) { Environment *next = environment->next; free(environment->name); free(environment); environment = next; }
-    next_handle = 0xd0000100u; errno_address = 0;
+    next_handle = 0xd0000100u; errno_address = 0; environ_slot_count = 0;
 }
 
 static FILE *virtual_cpuinfo(void) {
@@ -596,6 +598,25 @@ int rt_libc_shim(CPU *c, const char *name) {
     return 1;
 }
 
+// Objets invités `environ` : reconstruits après chaque setenv, comme glibc
+// qui modifie le tableau visible par le programme. Les anciennes chaînes ne
+// sont pas libérées (glibc ne libère pas non plus les valeurs remplacées).
+int rt_environ_sync(void) {
+    if (!environ_slot_count) return 0;
+    extern char **environ;
+    size_t count = 0; while (environ[count]) ++count;
+    uint32_t array = rt_alloc((uint32_t)((count + 1) * 4));
+    if (!array) return -1;
+    for (size_t i = 0; i < count; ++i) {
+        size_t length = strlen(environ[i]) + 1;
+        uint32_t copy = rt_alloc((uint32_t)length);
+        if (!copy) return -1;
+        memcpy(GPTR(copy), environ[i], length); W32(array + (uint32_t)i * 4, copy);
+    }
+    W32(array + (uint32_t)count * 4, 0);
+    for (size_t i = 0; i < environ_slot_count; ++i) W32(environ_slots[i], array);
+    return 0;
+}
 int rt_init_import_data(const char *name, uint32_t address, uint32_t size) {
     if (rt_map(address, size)) return -1;
     if (!strcmp(name, "stdin") || !strcmp(name, "stdout") || !strcmp(name, "stderr")) {
@@ -606,17 +627,9 @@ int rt_init_import_data(const char *name, uint32_t address, uint32_t size) {
         return 0;
     }
     if (!strcmp(name, "environ") || !strcmp(name, "__environ") || !strcmp(name, "_environ")) {
-        extern char **environ;
-        size_t count = 0; while (environ[count]) ++count;
-        uint32_t array = rt_alloc((uint32_t)((count + 1) * 4));
-        if (!array) return -1;
-        for (size_t i = 0; i < count; ++i) {
-            size_t length = strlen(environ[i]) + 1;
-            uint32_t copy = rt_alloc((uint32_t)length);
-            if (!copy) return -1;
-            memcpy(GPTR(copy), environ[i], length); W32(array + (uint32_t)i * 4, copy);
-        }
-        W32(array + (uint32_t)count * 4, 0); W32(address, array); return 0;
+        if (environ_slot_count == sizeof(environ_slots) / sizeof(*environ_slots)) return -1;
+        environ_slots[environ_slot_count++] = address;
+        return rt_environ_sync();
     }
     if (!strcmp(name, "timezone") || !strcmp(name, "daylight")) {
         extern long timezone; extern int daylight;

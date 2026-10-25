@@ -18,6 +18,8 @@ uint32_t rt_linux_wait_status(int status);
 uint32_t rt_stream_new(FILE *file);
 // Retire un flux sans le fermer (pclose/freopen échoué) ; renvoie le FILE.
 FILE *rt_stream_take(CPU *c, uint32_t handle);
+// Recopie l'environnement hôte dans les objets invités `environ`.
+int rt_environ_sync(void);
 // Toutes les sources d'un répertoire invité sont fusionnées (libc.c).
 // Remplit un tableau de noms (sans doublon, l'utilisateur masque l'original,
 // les suppressions sont honorées). Libérer avec rt_dir_entries_free.

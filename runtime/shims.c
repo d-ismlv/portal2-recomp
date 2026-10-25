@@ -94,6 +94,14 @@ void rt_shims_destroy(void) {
     free(handlers); handlers = NULL; handler_count = handler_capacity = 0;
 }
 
+// Statistiques du tas invité pour mallinfo (runtime/process.c).
+void rt_heap_info(uint32_t *arena, uint32_t *used, uint32_t *free_bytes, uint32_t *free_blocks) {
+    *arena = heap_top - HEAP_BEGIN; *used = *free_bytes = *free_blocks = 0;
+    for (Block *b = blocks; b; b = b->next) {
+        if (b->used) *used += b->size;
+        else { *free_bytes += b->size; ++*free_blocks; }
+    }
+}
 size_t rt_atexit_count(void) { return handler_count; }
 int rt_atexit_get(size_t index, uint32_t *function, uint32_t *arg, uint32_t *dso) {
     if (index >= handler_count) return -1;
