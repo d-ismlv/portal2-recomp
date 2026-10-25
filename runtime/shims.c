@@ -2,85 +2,9 @@
 #include <stdlib.h>
 #include <stdio.h>
 
-#define HEAP_BEGIN 0x80000000u
-#define HEAP_END 0xc0000000u
-
-typedef struct Block {
-    uint32_t addr, size;
-    int used;
-    struct Block *next;
-} Block;
-static Block *blocks;
-static uint32_t heap_top = HEAP_BEGIN;
-
 typedef struct { uint32_t function, arg, dso; } ExitHandler;
 static ExitHandler *handlers;
 static size_t handler_count, handler_capacity;
-
-static Block *find_block(uint32_t ptr) {
-    for (Block *b = blocks; b; b = b->next)
-        if (b->addr == ptr && b->used) return b;
-    return NULL;
-}
-
-uint32_t rt_alloc(uint32_t size) {
-    uint64_t aligned = ((uint64_t)(size ? size : 1) + 15) & ~UINT64_C(15);
-    if (aligned > HEAP_END - HEAP_BEGIN) return 0;
-    Block **tail = &blocks;
-    for (Block *b = blocks; b; b = b->next) {
-        if (!b->used && b->size >= aligned) {
-            if (b->size > aligned) {
-                Block *rest = calloc(1, sizeof(*rest));
-                if (!rest) return 0;
-                rest->addr = b->addr + (uint32_t)aligned;
-                rest->size = b->size - (uint32_t)aligned;
-                rest->next = b->next;
-                b->next = rest;
-                b->size = (uint32_t)aligned;
-            }
-            b->used = 1;
-            return b->addr;
-        }
-        tail = &b->next;
-    }
-    if (aligned > HEAP_END - heap_top) return 0;
-    Block *b = calloc(1, sizeof(*b));
-    if (!b) return 0;
-    if (rt_map(heap_top, aligned)) { free(b); return 0; }
-    b->addr = heap_top; b->size = (uint32_t)aligned; b->used = 1;
-    heap_top += b->size;
-    *tail = b;
-    return b->addr;
-}
-
-int rt_free(uint32_t ptr) {
-    if (!ptr) return 0;
-    Block *b = find_block(ptr);
-    if (!b) return -1;
-    b->used = 0;
-    for (b = blocks; b && b->next;) {
-        if (!b->used && !b->next->used) {
-            Block *next = b->next;
-            b->size += next->size;
-            b->next = next->next;
-            free(next);
-        } else b = b->next;
-    }
-    return 0;
-}
-
-uint32_t rt_realloc(uint32_t ptr, uint32_t size) {
-    if (!ptr) return rt_alloc(size);
-    Block *b = find_block(ptr);
-    if (!b) return 0;
-    if (!size) { rt_free(ptr); return 0; }
-    if (size <= b->size) return ptr;
-    uint32_t result = rt_alloc(size);
-    if (!result) return 0; // preserve the original allocation on failure
-    memcpy(GPTR(result), GPTR(ptr), b->size);
-    rt_free(ptr);
-    return result;
-}
 
 void rt_shims_destroy(void) {
     rt_pthreads_destroy();
@@ -89,19 +13,10 @@ void rt_shims_destroy(void) {
     rt_tls_destroy();
     rt_modules_destroy();
     rt_vm_destroy();
-    while (blocks) { Block *next = blocks->next; free(blocks); blocks = next; }
-    heap_top = HEAP_BEGIN;
+    rt_heap_reset();
     free(handlers); handlers = NULL; handler_count = handler_capacity = 0;
 }
 
-// Statistiques du tas invité pour mallinfo (runtime/process.c).
-void rt_heap_info(uint32_t *arena, uint32_t *used, uint32_t *free_bytes, uint32_t *free_blocks) {
-    *arena = heap_top - HEAP_BEGIN; *used = *free_bytes = *free_blocks = 0;
-    for (Block *b = blocks; b; b = b->next) {
-        if (b->used) *used += b->size;
-        else { *free_bytes += b->size; ++*free_blocks; }
-    }
-}
 size_t rt_atexit_count(void) { return handler_count; }
 // __cxa_finalize marks a handler as run (function 0); exit must skip those.
 void rt_atexit_clear(size_t index) { if (index < handler_count) handlers[index].function = 0; }
@@ -184,14 +99,14 @@ static int core_shim(CPU *c, const char *name) {
         if (c->eax) memset(GPTR(c->eax), 0, (size_t)size);
     } else if (!strcmp(name, "realloc")) {
         a = arg(c, 0); b = arg(c, 1);
-        if (a && !find_block(a)) rt_trap(c, c->eip, "invalid guest realloc");
+        if (a && !rt_heap_usable_size(a)) rt_trap(c, c->eip, "invalid guest realloc");
         c->eax = rt_realloc(a, b);
     } else if (!strcmp(name, "free")) {
         if (rt_free(arg(c, 0))) rt_trap(c, c->eip, "invalid guest free");
     } else if (!strcmp(name, "malloc_usable_size")) {
-        a = arg(c, 0); Block *block = find_block(a);
-        if (a && !block) rt_trap(c, c->eip, "invalid guest malloc_usable_size");
-        c->eax = block ? block->size : 0;
+        a = arg(c, 0); uint32_t usable = a ? rt_heap_usable_size(a) : 0;
+        if (a && !usable) rt_trap(c, c->eip, "invalid guest malloc_usable_size");
+        c->eax = usable;
     } else if (!strcmp(name, "__cxa_atexit")) {
         if (handler_count == handler_capacity) {
             size_t capacity = handler_capacity ? handler_capacity * 2 : 32;
