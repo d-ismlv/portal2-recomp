@@ -198,6 +198,9 @@ def main():
                        help='every known function of every module is a root (default)')
     scope.add_argument('--roots-only', dest='all', action='store_false',
                        help='only main, foundation constructors and config/game-roots.json')
+    parser.add_argument('--checked-memory', action='store_true',
+                        help='contrôle logiciel de chaque accès invité, au grain des pages Linux de 4 Kio '
+                             '(diagnostic ; par défaut seules les pages hôtes de 16 Kio protègent, voir rt.h)')
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     parser.add_argument('--stats', type=Path, default=Path('build/game/build-stats.json'))
     args = parser.parse_args()
@@ -213,8 +216,9 @@ def main():
     if unimplemented:
         print('Runtime traps for unimplemented imports: ' + ', '.join(unimplemented))
     identity = subprocess.run(['clang', '--version'], capture_output=True, text=True, check=True).stdout
-    runtime_flags = [f'-O{args.runtime_opt or args.opt}', '-g', *WARNINGS, '-Iruntime', *HOST_CFLAGS]
-    generated_flags = [f'-O{args.opt}', DEBUG[args.debug], *WARNINGS, '-Iruntime']
+    memory = [] if args.checked_memory else ['-DRT_FAST_MEMORY']
+    runtime_flags = [f'-O{args.runtime_opt or args.opt}', '-g', *WARNINGS, *memory, '-Iruntime', *HOST_CFLAGS]
+    generated_flags = [f'-O{args.opt}', DEBUG[args.debug], *WARNINGS, *memory, '-Iruntime']
     sources = Path('build/game/gen/src')
     units = [(str(p), runtime_flags) for p in sorted(Path('runtime').glob('*.c'))]
     units.append(('src/main.c', runtime_flags))
@@ -239,7 +243,8 @@ def main():
                  link_seconds=round(link_time, 1), total_seconds=round(time.time() - started, 1),
                  binary_bytes=args.out.stat().st_size, object_cache_bytes=disk_usage(cache),
                  generated_source_bytes=disk_usage(sources), removed_object_bytes=removed,
-                 opt=args.opt, runtime_opt=args.runtime_opt or args.opt, debug=args.debug, whole_game=args.all)
+                 opt=args.opt, runtime_opt=args.runtime_opt or args.opt, debug=args.debug, whole_game=args.all,
+                 checked_memory=args.checked_memory)
     args.stats.write_text(json.dumps(stats, indent=1) + '\n')
     print(f'{compiled}/{len(units)} files compiled in {compile_time:.0f} s ({cpu:.0f} s CPU), '
           f'link {link_time:.0f} s, total {stats["total_seconds"]:.0f} s; binary '

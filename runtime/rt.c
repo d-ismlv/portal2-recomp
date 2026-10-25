@@ -12,6 +12,10 @@
 
 uint8_t *M;
 static const uint64_t address_space = UINT64_C(1) << 32;
+// Page de garde sans droit juste après les 4 Go invités : un accès de
+// plusieurs octets commençant sous 4 Go et débordant (sans contrôle logiciel,
+// RT_FAST_MEMORY) y fait une faute au lieu de toucher une autre projection.
+static const uint64_t guard_size = UINT64_C(1) << 16;
 typedef struct { uint32_t target, caller; } GuestFrame;
 static _Thread_local GuestFrame frames[256];
 static _Thread_local unsigned frame_depth;
@@ -74,7 +78,7 @@ static void install_fault_handlers(void) {
 int rt_init(void) {
     if (M) return -1;
     install_fault_handlers();
-    void *p = mmap(NULL, (size_t)address_space, PROT_NONE,
+    void *p = mmap(NULL, (size_t)(address_space + guard_size), PROT_NONE,
                    MAP_PRIVATE | MAP_ANON, -1, 0);
     if (p == MAP_FAILED) { perror("guest address space"); return -1; }
     M = p;
@@ -90,7 +94,7 @@ int rt_init(void) {
 
 void rt_destroy(void) {
     rt_shims_destroy();
-    if (M) munmap(M, (size_t)address_space);
+    if (M) munmap(M, (size_t)(address_space + guard_size));
     M = NULL;
 }
 

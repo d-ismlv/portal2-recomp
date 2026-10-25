@@ -453,9 +453,12 @@ def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=No
                 target = None
             if target is not None and setjmp(target):
                 resume.add(nxt)
-    lines = [f'static void fn_{entry:x}(CPU *c) {{',
-             '    FL f = c->flags; uint32_t a, b, r; int64_t product;',
-             '    (void)f; (void)a; (void)b; (void)r; (void)product;', f'    goto L{entry:x};']
+    # `restrict` : le CPU vit hors de la mémoire invitée, et `mem_` est une
+    # copie locale de M ; clang garde ainsi les registres invités dans des
+    # registres hôtes entre les accès mémoire (voir RT_MEM dans rt.h).
+    lines = ['#undef RT_MEM', '#define RT_MEM mem_', f'static void fn_{entry:x}(CPU *restrict c) {{',
+             '    uint8_t *const mem_ = M; FL f = c->flags; uint32_t a, b, r; int64_t product;',
+             '    (void)mem_; (void)f; (void)a; (void)b; (void)r; (void)product;', f'    goto L{entry:x};']
     lines.extend(f'L{pc:x}: {code}' for pc, code in sorted(translated.items()))
     if any('goto resume;' in code for code in translated.values()):
         # A call returned elsewhere (non-local transfer): resume here when the
@@ -463,7 +466,7 @@ def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=No
         cases = ' '.join(f'case {pc:#x}u: goto L{pc:x};' for pc in sorted(resume))
         lines.append(f'resume: f = c->flags; switch (c->eip) {{ {cases} default: return; }}' if resume
                      else 'resume: return;')
-    lines.append('}')
+    lines += ['}', '#undef RT_MEM', '#define RT_MEM M']
     return '\n'.join(lines), len(translated)
 
 
