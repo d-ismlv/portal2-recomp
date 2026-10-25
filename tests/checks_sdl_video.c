@@ -256,10 +256,16 @@ static void off_main_thread(void) {
 }
 static void stale_window(void) { call("SDL_ShowWindow", 1, RT_HANDLE_BASE + 0x7f0000); }
 static void foreign_free(void) { call("SDL_free", 1, DATA); }
+static void const_free(void) { call("SDL_free", 1, call("SDL_GetError", 0)); }
 
 RT_CHECK(sdl_video_traps_instead_of_lying) {
     // macOS : fenêtres sur le thread principal seulement.
     assert(traps(off_main_thread, "SDL_CreateWindow must run on the macOS main thread"));
     assert(traps(stale_window, "invalid SDL_Window handle"));
     assert(traps(foreign_free, "SDL_free: block not allocated"));
+    assert(traps(const_free, "SDL_free: block not allocated"));   // chaîne constante de SDL_GetError
+    // Toute chaîne du tas invité (ex. SDL_DROPFILE du pont entrées) est libérable.
+    uint32_t block = rt_alloc(8); assert(block);
+    call("SDL_free", 1, block);
+    assert(rt_free(block) == -1);
 }

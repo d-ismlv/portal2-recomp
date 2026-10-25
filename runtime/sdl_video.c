@@ -76,31 +76,23 @@ static uint32_t const_string(CPU *c, const char *text) {
     return s->address;
 }
 
-// Blocs alloués pour le code invité et libérables par SDL_free.
-typedef struct Owned { uint32_t address; struct Owned *next; } Owned;
-static Owned *owned;
-static uint32_t owned_string(CPU *c, const char *text) {
+// Chaînes allouées sur le tas invité et rendues par SDL_free : celles du
+// presse-papiers ici, et celles des événements du pont SDL entrées
+// (SDL_DROPFILE, SDL_TEXTEDITING_EXT). Règle commune : toute adresse du tas
+// invité passée à SDL_free retourne à rt_free ; une adresse inconnue piège.
+static uint32_t heap_string(CPU *c, const char *text) {
     size_t length = strlen(text) + 1;
-    Owned *o = malloc(sizeof(*o));
-    uint32_t address = o && length <= UINT32_MAX ? rt_alloc((uint32_t)length) : 0;
-    if (!address) { free(o); rt_trap(c, c->eip, "SDL: guest string allocation failed"); }
+    uint32_t address = length <= UINT32_MAX ? rt_alloc((uint32_t)length) : 0;
+    if (!address) rt_trap(c, c->eip, "SDL: guest string allocation failed");
     memcpy(GPTR(address), text, length);
-    pthread_mutex_lock(&lock);
-    o->address = address; o->next = owned; owned = o;
-    pthread_mutex_unlock(&lock);
     return address;
 }
-static int release_owned(uint32_t address) {
+static int is_const_string(uint32_t address) {
     pthread_mutex_lock(&lock);
-    Owned **link = &owned;
-    while (*link && (*link)->address != address) link = &(*link)->next;
-    Owned *o = *link;
-    if (o) *link = o->next;
+    ConstString *s = const_strings;
+    while (s && s->address != address) s = s->next;
     pthread_mutex_unlock(&lock);
-    if (!o) return 0;
-    free(o);
-    rt_free(address);
-    return 1;
+    return s != NULL;
 }
 
 // SDL_DisplayMode i386 : format, w, h, refresh_rate, driverdata (20 octets).
@@ -173,6 +165,7 @@ static uint32_t export_surface(CPU *c, SDL_Surface *host) {
     }
     if (pixel_bytes) {
         int locked = SDL_MUSTLOCK(host) && !SDL_LockSurface(host);
+        if (!host->pixels) rt_trap(c, c->eip, "SDL: host surface pixels unavailable");
         memcpy(GPTR(pixels), host->pixels, (size_t)pixel_bytes);
         if (locked) SDL_UnlockSurface(host);
     }
@@ -247,7 +240,8 @@ static int sdl_video(CPU *c, const char *name) {
     else if (!strcmp(n, "GetError")) r = const_string(c, SDL_GetError());
     else if (!strcmp(n, "free")) {
         uint32_t address = arg(c, 0);
-        if (address && !release_owned(address)) rt_trap(c, c->eip, "SDL_free: block not allocated by the SDL bridge");
+        if (address && (is_const_string(address) || rt_free(address)))
+            rt_trap(c, c->eip, "SDL_free: block not allocated by the SDL bridge");
     }
     // Fenêtres
     else if (!strcmp(n, "CreateWindow")) {
@@ -393,13 +387,16 @@ static int sdl_video(CPU *c, const char *name) {
     // Presse-papiers
     else if (!strcmp(n, "GetClipboardText")) {
         char *text = SDL_GetClipboardText();
-        r = owned_string(c, text ? text : "");
+        r = heap_string(c, text ? text : "");
         SDL_free(text);
     }
     else if (!strcmp(n, "SetClipboardText")) r = (uint32_t)SDL_SetClipboardText(guest_string(c, arg(c, 0)));
     else if (!strcmp(n, "HasClipboardText")) r = (uint32_t)SDL_HasClipboardText();
     else return 0;
     c->eax = r;
+    static int trace = -1;
+    if (trace < 0) trace = getenv("RT_SDL_TRACE") != NULL;
+    if (trace) fprintf(stderr, "[sdl] %s(%#x, %#x, %#x) = %#x\n", name, arg(c, 0), arg(c, 1), arg(c, 2), r);
     return 1;
 }
 RT_SHIM_PROVIDER(sdl_video)
