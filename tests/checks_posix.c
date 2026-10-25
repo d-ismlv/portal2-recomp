@@ -591,3 +591,16 @@ RT_CHECK(posix_read_cache_sees_guest_creations) {
     assert(after && !access(after, F_OK) && realpath(after, resolved) && !strcmp(resolved, host)); // créé par le jeu : visible aussitôt
     cleanup();
 }
+
+RT_CHECK(posix_access_cache_follows_guest_writes) {
+    setup();
+    assert(call("access", 2, gstr(game_path("a.txt")), 0) == 0);
+    assert(call("access", 2, gstr(game_path("absent.cfg")), 0) == UINT32_MAX && guest_errno() == 2);
+    assert(call("access", 2, gstr(game_path("absent.cfg")), 4) == UINT32_MAX);   // servi par le cache
+    uint32_t file = call("fopen", 2, gstr(game_path("absent.cfg")), gstr("w"));
+    assert(file && call("fclose", 1, file) == 0);
+    assert(call("access", 2, gstr(game_path("absent.cfg")), 0) == 0);           // créé : visible aussitôt
+    assert(call("unlink", 1, gstr(game_path("a.txt"))) == 0);
+    assert(call("access", 2, gstr(game_path("a.txt")), 0) == UINT32_MAX && guest_errno() == 2);
+    cleanup();
+}

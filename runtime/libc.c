@@ -554,7 +554,9 @@ int rt_libc_shim(CPU *c, const char *name) {
         const char *path = string(c, argument(c, 0));
         int result;
         if (!strcmp(path, "/proc/cpuinfo")) { result = (argument(c, 1) & 3) ? -1 : 0; if (result) errno = EACCES; }
-        else { const char *resolved=rt_read_path(path); result=resolved?access(resolved,(int)argument(c,1)):-1; }
+        else if ((result = rt_access_cached(path, (int)argument(c, 1))) == -2) {
+            const char *resolved=rt_read_path(path); result=resolved?access(resolved,(int)argument(c,1)):-1;
+        }
         if (result) save_errno(c);
         c->eax = (uint32_t)result;
     } else if (!strcmp(name, "opendir")) {
