@@ -41,6 +41,8 @@ class LifterTests(unittest.TestCase):
         self.assertIn('rt_call(c, 0x40u, 0x1au);', linked)   # not compiled: checked path
         self.assertNotIn('fn_40', linked)
         self.assertIn('rt_jump_fn(c, fn_50, 0x50u); return;', linked)
+        imported, _ = lift.link_direct(code, {0x30, 0x50}, imports={0x40: 'strlen'})
+        self.assertIn('rt_call_import(c, 0x40u, 0x1au);', imported)
         unlinked, used = lift.link_direct(code, set())
         self.assertEqual(used, set())
         self.assertIn('rt_dispatch(c, 0x50u); return;', unlinked)
@@ -49,7 +51,7 @@ class LifterTests(unittest.TestCase):
     def test_indirect_jump_uses_checked_dispatch(self):
         code, count = lift.lift(0x10, {0x10: (0x12, 'jmp', 'eax')})
         self.assertEqual(count, 1)
-        self.assertIn('rt_dispatch(c, a)', code)
+        self.assertIn('rt_jump_any(c, a)', code)
 
     def test_reject_unknown_direct_import(self):
         layout = {'modules': [], 'imports': [{'name': 'not_supported', 'addr': 0x30}]}
@@ -109,7 +111,7 @@ class LifterTests(unittest.TestCase):
             self.assertEqual(tables(base + 0x1e), [base + 0x20, base + 0x21, base + 0x22])
             code, count = lift.lift(base + 0x10, insns, tables=tables)
         self.assertIn(f'case {base + 0x21:#x}u: goto L{base + 0x21:x};', code)
-        self.assertIn('default: c->flags = f; rt_dispatch(c, a); return;', code)
+        self.assertIn('default: c->flags = f; rt_jump_any(c, a); return;', code)
         self.assertEqual(count, 9)
 
     def test_jump_table_with_bad_declared_case_is_not_guessed(self):

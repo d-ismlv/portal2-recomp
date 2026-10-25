@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <stdatomic.h>
 
 typedef union {
     uint8_t b[16]; uint16_t w[8]; uint32_t d[4]; int32_t i[4];
@@ -57,6 +58,9 @@ uint32_t rt_rand32(void);
 
 #define GPTR(a) ((void *)(M + (uint32_t)(a)))
 
+// Adresses des imports statiques (0xf0000000+) et dynamiques (0xf8000000+) :
+// jamais du code traduit.
+#define RT_IMPORT_BASE 0xf0000000u
 #define RT_VM_BEGIN 0x40000000u
 #define RT_VM_END 0x70000000u
 extern uint8_t rt_vm_permissions[(RT_VM_END - RT_VM_BEGIN) / 4096];
@@ -263,6 +267,26 @@ static inline void rt_call_fn(CPU *c, gfn fn, uint32_t target, uint32_t expected
     PUSH(c, expected_return); c->eip = target; fn(c);
 #endif
 }
+// Appels et sauts indirects (fonctions virtuelles, pointeurs de fonction) :
+// une cible traduite est appelée directement ; toute autre (import, adresse
+// dynamique, cible inconnue) prend le chemin complet de rt_call/rt_dispatch.
+static inline void rt_call_any(CPU *c, uint32_t target, uint32_t expected_return) {
+#ifndef RT_TRACED_CALLS
+    gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
+    if (fn) { PUSH(c, expected_return); c->eip = target; fn(c); return; }
+#endif
+    rt_call(c, target, expected_return);
+}
+static inline void rt_jump_any(CPU *c, uint32_t target) {
+#ifndef RT_TRACED_CALLS
+    gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
+    if (fn) { c->eip = target; fn(c); return; }
+#endif
+    rt_dispatch(c, target);
+}
+// Appel direct d'un import (shim) depuis le code généré, qui tient déjà le
+// verrou invité : route mémorisée appelée directement, sinon rt_call.
+void rt_call_import(RT_NOESCAPE CPU *c, uint32_t target, uint32_t expected_return);
 static inline void rt_jump_fn(CPU *c, gfn fn, uint32_t target) {
 #ifdef RT_TRACED_CALLS
     (void)fn; rt_dispatch(c, target);
@@ -319,6 +343,12 @@ void rt_guest_leave(void);
 unsigned rt_guest_suspend(void);
 void rt_guest_resume(unsigned saved);
 void rt_guest_poll(void);
+// Threads bloqués sur le verrou invité (scheduler.c). Le code généré ne cède
+// que s'il y en a : test en ligne, sans appel ni accès _Thread_local.
+extern _Atomic unsigned rt_guest_waiting;
+static inline void rt_poll(void) {
+    if (__builtin_expect(atomic_load_explicit(&rt_guest_waiting, memory_order_relaxed) != 0, 0)) rt_guest_poll();
+}
 int rt_thread_shim(CPU *c, const char *name);
 void rt_thread_destructors(CPU *c);
 void rt_threads_destroy(void);

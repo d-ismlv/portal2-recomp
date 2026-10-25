@@ -173,7 +173,7 @@ static int run_shim(CPU *c, const char *name, const RtShimRoute *route, RtShimRo
 void rt_dispatch(CPU *c, uint32_t target) {
     rt_guest_poll();
     c->eip = target;
-    gfn fn = rt_lookup(target);
+    gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
     if (fn) { fn(c); return; }
     RouteSlot *slot = route_slot(target, 0);
     ImportRoute *cached = slot ? atomic_load_explicit(slot, memory_order_acquire) : NULL;
@@ -201,6 +201,20 @@ void rt_dispatch(CPU *c, uint32_t target) {
 }
 
 void rt_return(CPU *c) { c->eip = POP(c); }
+
+void rt_call_import(CPU *c, uint32_t target, uint32_t expected_return) {
+#ifndef RT_TRACED_CALLS
+    RouteSlot *slot = route_slot(target, 0);
+    ImportRoute *cached = slot ? atomic_load_explicit(slot, memory_order_acquire) : NULL;
+    if (cached) {
+        PUSH(c, expected_return);
+        c->eip = target;
+        if (run_shim(c, cached->name, &cached->route, NULL)) { rt_return(c); return; }
+        c->esp += 4;   // refus sans effet (contrat dans rt.h) : chemin complet
+    }
+#endif
+    rt_call(c, target, expected_return);
+}
 
 // Non-local control flow (longjmp, an unwinder installing a landing pad):
 // the guest resumes at an address other than the return site of the call in

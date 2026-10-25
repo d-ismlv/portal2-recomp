@@ -204,7 +204,7 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
             # par rt_call une cible qui ne l'est pas, par ex. un import).
             call = f'rt_call_fn(c, fn_{target.imm:x}, {target.imm:#x}u, {nxt:#x}u);'
         else:
-            call = f'a = {target.read()}; c->flags = f; rt_call(c, a, {nxt:#x}u);'
+            call = f'a = {target.read()}; c->flags = f; rt_call_any(c, a, {nxt:#x}u);'
         if target.imm is not None:
             call = 'c->flags = f; ' + call
         return f'{call} if (c->eip != {nxt:#x}u) goto resume; f = c->flags; {end}', [nxt]
@@ -220,15 +220,15 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
                 local = sorted(t for t in set(cases) if t not in entries)
                 callees.update(t for t in cases if t in entries)
                 labels = ' '.join(f'case {t:#x}u: goto L{t:x};' for t in local)
-                return (f'a = {target.read()}; rt_guest_poll(); switch (a) {{ {labels} '
-                        'default: c->flags = f; rt_dispatch(c, a); return; }'), local
-            return f'a = {target.read()}; c->flags = f; rt_dispatch(c, a); return;', []
+                return (f'a = {target.read()}; rt_poll(); switch (a) {{ {labels} '
+                        'default: c->flags = f; rt_jump_any(c, a); return; }'), local
+            return f'a = {target.read()}; c->flags = f; rt_jump_any(c, a); return;', []
         if target.imm in entries:
             callees.add(target.imm)
             branch = f'c->flags = f; rt_jump_fn(c, fn_{target.imm:x}, {target.imm:#x}u); return;'
             successors = []
         else:
-            branch = ('rt_guest_poll(); ' if target.imm <= pc else '') + f'goto L{target.imm:x};'
+            branch = ('rt_poll(); ' if target.imm <= pc else '') + f'goto L{target.imm:x};'
             successors = [target.imm]
         if op == 'jmp':
             return branch, successors
@@ -297,7 +297,7 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
     elif op == 'stmxcsr' and len(operands) == 1:
         code = operands[0].write('c->mxcsr')
     elif op == 'pause' and not operands:
-        code = 'rt_guest_poll(); __atomic_signal_fence(__ATOMIC_SEQ_CST);'
+        code = 'rt_poll(); __atomic_signal_fence(__ATOMIC_SEQ_CST);'
     elif op in ('cld', 'std') and not operands:
         code = f'c->df = {int(op == "std")}u;'
     elif op == 'leave' and not operands:
@@ -480,7 +480,7 @@ def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=No
 _DIRECT = re.compile(r'rt_(call|jump)_fn\(c, fn_([0-9a-f]+), ')
 
 
-def link_direct(body, compiled):
+def link_direct(body, compiled, imports=frozenset()):
     """Résout les appels et sauts directs d'un corps généré : une cible
     traduite garde l'appel C direct, toute autre (import, fonction non
     traduite) repasse par rt_call/rt_dispatch, qui piège si elle est inconnue.
@@ -492,7 +492,9 @@ def link_direct(body, compiled):
         if target in compiled:
             used.add(target)
             return m[0]
-        return 'rt_call(c, ' if m[1] == 'call' else 'rt_dispatch(c, '
+        if m[1] == 'call':
+            return 'rt_call_import(c, ' if target in imports else 'rt_call(c, '
+        return 'rt_dispatch(c, '
     return _DIRECT.sub(resolve, body), used
 
 
@@ -677,7 +679,7 @@ def scan(entry, insns, entries=frozenset(), callees=None, visited=None, tables=N
         insn = insns[pc]
         try:
             code, successors = translate(pc, insn, others, callees, tables(pc) if tables else None)
-            if 'rt_dispatch(c, a)' in code and insn[1] == 'jmp':
+            if 'rt_jump_any(c, a)' in code and insn[1] == 'jmp':
                 indirect.append((pc, 'switch (a)' in code))
         except Exception as exc:  # noqa: BLE001 - every rejection is data here
             failures.append((pc, insn[1], insn[2], f'{type(exc).__name__}: {exc}'))
@@ -828,7 +830,7 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
         total += count
         pending.extend(sorted(callees))
     code += prototypes(compiled, static=True)
-    code += [link_direct(body, compiled)[0] for body in bodies]
+    code += [link_direct(body, compiled, imports)[0] for body in bodies]
     print(f'{len(selected)} roots, {len(compiled)} native functions, '
           f'{total} instructions, {len(used_imports)} direct imports')
     if unimplemented:
@@ -1150,7 +1152,7 @@ def generate_sharded(layout, specs, whole_game, objdump, disasm_cache, out_dir, 
     for name, bodies in sorted(shards.items()):
         linked, referenced = [], set()
         for entry in sorted(bodies):
-            body, used = link_direct(bodies[entry].replace('static void fn_', 'void fn_', 1), compiled)
+            body, used = link_direct(bodies[entry].replace('static void fn_', 'void fn_', 1), compiled, imports)
             linked.append(body)
             referenced |= used
         text = '/* Generated by tools/lift.py. Do not edit. */\n#include "rt.h"\n' + '\n'.join(
