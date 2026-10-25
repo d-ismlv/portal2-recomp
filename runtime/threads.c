@@ -38,7 +38,7 @@ static ThreadAttr *find_attr(uint32_t address){for(ThreadAttr *a=attributes;a;a=
 static Thread *find_thread(uint32_t handle){for(Thread *t=threads;t;t=t->next)if(t->handle==handle)return t;return NULL;}
 static void unlink_thread(Thread *t){Thread **link=&threads;while(*link && *link!=t)link=&(*link)->next;if(*link)*link=t->next;}
 // Gate held. Frees a detached or foreign record once its guest code is over.
-static void release(Thread *t){unlink_thread(t);if(t->stack)rt_munmap(t->stack,t->length);free(t);}
+static void release(Thread *t){unlink_thread(t);if(t->stack)rt_munmap(t->stack,t->length);rt_tls_release(t->cpu.tid);free(t);}
 static void finish(Thread *t){
     pthread_mutex_lock(&join_lock);t->finished=1;pthread_cond_broadcast(&join_cond);pthread_mutex_unlock(&join_lock);
     if(t->detached)release(t);

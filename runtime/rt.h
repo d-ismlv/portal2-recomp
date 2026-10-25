@@ -207,6 +207,7 @@ int rt_register_tls(const char *directory, const char *name, uint32_t id, uint32
 uint32_t rt_thread_pointer(CPU *c);
 uint32_t rt_tls_address(CPU *c, uint32_t module, uint32_t offset);
 void rt_tls_destroy(void);
+void rt_tls_release(uint32_t thread);
 int rt_loader_shim(CPU *c, const char *name);
 void rt_modules_destroy(void);
 int rt_scan_shim(CPU *c, const char *name);

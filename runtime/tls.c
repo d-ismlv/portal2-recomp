@@ -8,7 +8,7 @@ typedef struct TLSModule {
     struct TLSModule *next;
 } TLSModule;
 typedef struct TLSBlock {
-    uint32_t thread, module, address;
+    uint32_t thread, module, address, allocation;
     struct TLSBlock *next;
 } TLSBlock;
 typedef struct ThreadContext { uint32_t thread, pointer; struct ThreadContext *next; } ThreadContext;
@@ -73,8 +73,22 @@ uint32_t rt_tls_address(CPU *c, uint32_t module, uint32_t offset) {
     if (!allocation || !b) rt_trap(c, c->eip, "cannot allocate guest TLS block");
     b->address = (allocation + m->alignment - 1) & ~(m->alignment - 1);
     memcpy(GPTR(b->address), m->initial, m->size);
-    b->module = module; b->thread = c->tid; b->next = blocks; blocks = b;
+    b->allocation = allocation; b->module = module; b->thread = c->tid; b->next = blocks; blocks = b;
     return b->address + offset;
+}
+
+// Frees the TCB and TLS blocks of a guest thread whose guest code is over.
+void rt_tls_release(uint32_t thread) {
+    for (ThreadContext **link = &contexts; *link;) {
+        ThreadContext *ctx = *link;
+        if (ctx->thread != thread) { link = &ctx->next; continue; }
+        *link = ctx->next; rt_free(ctx->pointer - 0x10000); free(ctx);
+    }
+    for (TLSBlock **link = &blocks; *link;) {
+        TLSBlock *b = *link;
+        if (b->thread != thread) { link = &b->next; continue; }
+        *link = b->next; rt_free(b->allocation); free(b);
+    }
 }
 
 void rt_tls_destroy(void) {
