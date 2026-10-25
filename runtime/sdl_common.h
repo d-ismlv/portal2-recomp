@@ -1,0 +1,20 @@
+// Types partagés par les ponts SDL2 (vidéo, entrées, audio).
+#pragma once
+// Identifiants des handles rt_handle_* pour les pointeurs SDL hôtes.
+// 'SDLW' est aussi utilisé par le pont des entrées pour retrouver une fenêtre
+// (rt_handle_find(fenetre_hote, RT_SDL_WINDOW)) : ne pas le changer.
+#define RT_SDL_WINDOW    0x53444c57u  /* 'SDLW' */
+#define RT_SDL_GLCONTEXT 0x53444c47u  /* 'SDLG' */
+#define RT_SDL_CURSOR    0x53444c43u  /* 'SDLC' */
+#define RT_SDL_RWOPS     0x53444c52u  /* 'SDLR' */
+// Tailles des structures SDL2 i386 lues/écrites en mémoire invitée.
+#define RT_SDL_RECT_SIZE 16u         /* x, y, w, h */
+#define RT_SDL_DISPLAYMODE_SIZE 20u  /* format, w, h, refresh_rate, driverdata */
+#define RT_SDL_SURFACE_SIZE 60u
+#define RT_SDL_PIXELFORMAT_SIZE 44u
+// Surface hôte associée à une SDL_Surface invitée créée par le pont vidéo,
+// après recopie des pixels/couleurs modifiés par le code invité (rt_trap si
+// la surface est inconnue ou si sa géométrie a changé). NULL pour 0.
+#include <stdint.h>
+struct CPU; struct SDL_Surface;
+struct SDL_Surface *rt_sdl_surface_sync(struct CPU *c, uint32_t guest);
