@@ -293,6 +293,8 @@ static int sdl_input_shim(CPU *c, const char *name) {
         // attende ce verrou pendant qu'un autre thread invité attend SDL.
         uint32_t guest = argument(c, 0);
         int32_t timeout = (int32_t)argument(c, 1);
+        if (timeout && getenv("P2_TRACE_WAIT"))
+            fprintf(stderr, "[wait] SDL_WaitEventTimeout(%#x, %d) from %#x\n", guest, timeout, R32(c->esp));
         if (guest) rt_write_span(c, guest, GUEST_EVENT_SIZE);
         uint64_t deadline = SDL_GetTicks64() + (uint64_t)(timeout > 0 ? timeout : 0);
         int got;

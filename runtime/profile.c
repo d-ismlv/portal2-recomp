@@ -10,6 +10,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <sys/time.h>
+#include <time.h>
 #include <unistd.h>
 
 #define SLOTS 65536u
@@ -109,6 +110,16 @@ static void *writer(void *unused) {
     return NULL;
 }
 
+// P2_PROFILE_WALL=1 : échantillonne le thread principal en temps réel (même
+// bloqué) en lui envoyant SIGPROF toutes les millisecondes ; montre où il attend.
+static pthread_t main_thread;
+static void *wall_sampler(void *unused) {
+    (void)unused;
+    struct timespec period = {0, 1000000};
+    for (;;) { nanosleep(&period, NULL); pthread_kill(main_thread, SIGPROF); }
+    return NULL;
+}
+
 __attribute__((constructor)) static void start_profiler(void) {
     output = getenv("P2_PROFILE");
     if (!output || !*output) return;
@@ -117,9 +128,15 @@ __attribute__((constructor)) static void start_profiler(void) {
     action.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&action.sa_mask);
     sigaction(SIGPROF, &action, NULL);
-    struct itimerval timer = {{0, 1000}, {0, 1000}};
-    setitimer(ITIMER_PROF, &timer, NULL);
     pthread_t thread;
+    if (getenv("P2_PROFILE_WALL")) {
+        main_thread = pthread_self();   // constructeur : thread principal
+        pthread_create(&thread, NULL, wall_sampler, NULL);
+        pthread_detach(thread);
+    } else {
+        struct itimerval timer = {{0, 1000}, {0, 1000}};
+        setitimer(ITIMER_PROF, &timer, NULL);
+    }
     pthread_create(&thread, NULL, writer, NULL);
     pthread_detach(thread);
 }
