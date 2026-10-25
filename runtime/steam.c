@@ -492,11 +492,24 @@ static void unregister_result(uint32_t object, uint64_t call) {
     pthread_mutex_unlock(&lock);
 }
 
+// Callbacks dont la disposition i386 (uint64 alignés sur 4) ne diffère de
+// l'hôte ARM64 (alignés sur 8) que par le remplissage final : mêmes champs aux
+// mêmes décalages, on recopie seulement la taille invitée.
+static const struct { int32_t id, host, guest; } tail_padding[] = {
+    {2002, 16, 12},   // GameStatsSessionClosed_t { uint64 m_ulSessionID; EResult m_eResult; }
+};
+int steam_callback_guest_size(int32_t id, int32_t host_size) {
+    for (size_t i = 0; i < sizeof(tail_padding) / sizeof(*tail_padding); ++i)
+        if (tail_padding[i].id == id && tail_padding[i].host == host_size) return tail_padding[i].guest;
+    return host_size;
+}
+
 // Appelle Run sur l'objet invité après avoir vérifié GetCallbackSizeBytes.
 static void deliver(CPU *c, uint32_t object, int32_t id, const void *data, int32_t size,
                     int result, int failed, uint64_t call) {
     uint32_t vtable = R32(object);
     int32_t expected = (int32_t)rt_invoke(c, R32(vtable + 8), &object, 1);
+    if (expected != size && expected == steam_callback_guest_size(id, size)) size = expected;
     if (expected != size) {
         snprintf(message, sizeof(message), "Steam: callback %d is %d bytes on the host but the guest object expects %d",
                  id, size, expected);

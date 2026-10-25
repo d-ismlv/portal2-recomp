@@ -397,3 +397,9 @@ RT_CHECK(steam_game_stats_marshals_uint64) {
     rt_call(&c, R32(R32(proxy) + 4 * 5), RT_RETURN_SENTINEL);
     assert(c.eax == 1 && R32(0x20011900) == 0x00112233u && R32(0x20011904) == 0xaabbccddu);
 }
+
+RT_CHECK(steam_callback_tail_padding_table) {
+    assert(steam_callback_guest_size(2002, 16) == 12);   // GameStatsSessionClosed_t
+    assert(steam_callback_guest_size(2002, 20) == 20);   // taille inattendue : inchangée (piégera)
+    assert(steam_callback_guest_size(1101, 16) == 16);   // autres callbacks inchangés
+}
