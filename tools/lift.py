@@ -382,7 +382,8 @@ def lift(entry, insns, entries=frozenset(), callees=None):
 
 
 # Keep this list synchronized with runtime/shims.c. Unknown imports fail closed.
-SHIMS = frozenset('pthread_create pthread_join pthread_attr_init pthread_attr_setstacksize pthread_attr_destroy pthread_getschedparam pthread_setschedparam pthread_exit pthread_equal pthread_cond_wait pthread_cond_timedwait '
+# New runtime files declare their names on `// SHIMS: a b c` lines instead (see declared_shims).
+_CORE_SHIMS = frozenset('pthread_create pthread_join pthread_attr_init pthread_attr_setstacksize pthread_attr_destroy pthread_getschedparam pthread_setschedparam pthread_exit pthread_equal pthread_cond_wait pthread_cond_timedwait '
                   'feof ferror clearerr fileno fileno_unlocked ftell ftello ftello64 fseek fseeko fseeko64 rewind strrchr '
                   'memset memcpy memmove memcmp strlen strcpy stpcpy strncpy strcmp '
                   'malloc calloc realloc free malloc_usable_size __cxa_atexit abort puts snprintf vsnprintf pthread_self '
@@ -392,6 +393,18 @@ SHIMS = frozenset('pthread_create pthread_join pthread_attr_init pthread_attr_se
                   '___tls_get_addr __tls_get_addr gettimeofday usleep fopen fopen64 fclose fgets fread fwrite access opendir closedir '
                   'readdir strpbrk strstr strcasestr strchr strcasecmp strncasecmp strdup tolower toupper getppid strtol strtoul __isoc99_sscanf sscanf strcat strncat strtod strerror pthread_key_create __pthread_key_create pthread_key_delete pthread_setspecific pthread_getspecific pthread_once pthread_cond_init pthread_cond_destroy pthread_cond_signal pthread_cond_broadcast dlopen dlsym dlerror clock_gettime sysconf mmap mmap64 munmap mprotect madvise syscall fputs fputc putc fgetc getc fflush printf fprintf vprintf vfprintf open open64 __open_2 __open64_2 close read write lseek lseek64 chdir getcwd readlink stat stat64 lstat lstat64 fstat fstat64 __xstat __xstat64 __lxstat __lxstat64 __fxstat __fxstat64'.split())
 
+
+def declared_shims(runtime_dir=Path(__file__).resolve().parent.parent / 'runtime'):
+    """Names declared by runtime/*.c on lines starting with `// SHIMS:`."""
+    names = set()
+    for path in sorted(runtime_dir.glob('*.c')):
+        for line in path.read_text().splitlines():
+            if line.startswith('// SHIMS:'):
+                names.update(line[len('// SHIMS:'):].split())
+    return names
+
+
+SHIMS = _CORE_SHIMS | frozenset(declared_shims())
 
 def resolve_export(layout, spec):
     if ':symbol:' in spec:

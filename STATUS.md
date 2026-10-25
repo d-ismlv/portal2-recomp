@@ -73,3 +73,27 @@ Linux et finalisation des modules restent incomplets. Le x87 est modélisé en
 précision double. Les lectures de répertoires ne fusionnent pas encore les trois
 sources de fichiers. Aucun contournement des imports manquants ne doit servir
 à déclarer un lancement réussi.
+
+## Conventions pour les ponts natifs (ajoutées le 25 octobre, reprise Claude)
+
+- **Nouveaux imports** : un fichier `runtime/<domaine>.c` par domaine. Il déclare
+  ses noms sur des lignes `// SHIMS: nom1 nom2 ...` (lues par `tools/lift.py`)
+  et s'enregistre avec `RT_SHIM_PROVIDER(fonction)` ; la fonction renvoie 0 pour
+  un nom inconnu. Ne plus allonger la liste `_CORE_SHIMS` de `lift.py` ni la
+  chaîne de `rt_shim` dans `shims.c`.
+- **Adresses dynamiques** (`SDL_GL_GetProcAddress`, `alGetProcAddress`, `dlsym`
+  vers une bibliothèque hôte) : `rt_dynamic_import(nom)` renvoie une adresse
+  invitée stable (plage `0xf8000000`) ; un appel invité y aboutit dans
+  `rt_shim(c, nom)` comme un import statique.
+- **Pointeurs hôtes** : `rt_handle_new/get/find/free` (plage non projetée
+  `0xe0000000`, typée par un identifiant). Une structure que le code invité lit
+  directement (SDL_Surface, FT_Face, SDL_Event...) doit être recopiée en mémoire
+  invitée au format i386.
+- **Retour flottant** : `rt_return_st0(c, valeur)`. **Rappel invité** depuis
+  l'hôte : `rt_invoke` (`modules.h`).
+- **Tests** : `tests/checks_<domaine>.c` avec `RT_CHECK(nom) { ... }`, liés
+  automatiquement dans `abi-smoke` (et sa variante UBSan).
+- **Bibliothèques hôtes** : `HOST_CFLAGS`/`HOST_LIBS` du Makefile, recopiés dans
+  `tools/build_game.py` (SDL2, FreeType, Fontconfig, iconv, OpenGL, OpenAL).
+- Attention : `make clean` efface aussi `build/game/prep` ; le régénérer avec
+  `python3 tools/gameprep.py` (quelques secondes).

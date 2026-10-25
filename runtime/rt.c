@@ -68,6 +68,7 @@ void rt_dispatch(CPU *c, uint32_t target) {
     gfn fn = rt_lookup(target);
     if (fn) { fn(c); return; }
     const char *name = rt_import_name(target);
+    if (!name) name = rt_dynamic_import_name(target);
     if (name && rt_shim(c, name)) { rt_return(c); return; }
     rt_trap(c, target, name ? name : "target not recompiled");
 }

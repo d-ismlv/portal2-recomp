@@ -11,6 +11,12 @@ import subprocess
 import sys
 import lift
 
+# Identique à HOST_CFLAGS/HOST_LIBS du Makefile.
+HOST_CFLAGS = ['-I/opt/homebrew/include', '-I/opt/homebrew/include/freetype2', '-DGL_SILENCE_DEPRECATION',
+               '-DOPENAL_DEPRECATED=', '-DAL_SILENCE_DEPRECATION']
+HOST_LIBS = ['-L/opt/homebrew/lib', '-lSDL2', '-lfreetype', '-lfontconfig', '-liconv',
+             '-framework', 'OpenGL', '-framework', 'OpenAL']
+
 
 def roots(layout):
     result = ['portal2_linux:symbol:main']
@@ -37,8 +43,8 @@ def main():
     source = args.layout.parent.parent / 'game.c'
     source.write_text(code)
     runtime = sorted(str(p) for p in Path('runtime').glob('*.c'))
-    command = ['clang', f'-O{args.opt}', '-g', '-Wall', '-Wextra', '-Werror', '-Iruntime',
-               *runtime, str(source), 'src/main.c', '-o', str(args.out)]
+    command = ['clang', f'-O{args.opt}', '-g', '-Wall', '-Wextra', '-Werror', '-Iruntime', *HOST_CFLAGS,
+               *runtime, str(source), 'src/main.c', *HOST_LIBS, '-o', str(args.out)]
     subprocess.run(command, check=True)
 
 

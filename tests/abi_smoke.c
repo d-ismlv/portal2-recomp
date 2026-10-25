@@ -5,6 +5,21 @@
 #include "vm_checks.h"
 #include "filesystem_checks.h"
 #include "thread_checks.h"
+#include "checks.h"
+
+static struct { const char *name; rt_check_fn fn; } checks[256];
+static size_t check_count;
+void rt_register_check(const char *name, rt_check_fn fn) {
+    assert(check_count < sizeof(checks) / sizeof(*checks));
+    checks[check_count].name = name; checks[check_count++].fn = fn;
+}
+
+static int test_provider_calls;
+static int test_provider(CPU *c, const char *name) {
+    if (strcmp(name, "__registry_probe")) return 0;
+    c->eax = 0x5eed; ++test_provider_calls; return 1;
+}
+RT_SHIM_PROVIDER(test_provider)
 
 static CPU run(uint32_t target) {
     CPU c; rt_cpu_reset(&c); c.esp = 0x20010000;
@@ -16,6 +31,9 @@ static CPU run(uint32_t target) {
 int main(void) {
     assert(rt_init() == 0);
     assert(rt_map(0x20000000, 0x20000) == 0);
+    CPU probe; rt_cpu_reset(&probe);
+    assert(rt_shim(&probe, "__registry_probe") == 1 && probe.eax == 0x5eed && test_provider_calls == 1);
+    assert(rt_shim(&probe, "__registry_absent") == 0);
     CPU c = run(0x1000);
     assert(c.eax == 1 && c.edx == 0x1003); // carry survives get_pc_thunk
     assert(run(0x3000).eax == 5); // indirect CALL, RET 8 cleans arguments
@@ -80,7 +98,11 @@ int main(void) {
     check_virtual_memory();
     check_filesystem();
     check_threads();
+    for (size_t i = 0; i < check_count; ++i) {
+        checks[i].fn();
+        printf("ok %s\n", checks[i].name);
+    }
     rt_destroy();
-    puts("PASS: nested/recursive CALL, direct/indirect tail calls, flags, PIC, RET 8, atomics, REP/DF, SSE2 and x87");
+    printf("PASS: nested/recursive CALL, direct/indirect tail calls, flags, PIC, RET 8, atomics, REP/DF, SSE2 and x87; %zu registered checks\n", check_count);
     return 0;
 }

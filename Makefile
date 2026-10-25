@@ -1,8 +1,13 @@
 RUNTIME := $(sort $(wildcard runtime/*.c))
+CHECKS := $(sort $(wildcard tests/checks_*.c))
 HEADERS := $(sort $(wildcard runtime/*.h))
 PYTHON ?= python3
 CC = clang
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror
+# Bibliothèques hôtes ARM64 des ponts natifs ; partagées avec tools/build_game.py.
+HOST_CFLAGS = -I/opt/homebrew/include -I/opt/homebrew/include/freetype2 -DGL_SILENCE_DEPRECATION -DOPENAL_DEPRECATED= -DAL_SILENCE_DEPRECATION
+HOST_LIBS = -L/opt/homebrew/lib -lSDL2 -lfreetype -lfontconfig -liconv -framework OpenGL -framework OpenAL
+CFLAGS += $(HOST_CFLAGS)
 LIFT_FLAGS ?= --allow-unimplemented-imports
 INPUT_DIR ?= ../work/portal2-linux/bin
 PREP = build/prep
@@ -18,14 +23,14 @@ build/tier0.c: Makefile tools/lift.py tools/float_lift.py tools/registry.py $(PR
 	$(PYTHON) tools/lift.py $(LIFT_FLAGS) --layout $(PREP)/layout.json --out $@ $(EXPORTS)
 
 build/tier0-smoke: build/tier0.c $(RUNTIME) $(HEADERS) tests/tier0_smoke.c
-	$(CC) $(CFLAGS) -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c -o $@
+	$(CC) $(CFLAGS) -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c $(HOST_LIBS) -o $@
 
 build/abi-fixture.c: tests/generate_abi_fixture.py tools/lift.py tools/float_lift.py tools/registry.py
 	@mkdir -p build
 	$(PYTHON) tests/generate_abi_fixture.py $@
 
-build/abi-smoke: build/abi-fixture.c tests/abi_smoke.c tests/cpu_checks.h tests/vm_checks.h tests/filesystem_checks.h tests/thread_checks.h $(RUNTIME) $(HEADERS)
-	$(CC) $(CFLAGS) -Iruntime $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c -o $@
+build/abi-smoke: build/abi-fixture.c tests/abi_smoke.c $(wildcard tests/*.h) $(CHECKS) $(RUNTIME) $(HEADERS)
+	$(CC) $(CFLAGS) -Iruntime -Itests $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c $(CHECKS) $(HOST_LIBS) -o $@
 
 test: build/tier0-smoke build/abi-smoke
 	$(PYTHON) -m unittest discover -s tests -p 'test_*.py' -v
@@ -40,10 +45,10 @@ progress: $(PREP)/layout.json
 	$(PYTHON) tools/progress.py --layout $(PREP)/layout.json --out build/progress.json
 
 build/tier0-smoke-ubsan: build/tier0.c $(RUNTIME) $(HEADERS) tests/tier0_smoke.c
-	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c -o $@
+	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime $(RUNTIME) build/tier0.c tests/tier0_smoke.c $(HOST_LIBS) -o $@
 
-build/abi-smoke-ubsan: build/abi-fixture.c $(RUNTIME) $(HEADERS) tests/abi_smoke.c tests/cpu_checks.h tests/vm_checks.h
-	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c -o $@
+build/abi-smoke-ubsan: build/abi-fixture.c $(RUNTIME) $(HEADERS) tests/abi_smoke.c $(wildcard tests/*.h) $(CHECKS)
+	$(CC) $(CFLAGS) -O1 -fsanitize=undefined -fno-sanitize-recover=all -Iruntime -Itests $(RUNTIME) build/abi-fixture.c tests/abi_smoke.c $(CHECKS) $(HOST_LIBS) -o $@
 
 sanitize: build/tier0-smoke-ubsan build/abi-smoke-ubsan
 	./build/tier0-smoke-ubsan $(PREP)

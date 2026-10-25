@@ -123,6 +123,17 @@ uint32_t rt_string_length(CPU *c, uint32_t address) {
     rt_trap(c, c->eip, "unterminated guest string");
 }
 
+static rt_shim_provider providers[64];
+static size_t provider_count;
+void rt_register_shim_provider(rt_shim_provider provider) {
+    if (provider_count == sizeof(providers) / sizeof(*providers)) abort();
+    providers[provider_count++] = provider;
+}
+static int registered_shim(CPU *c, const char *name) {
+    for (size_t i = 0; i < provider_count; ++i) if (providers[i](c, name)) return 1;
+    return 0;
+}
+
 // Return 0 for an unsupported name. The dispatcher traps, with no fake result.
 // Argument layouts here are i386 cdecl, never the host's variadic/pointer ABI.
 int rt_shim(CPU *c, const char *name) {
@@ -196,6 +207,6 @@ int rt_shim(CPU *c, const char *name) {
         c->eax = (uint32_t)puts(GPTR(a));
     } else if (!strcmp(name, "abort")) {
         rt_trap(c, c->eip, "guest libc abort");
-    } else return rt_format_shim(c, name) || rt_pthread_shim(c, name) || rt_libc_shim(c, name) || rt_scan_shim(c, name) || rt_loader_shim(c, name) || rt_stat_shim(c, name);
+    } else return rt_format_shim(c, name) || rt_pthread_shim(c, name) || rt_libc_shim(c, name) || rt_scan_shim(c, name) || rt_loader_shim(c, name) || rt_stat_shim(c, name) || registered_shim(c, name);
     return 1;
 }

@@ -243,4 +243,34 @@ void rt_thread_destructors(CPU *c);
 void rt_threads_destroy(void);
 
 int rt_futex(CPU *c,uint32_t address,uint32_t operation,uint32_t value,uint32_t timeout);
+// Fournisseurs de shims supplémentaires : chaque fichier runtime s'enregistre
+// lui-même, sans modifier shims.c. Un fournisseur renvoie 0 s'il ne connaît
+// pas le nom. Déclarer aussi les noms sur une ligne `// SHIMS: a b c` du
+// fichier pour que tools/lift.py les accepte.
+// Fonctions natives obtenues à l'exécution (SDL_GL_GetProcAddress,
+// alGetProcAddress, dlsym sur une bibliothèque hôte) : une adresse invitée
+// stable par nom ; un appel invité vers elle passe par rt_shim(c, nom) comme
+// un import statique. Renvoie 0 si la table est pleine.
+#define RT_DYNAMIC_IMPORT_BASE 0xf8000000u
+#define RT_DYNAMIC_IMPORT_STRIDE 16u
+#define RT_DYNAMIC_IMPORT_LIMIT 0x40000u
+uint32_t rt_dynamic_import(const char *name);
+const char *rt_dynamic_import_name(uint32_t address);
+// Handles opaques pour les pointeurs hôtes (SDL_Window*, contexte GL, FT_Face...).
+// Le code invité ne doit jamais les déréférencer : la plage 0xe0000000 n'est
+// pas projetée, un accès invité y est une faute. `kind` est un identifiant non
+// nul choisi par chaque pont (par ex. un FOURCC) ; get/free vérifient le type.
+#define RT_HANDLE_BASE 0xe0000000u
+#define RT_HANDLE_STRIDE 16u
+#define RT_HANDLE_LIMIT 0x800000u
+uint32_t rt_handle_new(void *host, uint32_t kind);
+void *rt_handle_get(uint32_t handle, uint32_t kind);
+uint32_t rt_handle_find(const void *host, uint32_t kind);
+void *rt_handle_free(uint32_t handle, uint32_t kind);
+// Valeur de retour flottante i386 (float/double/long double) : dans ST(0).
+static inline void rt_return_st0(CPU *c, double value) { fpush(c, value); }
+typedef int (*rt_shim_provider)(CPU *c, const char *name);
+void rt_register_shim_provider(rt_shim_provider provider);
+#define RT_SHIM_PROVIDER(fn) \
+    __attribute__((constructor)) static void rt_register_##fn(void) { rt_register_shim_provider(fn); }
 void rt_futex_destroy(void);

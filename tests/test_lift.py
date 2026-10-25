@@ -11,6 +11,13 @@ spec.loader.exec_module(lift)
 
 
 class LifterTests(unittest.TestCase):
+    def test_runtime_files_declare_shims(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as tmp:
+            (Path(tmp) / 'a.c').write_text('// SHIMS: SDL_Init SDL_Quit\nint x;\n// SHIMS: sinf\n')
+            (Path(tmp) / 'b.h').write_text('// SHIMS: ignored_in_headers\n')
+            self.assertEqual(lift.declared_shims(Path(tmp)), {'SDL_Init', 'SDL_Quit', 'sinf'})
+
     def test_reject_unsupported_reachable_instruction(self):
         with self.assertRaisesRegex(lift.Unsupported, '0x10.*rsm'):
             lift.lift(0x10, {0x10: (0x12, 'rsm', '')})
