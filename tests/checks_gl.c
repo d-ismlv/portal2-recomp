@@ -109,6 +109,17 @@ RT_CHECK(gl_texture_upload_and_readback_use_pixel_store) {
     gl("glTexSubImage2D", 9, GL_TEXTURE_2D, 0, 1, 1, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, DATA + 0x100);
     gl("glGetTexImage", 5, GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, DATA + 0x200);
     assert(!memcmp(GPTR(DATA + 0x200 + 12 + 3), rgb, 3));
+    // UNPACK_ROW_LENGTH/SKIP_* : le pixel lu est à (1×4 + 2)×3 = 18 octets.
+    gl("glPixelStorei", 2, GL_UNPACK_ROW_LENGTH, 4);
+    gl("glPixelStorei", 2, GL_UNPACK_SKIP_ROWS, 1);
+    gl("glPixelStorei", 2, GL_UNPACK_SKIP_PIXELS, 2);
+    W8(DATA + 0x100 + 18, 0x81); W8(DATA + 0x100 + 19, 0x82); W8(DATA + 0x100 + 20, 0x83);
+    gl("glTexSubImage2D", 9, GL_TEXTURE_2D, 0, 0, 0, 1, 1, GL_RGB, GL_UNSIGNED_BYTE, DATA + 0x100);
+    gl("glPixelStorei", 2, GL_UNPACK_ROW_LENGTH, 0);
+    gl("glPixelStorei", 2, GL_UNPACK_SKIP_ROWS, 0);
+    gl("glPixelStorei", 2, GL_UNPACK_SKIP_PIXELS, 0);
+    gl("glGetTexImage", 5, GL_TEXTURE_2D, 0, GL_RGB, GL_UNSIGNED_BYTE, DATA + 0x200);
+    assert(R8(DATA + 0x200) == 0x81 && R8(DATA + 0x201) == 0x82 && R8(DATA + 0x202) == 0x83);
     W32(DATA, texture);
     gl("glDeleteTextures", 2, 1, DATA);
     assert(gl("glIsTexture", 1, texture) == 0 && gl("glGetError", 0) == GL_NO_ERROR);

@@ -176,16 +176,29 @@ static uint64_t image_bytes(CPU *c, const PixelStore *s, int32_t w, int32_t h, i
     if (w <= 0 || h <= 0 || d <= 0) return 0;
     uint64_t pixel = pixel_bytes(format, type);
     if (!pixel) rt_trap(c, c->eip, "format/type de pixels GL non pris en charge par le pont");
+    // État de stockage et dimensions viennent de l'invité : arithmétique vérifiée,
+    // un débordement rendrait la validation du pointeur inopérante.
+    #define CHECKED(op, a, b, out) do { if (__builtin_##op##_overflow((a), (b), (out))) \
+        rt_trap(c, c->eip, "taille d'image GL hors limites"); } while (0)
     uint64_t row_length = integer(s->row_length) > 0 ? (uint64_t)integer(s->row_length) : (uint64_t)w;
     uint64_t alignment = integer(s->alignment) > 0 ? (uint64_t)integer(s->alignment) : 1;
-    uint64_t row = (row_length * pixel + alignment - 1) / alignment * alignment;
+    uint64_t row, image, start = 0, part, total;
+    CHECKED(mul, row_length, pixel, &row);
+    row = (row + alignment - 1) / alignment * alignment;
     if (integer(s->row_bytes) > 0) row = (uint64_t)integer(s->row_bytes);  // APPLE_row_bytes
     uint64_t rows = integer(s->image_height) > 0 && is3d ? (uint64_t)integer(s->image_height) : (uint64_t)h;
-    uint64_t image = rows * row;
-    uint64_t start = (uint64_t)(integer(s->skip_rows) > 0 ? integer(s->skip_rows) : 0) * row +
-                     (uint64_t)(integer(s->skip_pixels) > 0 ? integer(s->skip_pixels) : 0) * pixel;
-    if (is3d) start += (uint64_t)(integer(s->skip_images) > 0 ? integer(s->skip_images) : 0) * image;
-    return start + (uint64_t)(d - 1) * image + (uint64_t)(h - 1) * row + (uint64_t)w * pixel;
+    CHECKED(mul, rows, row, &image);
+    uint64_t skip_rows = integer(s->skip_rows) > 0 ? (uint64_t)integer(s->skip_rows) : 0;
+    uint64_t skip_pixels = integer(s->skip_pixels) > 0 ? (uint64_t)integer(s->skip_pixels) : 0;
+    uint64_t skip_images = is3d && integer(s->skip_images) > 0 ? (uint64_t)integer(s->skip_images) : 0;
+    CHECKED(mul, skip_rows, row, &part); CHECKED(add, start, part, &start);
+    CHECKED(mul, skip_pixels, pixel, &part); CHECKED(add, start, part, &start);
+    CHECKED(mul, skip_images, image, &part); CHECKED(add, start, part, &start);
+    CHECKED(mul, (uint64_t)(d - 1), image, &part); CHECKED(add, start, part, &total);
+    CHECKED(mul, (uint64_t)(h - 1), row, &part); CHECKED(add, total, part, &total);
+    CHECKED(mul, (uint64_t)w, pixel, &part); CHECKED(add, total, part, &total);
+    #undef CHECKED
+    return total;
 }
 
 const void *rt_gl_unpack(CPU *c, uint32_t ptr, int32_t w, int32_t h, int32_t d, uint32_t format, uint32_t type, int nullable) {
@@ -215,17 +228,20 @@ void *rt_gl_pack_compressed(CPU *c, uint32_t ptr, uint32_t target, int32_t level
 }
 
 // Nombre de valeurs écrites par glGet*v (GL 2.1 et extensions de togl).
+// Limite : un pname à plusieurs valeurs absent de cette table est validé
+// pour une seule valeur.
 uint32_t rt_gl_get_count(uint32_t pname) {
     switch (pname) {
     case GL_MODELVIEW_MATRIX: case GL_PROJECTION_MATRIX: case GL_TEXTURE_MATRIX: case GL_COLOR_MATRIX:
     case GL_TRANSPOSE_MODELVIEW_MATRIX: case GL_TRANSPOSE_PROJECTION_MATRIX:
-    case GL_TRANSPOSE_TEXTURE_MATRIX: case GL_TRANSPOSE_COLOR_MATRIX: return 16;
+    case GL_TRANSPOSE_TEXTURE_MATRIX: case GL_TRANSPOSE_COLOR_MATRIX:
+    case GL_CURRENT_MATRIX_ARB: case GL_TRANSPOSE_CURRENT_MATRIX_ARB: return 16;
     case GL_VIEWPORT: case GL_SCISSOR_BOX: case GL_COLOR_CLEAR_VALUE: case GL_COLOR_WRITEMASK:
     case GL_BLEND_COLOR: case GL_CURRENT_COLOR: case GL_CURRENT_TEXTURE_COORDS:
     case GL_CURRENT_RASTER_POSITION: case GL_CURRENT_RASTER_COLOR: case GL_CURRENT_RASTER_SECONDARY_COLOR:
     case GL_CURRENT_RASTER_TEXTURE_COORDS: case GL_CURRENT_SECONDARY_COLOR: case GL_FOG_COLOR:
     case GL_LIGHT_MODEL_AMBIENT: case GL_ACCUM_CLEAR_VALUE: case GL_MAP2_GRID_DOMAIN: return 4;
-    case GL_CURRENT_NORMAL: return 3;
+    case GL_CURRENT_NORMAL: case GL_POINT_DISTANCE_ATTENUATION: return 3;
     case GL_DEPTH_RANGE: case GL_MAX_VIEWPORT_DIMS: case GL_POLYGON_MODE: case GL_LINE_WIDTH_RANGE:
     case GL_POINT_SIZE_RANGE: case GL_ALIASED_LINE_WIDTH_RANGE: case GL_ALIASED_POINT_SIZE_RANGE:
     case GL_MAP1_GRID_DOMAIN: case GL_MAP2_GRID_SEGMENTS: return 2;

@@ -76,7 +76,7 @@ sRGB_decode) **passent** sur legacy 2.1.
   « présent », mais dans un contexte legacy ces fonctions répondent
   **GL_INVALID_OPERATION** sans effet (mesuré) :
   - `glGenSamplers/DeleteSamplers/BindSampler/SamplerParameter*` —
-    `glGenSamplers` est appelé 2048 fois à l'init du contexte (0x4528b) ; les
+    `glGenSamplers` est appelé 512 fois (une boucle de 0x550 à 0x1d50, pas 0xc) à l'init du contexte (0x4528b) ; les
     noms restent 0. `glBindSampler`/paramètres ne servent que si
     `-gl_enablesamplerobjects` (drapeau 0x5c du contexte, désactivé par
     défaut). **Non bloquant** ; l'erreur GL résiduelle n'est lue que par
