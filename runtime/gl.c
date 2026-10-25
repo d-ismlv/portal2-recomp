@@ -14,6 +14,7 @@
 // reste valide après l'appel (tableaux de sommets clients, client storage).
 // Seuls les pointeurs hôtes renvoyés par GL (glMapBuffer, glGetString,
 // GLsync) demandent une copie ou un handle.
+#include <stdio.h>
 #include "rt.h"
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
@@ -109,8 +110,16 @@ static int gl_shim(CPU *c, const char *name) {
     if (!entry) return 0;
     void *fn = host_function(entry);
     if (!fn) rt_trap(c, c->eip, "fonction GL absente de OpenGL.framework");
-    // Sans contexte courant, le GL d'Apple déréférence un contexte nul.
-    if (!CGLGetCurrentContext()) rt_trap(c, c->eip, "appel GL sans contexte courant");
+    // Sans contexte courant, le GL d'Apple déréférence un contexte nul ; la libGL
+    // Linux, elle, aiguille vers une table « sans contexte » qui ne fait rien et
+    // rend 0. togl en fait à l'arrêt (Cmd-Q) après destruction du contexte :
+    // même comportement que Linux, signalé une fois.
+    if (!CGLGetCurrentContext()) {
+        static _Atomic int reported;
+        if (!reported++) fprintf(stderr, "gl: %s sans contexte courant ignoré (comme la libGL Linux)\n", name);
+        c->eax = 0; c->edx = 0;
+        return 1;
+    }
     return entry->thunk(c, fn);
 }
 RT_SHIM_PROVIDER(gl_shim)
