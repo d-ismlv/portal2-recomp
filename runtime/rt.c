@@ -1,4 +1,6 @@
 #include "rt.h"
+#include <dlfcn.h>
+#include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -17,8 +19,54 @@ static void guest_backtrace(void) {
         fprintf(stderr,"  guest call %#x, return %#x\n",frames[i-1].target,frames[i-1].caller);
 }
 
+// Faute hôte (SIGSEGV/SIGBUS) : adresse invitée fautive, fonction générée en
+// cours (symbole fn_<adresse invitée>) et pile d'appels invitée, puis le
+// signal par défaut. Diagnostic seulement ; n'essaie pas de reprendre.
+static void host_fault(int signal, siginfo_t *info, void *context) {
+    uintptr_t address = (uintptr_t)info->si_addr, base = (uintptr_t)M;
+    char line[160];
+    int n;
+    if (M && address >= base && address - base < address_space)
+        n = snprintf(line, sizeof(line), "host %s on guest address %#x\n",
+                     signal == SIGBUS ? "SIGBUS" : "SIGSEGV", (unsigned)(address - base));
+    else
+        n = snprintf(line, sizeof(line), "host %s on host address %#lx\n",
+                     signal == SIGBUS ? "SIGBUS" : "SIGSEGV", (unsigned long)address);
+    if (n > 0) write(2, line, (size_t)n);
+#if defined(__aarch64__)
+    ucontext_t *uc = context;
+    void *pc = (void *)uc->uc_mcontext->__ss.__pc;
+    Dl_info where;
+    if (dladdr(pc, &where) && where.dli_sname) {
+        n = snprintf(line, sizeof(line), "  in %s + %#lx\n", where.dli_sname,
+                     (unsigned long)((uintptr_t)pc - (uintptr_t)where.dli_saddr));
+        if (n > 0) write(2, line, (size_t)n);
+    }
+#else
+    (void)context;
+#endif
+    guest_backtrace();
+    struct sigaction fallback = {0};
+    fallback.sa_handler = SIG_DFL;
+    sigaction(signal, &fallback, NULL);
+    raise(signal);
+}
+
+static void install_fault_handlers(void) {
+    static char alternate[65536];
+    stack_t stack = {.ss_sp = alternate, .ss_size = sizeof(alternate)};
+    sigaltstack(&stack, NULL);
+    struct sigaction action = {0};
+    action.sa_sigaction = host_fault;
+    action.sa_flags = SA_SIGINFO | SA_ONSTACK;
+    sigemptyset(&action.sa_mask);
+    sigaction(SIGSEGV, &action, NULL);
+    sigaction(SIGBUS, &action, NULL);
+}
+
 int rt_init(void) {
     if (M) return -1;
+    install_fault_handlers();
     void *p = mmap(NULL, (size_t)address_space, PROT_NONE,
                    MAP_PRIVATE | MAP_ANON, -1, 0);
     if (p == MAP_FAILED) { perror("guest address space"); return -1; }
