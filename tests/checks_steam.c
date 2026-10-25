@@ -369,3 +369,31 @@ RT_CHECK(steam_game_coordinator_uses_host_vtable) {
     uint32_t get[] = {0x20011200, 0x20011300, 16, 0x20011400};
     assert(gc_call(proxy, 2, 4, get) == 0 && R32(0x20011200) == 77 && R32(0x20011400) == 3 && !memcmp(GPTR(0x20011300), "abc", 3));
 }
+
+// Faux ISteamGameStats001 : vérifie le passage des uint64 et du retour edx:eax.
+static int8_t gs_type; static uint64_t gs_account; static int32_t gs_app; static uint32_t gs_time;
+static uint64_t gs_new_session(void *self, int8_t type, uint64_t account, int32_t app, uint32_t time) {
+    (void)self; gs_type = type; gs_account = account; gs_app = app; gs_time = time; return 0x1122334455667788ull;
+}
+static int32_t gs_add_row(void *self, uint64_t *row, uint64_t session, const char *table) {
+    (void)self; assert(session == 0x1122334455667788ull && !strcmp(table, "maps")); *row = 0xaabbccdd00112233ull; return 1;
+}
+static void *gs_vtable[13] = {(void *)gs_new_session, 0, 0, 0, 0, (void *)gs_add_row};
+static struct { void **vtable; } gs_object = {gs_vtable};
+RT_CHECK(steam_game_stats_marshals_uint64) {
+    CPU c; rt_cpu_reset(&c);
+    uint32_t proxy = steam_proxy(&c, &gs_object, "SteamGameStats001");
+    assert(proxy);
+    rt_cpu_reset(&c); c.esp = 0x20010000;
+    uint32_t args[] = {proxy, 1, 0x89abcdefu, 0x01234567u, 620, 1700000000u};
+    for (unsigned i = 0; i < 6; ++i) W32(c.esp + 4 * i, args[i]);
+    rt_call(&c, R32(R32(proxy)), RT_RETURN_SENTINEL);
+    assert(gs_type == 1 && gs_account == 0x0123456789abcdefull && gs_app == 620 && gs_time == 1700000000u);
+    assert(c.eax == 0x55667788u && c.edx == 0x11223344u);
+    memcpy(GPTR(0x20011800), "maps", 5);
+    rt_cpu_reset(&c); c.esp = 0x20010000;
+    uint32_t row[] = {proxy, 0x20011900, 0x55667788u, 0x11223344u, 0x20011800};
+    for (unsigned i = 0; i < 5; ++i) W32(c.esp + 4 * i, row[i]);
+    rt_call(&c, R32(R32(proxy) + 4 * 5), RT_RETURN_SENTINEL);
+    assert(c.eax == 1 && R32(0x20011900) == 0x00112233u && R32(0x20011904) == 0xaabbccddu);
+}

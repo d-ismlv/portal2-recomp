@@ -315,6 +315,42 @@ static int virtual_bridge(CPU *c, const char *name, uint32_t table, long iface) 
         c->eax = ((Get)(*(void ***)host)[7])(host, steam_out(c, R32(args), 4), steam_out(c, R32(args + 4), 2)) ? 1u : 0u;
         return 1;
     }
+    if (sscanf(name, "SteamGameStats001::slot%u", &slot) == 1 && slot <= 12) {
+        // ISteamGameStats001 (isteamgamestats.h, SDK historique ; ordre vérifié
+        // pour GetNewSession au site d'appel de client.so). uint64 invités = 2 mots.
+        uint32_t object = R32(c->esp + 4), a = c->esp + 8;
+        void *host = object && R32(object) == table ? steam_proxy_host(object) : NULL;
+        if (!host) fail(c, "Steam: %s called on an object that is not a %s proxy", name, interface_version((size_t)iface));
+        void *fn = (*(void ***)host)[slot];
+        #define Q(o) ((uint64_t)R32(a + (o)) | (uint64_t)R32(a + (o) + 4) << 32)
+        #define S(o) steam_in_string(c, R32(a + (o)))
+        #define F(o) ({ uint32_t bits_ = R32(a + (o)); float f_; memcpy(&f_, &bits_, 4); f_; })
+        switch (slot) {
+        case 0: { typedef uint64_t (*T)(void *, int8_t, uint64_t, int32_t, uint32_t);   // GetNewSession
+            steam_ret64(c, ((T)fn)(host, (int8_t)R32(a), Q(4), (int32_t)R32(a + 12), R32(a + 16))); break; }
+        case 1: { typedef uint64_t (*T)(void *, uint64_t, uint32_t, int32_t);           // EndSession
+            steam_ret64(c, ((T)fn)(host, Q(0), R32(a + 8), (int32_t)R32(a + 12))); break; }
+        case 2: case 8: { typedef int32_t (*T)(void *, uint64_t, const char *, int32_t); // Add{Session,Row}AttributeInt
+            c->eax = (uint32_t)((T)fn)(host, Q(0), S(8), (int32_t)R32(a + 12)); break; }
+        case 3: case 9: { typedef int32_t (*T)(void *, uint64_t, const char *, const char *); // ...String
+            c->eax = (uint32_t)((T)fn)(host, Q(0), S(8), S(12)); break; }
+        case 4: case 10: { typedef int32_t (*T)(void *, uint64_t, const char *, float);  // ...Float
+            c->eax = (uint32_t)((T)fn)(host, Q(0), S(8), F(12)); break; }
+        case 5: { typedef int32_t (*T)(void *, uint64_t *, uint64_t, const char *);      // AddNewRow
+            uint64_t row = 0; uint32_t out = R32(a);
+            c->eax = (uint32_t)((T)fn)(host, out ? &row : NULL, Q(4), S(12));
+            if (out) { W32(out, (uint32_t)row); W32(out + 4, (uint32_t)(row >> 32)); }
+            break; }
+        case 6: case 7: { typedef int32_t (*T)(void *, uint64_t);                        // CommitRow, CommitOutstandingRows
+            c->eax = (uint32_t)((T)fn)(host, Q(0)); break; }
+        default: { typedef int32_t (*T)(void *, uint64_t, const char *, int64_t);        // Add{Session,Row}AttributeInt64
+            c->eax = (uint32_t)((T)fn)(host, Q(0), S(8), (int64_t)Q(12)); break; }
+        }
+        #undef Q
+        #undef S
+        #undef F
+        return 1;
+    }
     if (sscanf(name, "SteamGameCoordinator001::slot%u", &slot) != 1 || slot > 2) return 0;
     uint32_t object = R32(c->esp + 4), args = c->esp + 8;
     void *host = object && R32(object) == table ? steam_proxy_host(object) : NULL;
