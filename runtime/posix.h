@@ -56,3 +56,4 @@ void rt_heap_info(uint32_t *arena, uint32_t *used, uint32_t *free_bytes, uint32_
 int rt_path_windows_binary(const char *name);   // .dll/.exe/.asi/.flt... de la copie Windows
 int rt_path_is_game_source(const char *host);
 unsigned long rt_paths_generation(void);   // change à chaque écriture invitée (paths.c)
+int rt_path_absolute(const char *path, char out[PATH_MAX]);   // chemin hôte absolu normalisé

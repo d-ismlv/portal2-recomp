@@ -54,6 +54,16 @@ static int absolute_path(const char *path,char *output) {
             memcpy(output,roots[i],length); return 0;
         }
     }
+    // Parent d'une racine (« …/common », « /volumes ») : le correcteur de casse
+    // remonte jusque-là ; ces dossiers existent, avec la casse de la racine.
+    size_t out_length=strlen(output);
+    for(int i=0;i<3;++i){
+        size_t length=strlen(roots[i]);
+        int same=insensitive[i]?!strncasecmp(output,roots[i],out_length):!strncmp(output,roots[i],out_length);
+        if(out_length>1 && out_length<length && same && roots[i][out_length]=='/'){
+            memcpy(output,roots[i],out_length); return 0;
+        }
+    }
     // Resolve existing prefixes too: /tmp is /private/tmp on macOS, including
     // when the requested file has not been created yet.
     char prefix[PATH_MAX], resolved[PATH_MAX]; strcpy(prefix,output);
@@ -141,6 +151,7 @@ static int join(char out[PATH_MAX],const char *root,const char *relative) {
     return 0;
 }
 int rt_path_overlay(const char *relative,char out[PATH_MAX]) { return join(out,user_root,relative); }
+int rt_path_absolute(const char *path,char out[PATH_MAX]) { return absolute_path(path,out); }
 // La copie du jeu est l'installation Windows : ses binaires (DLL, EXE, greffons
 // Miles .asi/.flt) n'existent pas dans une installation Linux et ne doivent pas
 // être vus par le jeu Linux (Miles chargeait mssmp3.asi, un greffon PE).

@@ -175,7 +175,13 @@ static RtDirEntry *copy_entries(const RtDirEntry *from, size_t count) {
 }
 int rt_dir_entries(const char *path, RtDirEntry **entries, size_t *count) {
     char relative[PATH_MAX];
-    if (rt_path_relative(path, relative) != 1) return dir_entries_uncached(path, entries, count);
+    int inside = rt_path_relative(path, relative);
+    if (inside < 0) return dir_entries_uncached(path, entries, count);
+    if (!inside) {   // hors du jeu (parents de la racine...) : clé = chemin absolu
+        if (rt_path_absolute(path, relative)) return dir_entries_uncached(path, entries, count);
+        memmove(relative + 1, relative, strnlen(relative, PATH_MAX - 2) + 1);
+        relative[0] = '\x01';   // ne peut pas coïncider avec un chemin relatif du jeu
+    }
     unsigned long now = rt_paths_generation();
     pthread_mutex_lock(&dir_cache_lock);
     for (unsigned i = 0; i < 64; ++i) {
