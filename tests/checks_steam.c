@@ -140,8 +140,21 @@ RT_CHECK(steam_callback_registration) {
 // ---------------------------------------------------------------- marshalling via la dylib officielle
 // Objets hôtes de test : la dylib appelle leur vtable exactement comme celle du client.
 typedef struct { void **vtable; } Fake;
-static void *user_vtable[64], *stats_vtable[64], *friends_vtable[64], *client_vtable[64];
+static void *user_vtable[64], *stats_vtable[64], *friends_vtable[64], *client_vtable[64], *storage_vtable[64], *input_vtable[64];
 static Fake fake_user = {user_vtable}, fake_stats = {stats_vtable}, fake_friends = {friends_vtable}, fake_client = {client_vtable};
+static Fake fake_storage = {storage_vtable}, fake_input = {input_vtable};
+static int fake_calls;
+static bool fake_set_float(Fake *self, const char *name, float value) {
+    (void)self; ++fake_calls; return !strcmp(name, "speed") && value == 2.25f;
+}
+static void fake_cloud(Fake *self, bool enabled) { (void)self; ++fake_calls; assert(enabled); }
+static bool fake_file_write(Fake *self, const char *name, const void *data, int32_t size) {
+    (void)self; ++fake_calls; return !strcmp(name, "save.sav") && size == 4 && !memcmp(data, "P2SV", 4);
+}
+static void fake_terminate(Fake *self, uint32_t ip, uint16_t port) { (void)self; ++fake_calls; assert(ip == 0x0a000001 && port == 27015); }
+static int32_t fake_controllers(Fake *self, uint64_t *handles) {
+    (void)self; for (int i = 0; i < 16; ++i) handles[i] = i < 2 ? UINT64_C(0x1000000000) + (uint64_t)i : 0; return 2;
+}
 static uint64_t fake_steamid(Fake *self) { assert(self == &fake_user); return UINT64_C(0x0110000100abcdef); }
 static bool fake_logged_on(Fake *self) { (void)self; return true; }
 static bool fake_data_folder(Fake *self, char *buffer, int size) {
@@ -205,6 +218,28 @@ RT_CHECK(steam_marshalling_through_official_flat_api) {
     uint32_t get_user[] = {3, 4, guest_string(SCRATCH + 0x200, "SteamUser021")};
     c = call_method(client, "SteamClient020::GetISteamUser", 0, 3, get_user);
     assert(c.eax == user);   // interface rendue : même mandataire invité
+
+    // float par valeur, bool et uint16 dans des emplacements de 4 octets, tampon d'entrée, tableau fixe.
+    stats_vtable[method("STEAMUSERSTATS_INTERFACE_VERSION012::SetStatFloat")->slot] = (void *)fake_set_float;
+    storage_vtable[method("STEAMREMOTESTORAGE_INTERFACE_VERSION016::SetCloudEnabledForApp")->slot] = (void *)fake_cloud;
+    storage_vtable[method("STEAMREMOTESTORAGE_INTERFACE_VERSION016::FileWrite")->slot] = (void *)fake_file_write;
+    user_vtable[method("SteamUser021::TerminateGameConnection_DEPRECATED")->slot] = (void *)fake_terminate;
+    input_vtable[method("SteamInput006::GetConnectedControllers")->slot] = (void *)fake_controllers;
+    uint32_t storage = steam_proxy(&cpu, &fake_storage, "STEAMREMOTESTORAGE_INTERFACE_VERSION016");
+    uint32_t input = steam_proxy(&cpu, &fake_input, "SteamInput006");
+    float value = 2.25f; uint32_t bits; memcpy(&bits, &value, 4);
+    uint32_t set_float[] = {guest_string(SCRATCH + 0x200, "speed"), bits};
+    assert(call_method(stats, "STEAMUSERSTATS_INTERFACE_VERSION012::SetStatFloat", 0, 2, set_float).eax == 1);
+    uint32_t cloud[] = {0xffffff01u};   // seul l'octet bas d'un bool i386 compte
+    call_method(storage, "STEAMREMOTESTORAGE_INTERFACE_VERSION016::SetCloudEnabledForApp", 0, 1, cloud);
+    uint32_t write[] = {guest_string(SCRATCH + 0x200, "save.sav"), guest_string(SCRATCH + 0x300, "P2SV"), 4};
+    assert(call_method(storage, "STEAMREMOTESTORAGE_INTERFACE_VERSION016::FileWrite", 0, 3, write).eax == 1);
+    uint32_t terminate[] = {0x0a000001, 0xdead6987u};   // uint16 : 16 bits bas
+    call_method(user, "SteamUser021::TerminateGameConnection_DEPRECATED", 0, 2, terminate);
+    assert(fake_calls == 4);
+    uint32_t handles[] = {SCRATCH + 0x400};
+    assert(call_method(input, "SteamInput006::GetConnectedControllers", 0, 1, handles).eax == 2);
+    assert(R64(SCRATCH + 0x400) == UINT64_C(0x1000000000) && R64(SCRATCH + 0x408) == UINT64_C(0x1000000001) && !R64(SCRATCH + 0x478));
 }
 
 RT_CHECK(steam_context_init_caches_like_the_dylib) {

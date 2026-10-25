@@ -147,11 +147,17 @@ const char *steam_in_string(CPU *c, uint32_t address) {
 void *steam_out(CPU *c, uint32_t address, uint32_t size) {
     return address ? rt_write_span(c, address, size) : NULL;
 }
-void *steam_buffer(CPU *c, uint32_t address, int64_t count, uint32_t element) {
-    if (!address) return NULL;
-    if (count < 0) rt_trap(c, c->eip, "Steam: negative buffer size");
-    // Contrôle de lecture seulement : un tampon d'entrée (FileWrite...) peut être en lecture seule.
-    return rt_span(c, address, (uint64_t)count * element);
+static uint64_t buffer_size(CPU *c, uint32_t address, int64_t count, uint32_t element) {
+    if (address && count < 0) rt_trap(c, c->eip, "Steam: negative buffer size");
+    return address ? (uint64_t)count * element : 0;
+}
+void *steam_in_buffer(CPU *c, uint32_t address, int64_t count, uint32_t element) {
+    uint64_t size = buffer_size(c, address, count, element);
+    return address ? rt_span(c, address, size) : NULL;
+}
+void *steam_out_buffer(CPU *c, uint32_t address, int64_t count, uint32_t element) {
+    uint64_t size = buffer_size(c, address, count, element);
+    return address ? rt_write_span(c, address, size) : NULL;
 }
 void steam_ret64(CPU *c, uint64_t value) { c->eax = (uint32_t)value; c->edx = (uint32_t)(value >> 32); }
 void steam_ret_sret(CPU *c, uint32_t sret, uint64_t value) {

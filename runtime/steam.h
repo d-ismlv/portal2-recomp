@@ -24,7 +24,9 @@ extern const size_t steam_method_count;
 void *steam_flat(CPU *c, const char *symbol);                // symbole de la dylib, piège s'il manque
 const char *steam_in_string(CPU *c, uint32_t address);       // NULL si 0
 void *steam_out(CPU *c, uint32_t address, uint32_t size);    // NULL si 0
-void *steam_buffer(CPU *c, uint32_t address, int64_t count, uint32_t element);
+// Tampons de count éléments : lus par Steam (contrôle de lecture) ou écrits (contrôle d'écriture).
+void *steam_in_buffer(CPU *c, uint32_t address, int64_t count, uint32_t element);
+void *steam_out_buffer(CPU *c, uint32_t address, int64_t count, uint32_t element);
 void steam_ret64(CPU *c, uint64_t value);                    // edx:eax
 void steam_ret_sret(CPU *c, uint32_t sret, uint64_t value);  // écrit *sret, eax = sret
 uint32_t steam_guest_string(CPU *c, const char *value);      // copie invitée stable, 0 si NULL

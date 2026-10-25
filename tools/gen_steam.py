@@ -56,6 +56,22 @@ CONTROLLER_TWINS = {'TriggerHapticPulse': 'Legacy_TriggerHapticPulse',
                     'GetGlyphForActionOrigin': 'GetGlyphForActionOrigin_Legacy'}
 
 
+# Tampons lus par Steam (méthode, paramètre) ; tous les autres sont écrits par Steam et
+# vérifiés en écriture côté invité.
+INPUT_BUFFERS = {
+    ('FileWrite', 'pvData'), ('FileWriteAsync', 'pvData'), ('FileWriteStreamWriteChunk', 'pvData'),
+    ('WriteScreenshot', 'pubRGB'), ('BeginAuthSession', 'pAuthTicket'), ('DecompressVoice', 'pCompressed'),
+    ('RequestEncryptedAppTicket', 'pDataToInclude'), ('DownloadLeaderboardEntriesForUsers', 'prgUsers'),
+    ('UploadLeaderboardScore', 'pScoreDetails'), ('DownloadClanActivityCounts', 'psteamIDClans'),
+    ('HandleIncomingPacket', 'pData'), ('SendUserConnectAndAuthenticate_DEPRECATED', 'pvAuthBlob'),
+    ('GetItemsByID', 'pInstanceIDs'), ('DeserializeResult', 'pBuffer'), ('SendLobbyChatMsg', 'pvMsgBody'),
+    ('SetPNGIcon_64x64', 'pvBuffer'), ('UpdateCurrentEntryCoverArt', 'pvBuffer'), ('SendP2PPacket', 'pubData'),
+    ('SendDataOnSocket', 'pubData'), ('SendMessageToUser', 'pubData'), ('SendMessageToConnection', 'pData'),
+    ('ReceivedRelayAuthTicket', 'pvTicket'), ('ReceivedP2PCustomSignal', 'pMsg'), ('SetCertificate', 'pCertificate'),
+    ('SendSignal', 'pMsg'), ('SendRejectionSignal', 'pMsg'),
+}
+
+
 def natural_size(scalar):
     if not scalar:
         return None
@@ -186,10 +202,11 @@ def plan_method(flat, method, ret, params, wrapper, types, gprs):
                 esize = 8 if element in ('CSteamID', 'CGameID') else natural_size(scalar(element))
                 if not esize:
                     raise Unsupported(f'tableau {kind} {name}')
+            helper = 'steam_in_buffer' if (method, name) in INPUT_BUFFERS else 'steam_out_buffer'
             if method in FIXED_ARRAYS and index == len(params) - 1 and kind.startswith('inout '):
-                lines.append(f'void *{var} = steam_buffer(c, R32({at}), {FIXED_ARRAYS[method]}, {esize}u);')
+                lines.append(f'void *{var} = {helper}(c, R32({at}), {FIXED_ARRAYS[method]}, {esize}u);')
             elif following and scalar(following[0]) and scalar(following[0])[1] == 4 and SIZE_NAME.match(following[1]):
-                lines.append(f'void *{var} = steam_buffer(c, R32({at}), (int64_t)(int32_t)R32(args + {offset + 4}u), {esize}u);')
+                lines.append(f'void *{var} = {helper}(c, R32({at}), (int64_t)(int32_t)R32(args + {offset + 4}u), {esize}u);')
             else:
                 raise Unsupported(f'tampon {kind} {name} sans taille')
             proto.append('void *'); offset += 4
