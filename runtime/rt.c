@@ -62,6 +62,12 @@ __attribute__((noreturn)) void rt_trap(CPU *c, uint32_t pc, const char *why) {
     abort();
 }
 
+// CPU invité du shim en cours sur ce thread hôte : un rappel natif (par ex.
+// un SDL_EventWatch déclenché pendant un appel SDL) s'en sert pour exécuter
+// une fonction invitée sur le même thread et la même pile.
+static _Thread_local CPU *shim_cpu;
+CPU *rt_shim_cpu(void) { return shim_cpu; }
+
 void rt_dispatch(CPU *c, uint32_t target) {
     rt_guest_poll();
     c->eip = target;
@@ -69,7 +75,13 @@ void rt_dispatch(CPU *c, uint32_t target) {
     if (fn) { fn(c); return; }
     const char *name = rt_import_name(target);
     if (!name) name = rt_dynamic_import_name(target);
-    if (name && rt_shim(c, name)) { rt_return(c); return; }
+    if (name) {
+        CPU *outer = shim_cpu;
+        shim_cpu = c;
+        int handled = rt_shim(c, name);
+        shim_cpu = outer;
+        if (handled) { rt_return(c); return; }
+    }
     rt_trap(c, target, name ? name : "target not recompiled");
 }
 

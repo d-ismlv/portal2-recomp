@@ -200,6 +200,7 @@ void rt_return(CPU *c);
 void rt_call(CPU *c, uint32_t target, uint32_t expected_return);
 const char *rt_import_name(uint32_t target);
 int rt_shim(CPU *c, const char *name);
+CPU *rt_shim_cpu(void);   // CPU du shim en cours sur ce thread, NULL hors shim
 void *rt_span(CPU *c, uint32_t address, uint64_t length);
 void *rt_write_span(CPU *c, uint32_t address, uint64_t length);
 uint32_t rt_string_length(CPU *c, uint32_t address);
