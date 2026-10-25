@@ -4,6 +4,7 @@
 // the runtime helpers under test.
 #include "checks.h"
 #include <math.h>
+#include <stdio.h>
 
 uint32_t lifter_entry(const char *name);
 #define IN 0x20018000u
@@ -166,4 +167,23 @@ RT_CHECK(lifter_extended_conversions) {
     assert(isnan(rt_load_extended(OUT + 0x700)));
     W64(OUT + 0x700, 1); W16(OUT + 0x708, 0x3fff + 63);             // unnormal: 1 * 2^(63-63)
     assert(rt_load_extended(OUT + 0x700) == 1.0);
+}
+
+RT_CHECK(lifter_switch_tables) {
+    clear();
+    for (uint32_t i = 0; i < 3; ++i) {
+        char name[16]; snprintf(name, sizeof(name), "lfl_case%u", i);
+        W32(IN + 0x810 + 4 * i, lifter_entry(name));
+    }
+    for (uint32_t selector = 0; selector < 5; ++selector) {
+        W32(IN + 0x800, selector);
+        run_named("lf_switch");
+        assert(R32(OUT + 0x800) == (selector < 3 ? 100 + selector : 1));
+    }
+    // A table value outside the statically recovered cases still follows the
+    // guest: the checked dispatcher runs the separately compiled function.
+    W32(IN + 0x814, lifter_entry("lf_switch_other"));
+    W32(IN + 0x800, 1);
+    run_named("lf_switch");
+    assert(R32(OUT + 0x800) == 777);
 }

@@ -247,3 +247,32 @@ lf_x87_math:
     fldlg2
     fstp qword ptr [0x20019660]
     ret
+
+.globl lf_switch
+lf_switch:                                 # absolute jump table, bound by cmp/ja
+    mov eax, dword ptr [0x20018800]
+    cmp eax, 2
+    ja lfl_default
+    jmp dword ptr [4*eax + 0x20018810]
+.globl lfl_case0
+lfl_case0:
+    mov ecx, 100
+    jmp lfl_end
+.globl lfl_case1
+lfl_case1:
+    mov ecx, 101
+    jmp lfl_end
+.globl lfl_case2
+lfl_case2:
+    mov ecx, 102
+    jmp lfl_end
+lfl_default:
+    mov ecx, 1
+lfl_end:
+    mov dword ptr [0x20019800], ecx
+    ret
+
+.globl lf_switch_other
+lf_switch_other:                           # reached only through the dispatcher fallback
+    mov dword ptr [0x20019800], 777
+    ret

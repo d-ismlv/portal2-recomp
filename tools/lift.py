@@ -168,7 +168,7 @@ def string_instruction(op, args, nxt):
     return text + f' goto L{nxt:x};', [nxt]
 
 
-def translate(pc, insn, entries=frozenset(), callees=None):
+def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
     if callees is None:
         callees = set()
     nxt, op, args = insn
@@ -204,6 +204,15 @@ def translate(pc, insn, entries=frozenset(), callees=None):
         if target.imm is None:
             if op != 'jmp' or target.width != 32:
                 raise Unsupported('indirect control flow')
+            if cases:
+                # Statically recovered jump table: the guest still computes the
+                # target; known values become local gotos, anything else goes
+                # through the checked dispatcher exactly as before.
+                local = sorted(t for t in set(cases) if t not in entries)
+                callees.update(t for t in cases if t in entries)
+                labels = ' '.join(f'case {t:#x}u: goto L{t:x};' for t in local)
+                return (f'a = {target.read()}; rt_guest_poll(); switch (a) {{ {labels} '
+                        'default: c->flags = f; rt_dispatch(c, a); return; }'), local
             return f'a = {target.read()}; c->flags = f; rt_dispatch(c, a); return;', []
         if target.imm in entries:
             callees.add(target.imm)
@@ -403,7 +412,7 @@ def translate(pc, insn, entries=frozenset(), callees=None):
     return code + ' ' + end, [nxt]
 
 
-def lift(entry, insns, entries=frozenset(), callees=None):
+def lift(entry, insns, entries=frozenset(), callees=None, tables=None):
     pending = [entry]
     translated = {}
     while pending:
@@ -413,7 +422,8 @@ def lift(entry, insns, entries=frozenset(), callees=None):
         if pc not in insns:
             raise Unsupported(f'no instruction at {pc:#x}')
         try:
-            code, successors = translate(pc, insns[pc], entries - {entry}, callees)
+            code, successors = translate(pc, insns[pc], entries - {entry}, callees,
+                                         tables(pc) if tables else None)
         except (Unsupported, IndexError) as exc:
             raise Unsupported(f'{pc:#x}: {exc}') from exc
         translated[pc] = code
@@ -424,6 +434,125 @@ def lift(entry, insns, entries=frozenset(), callees=None):
     lines.extend(f'L{pc:x}: {code}' for pc, code in sorted(translated.items()))
     lines.append('}')
     return '\n'.join(lines), len(translated)
+
+
+class JumpTables:
+    """Recover candidate targets of switch jumps from the prepared images.
+
+    Recognised forms (GCC, i386):
+      jmp dword ptr [4*I + T]                          absolute table (relocated)
+      mov R, dword ptr [B + 4*I + D]; add R, B; jmp R  PIC table of GOT offsets, B = GOT
+    The bound comes from a preceding `cmp I, N; ja/jae`; otherwise entries are
+    read while they remain plausible code addresses. Candidates are only an
+    optimisation: the generated code compares the real computed target with
+    them and falls back to the checked dispatcher, so an imprecise table can
+    add dead labels but never change control flow.
+    """
+    MAX_ENTRIES = 1024
+    MAX_DISTANCE = 0x100000
+
+    def __init__(self, layout, insns):
+        self.layout, self.insns = layout, insns
+        self.images, self.previous, self.cache = {}, None, {}
+
+    def module(self, address):
+        for mod in self.layout['modules']:
+            if any(s['vaddr'] <= address < s['vaddr'] + s['filesz'] for s in mod['loads']):
+                return mod
+        return None
+
+    def read32(self, address):
+        mod = self.module(address)
+        if mod is None or self.module(address + 3) is not mod:
+            return None
+        if mod['name'] not in self.images:
+            self.images[mod['name']] = Path(mod['image']).read_bytes()
+        data = self.images[mod['name']]
+        for s in mod['loads']:
+            if s['vaddr'] <= address and address + 4 <= s['vaddr'] + s['filesz']:
+                offset = s['off'] + address - s['vaddr']
+                return int.from_bytes(data[offset:offset + 4], 'little')
+        return None
+
+    def before(self, pc, count):
+        if self.previous is None or len(self.previous) < len(self.insns):
+            self.previous = {nxt: start for start, (nxt, _, _) in self.insns.items()}
+        out = []
+        while len(out) < count and pc in self.previous:
+            pc = self.previous[pc]
+            out.append((pc,) + tuple(self.insns[pc]))
+        return out
+
+    def bound(self, history, index):
+        """Number of table entries implied by `cmp index, N; ja` (None if unknown)."""
+        aliases = {index}
+        for i, (_, _, op, args) in enumerate(history):
+            parts = [x.strip() for x in args.split(',')]
+            if op == 'movzx' and len(parts) == 2 and REGS.get(parts[0], ('',))[0] in aliases and parts[1] in REGS:
+                aliases.add(REGS[parts[1]][0])
+            if op in ('ja', 'jae', 'jnbe', 'jnb') and i + 1 < len(history):
+                _, _, cop, cargs = history[i + 1]
+                cparts = [x.strip() for x in cargs.split(',')]
+                if cop == 'cmp' and len(cparts) == 2 and cparts[0] in REGS and REGS[cparts[0]][0] in aliases:
+                    try:
+                        limit = int(cparts[1], 0) & MSK_BITS[REGS[cparts[0]][1]]
+                    except ValueError:
+                        return None
+                    return limit + 1 if op in ('ja', 'jnbe') else limit
+                return None
+            if op in ('call', 'ret', 'jmp') or op.startswith('j'):
+                return None
+        return None
+
+    def __call__(self, pc):
+        if pc not in self.cache:
+            self.cache[pc] = self.resolve(pc)
+        return self.cache[pc]
+
+    def resolve(self, pc):
+        nxt, op, args = self.insns[pc]
+        if op != 'jmp':
+            return None
+        history = self.before(pc, 8)
+        pattern = r'(?:dword ptr )?\[(?:4\*(\w+) \+ (0x[0-9a-f]+)|(0x[0-9a-f]+) \+ 4\*(\w+))\]'
+        m = re.fullmatch(pattern, args)
+        if m:
+            index = m[1] or m[4]; table = int(m[2] or m[3], 16); base = 0; rest = history
+        elif args in REGS and REGS[args][1] == 32 and len(history) >= 2:
+            (_, _, add_op, add_args), (_, _, mov_op, mov_args) = history[0], history[1]
+            add = [x.strip() for x in add_args.split(',')]
+            m = re.fullmatch(r'dword ptr \[(\w+) \+ 4\*(\w+) ([+-]) (0x[0-9a-f]+)\]',
+                             mov_args.split(',', 1)[-1].strip())
+            if not (add_op == 'add' and add[0] == args and mov_op == 'mov' and m
+                    and mov_args.split(',')[0].strip() == args and add[1] == m[1]):
+                return None
+            mod = self.module(pc)
+            base = mod['gotplt'] if mod else 0
+            displacement = int(m[4], 16) * (-1 if m[3] == '-' else 1)
+            table, index, rest = (base + displacement) & 0xffffffff, m[2], history[2:]
+        else:
+            return None
+        if index not in REGS:
+            return None
+        count = self.bound(rest, REGS[index][0])
+        exact = count is not None
+        count = min(count if exact else self.MAX_ENTRIES, self.MAX_ENTRIES)
+        targets = []
+        for i in range(count):
+            value = self.read32(table + 4 * i)
+            if value is None:
+                break
+            target = (value + base) & 0xffffffff
+            far = not exact and abs(target - pc) > self.MAX_DISTANCE   # cold parts may be far away
+            if target not in self.insns or far or self.module(target) is not self.module(pc):
+                if exact:
+                    return None   # a declared case does not land on code: do not guess
+                break
+            targets.append(target)
+        return targets or None
+
+
+MSK_BITS = {8: 0xff, 16: 0xffff, 32: 0xffffffff}
 
 
 def _guessed_successors(pc, insn):
@@ -441,7 +570,7 @@ def _guessed_successors(pc, insn):
     return targets
 
 
-def scan(entry, insns, entries=frozenset(), callees=None):
+def scan(entry, insns, entries=frozenset(), callees=None, visited=None, tables=None):
     """Collect-mode audit of one function: never emits code, never stops early.
 
     Returns (instruction count, [(pc, op, args, reason)] for every rejected
@@ -461,9 +590,9 @@ def scan(entry, insns, entries=frozenset(), callees=None):
             continue
         insn = insns[pc]
         try:
-            code, successors = translate(pc, insn, others, callees)
+            code, successors = translate(pc, insn, others, callees, tables(pc) if tables else None)
             if 'rt_dispatch(c, a)' in code and insn[1] == 'jmp':
-                indirect.append(pc)
+                indirect.append((pc, 'switch (a)' in code))
         except Exception as exc:  # noqa: BLE001 - every rejection is data here
             failures.append((pc, insn[1], insn[2], f'{type(exc).__name__}: {exc}'))
             successors = _guessed_successors(pc, insn)
@@ -473,6 +602,8 @@ def scan(entry, insns, entries=frozenset(), callees=None):
                 except ValueError:
                     pass
         pending.extend(successors)
+    if visited is not None:
+        visited |= seen
     return len(seen), failures, indirect
 
 
@@ -573,6 +704,7 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
     entries.update(entry for _, entry in selected)
     entries.update(imports)
     pending = [entry for _, entry in selected]
+    tables = JumpTables(layout, insns)
     compiled = set()
     used_imports = set()
     unimplemented = set()
@@ -591,7 +723,7 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
             continue
         ensure_module(entry)
         callees = set()
-        body, count = lift(entry, insns, entries, callees)
+        body, count = lift(entry, insns, entries, callees, tables)
         code.append(body)
         compiled.add(entry)
         total += count

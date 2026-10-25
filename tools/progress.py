@@ -6,6 +6,7 @@ from concurrent.futures import ProcessPoolExecutor
 import json
 import os
 import re
+import subprocess
 from pathlib import Path
 import lift
 
@@ -84,10 +85,12 @@ def module_roots(module):
 
 def audit_module(job):
     """Every function reachable by direct calls from all known roots of one module."""
-    module, imports, foreign, objdump, cache = job
+    module, imports, foreign, objdump, cache, want_forms = job
+    visited = set() if want_forms else None
     insns = lift.module_instructions(module, objdump, cache)
     plt = module.get('plt') or [0, 0]
     pending = module_roots(module)
+    tables = lift.JumpTables({'modules': [module]}, insns)
     entries = set(pending) | set(imports) | foreign
     functions, external, used_imports = {}, set(), Counter()
     while pending:
@@ -103,7 +106,7 @@ def audit_module(job):
             functions[entry] = None
             continue
         callees = set()
-        count, failures, indirect = lift.scan(entry, insns, entries, callees)
+        count, failures, indirect = lift.scan(entry, insns, entries, callees, visited, tables)
         functions[entry] = (count, failures, indirect)
         pending.extend(sorted(callees - functions.keys()))
     by_form, by_op, fn_by_op = Counter(), Counter(), Counter()
@@ -115,12 +118,14 @@ def audit_module(job):
             continue
         count, failures, indirect = record
         total += count
-        for pc in indirect:
+        for pc, resolved in indirect:
             nxt, op, args = insns[pc]
-            if plt[0] <= pc < plt[1]:
+            if resolved:
+                indirect_kinds['switch table resolved statically'] += 1
+            elif plt[0] <= pc < plt[1]:
                 indirect_kinds['plt stub'] += 1
             elif lift.REGS.get(args):
-                indirect_kinds['jmp register (switch table or computed tail call)'] += 1
+                indirect_kinds['jmp register (computed tail call or unresolved table)'] += 1
             else:
                 indirect_kinds['jmp memory'] += 1
         if not failures:
@@ -138,21 +143,56 @@ def audit_module(job):
         if len(ops) == 1:
             only_blocker[next(iter(ops))] += 1
         blocked.append(entry)
-    return dict(module=module['name'], roots=len(module_roots(module)), functions=sum(r is not None for r in functions.values()),
+    forms = {}
+    for pc in sorted(visited or ()):
+        if pc in insns:
+            forms.setdefault(f'{insns[pc][1]} {operand_form(insns[pc][2])}'.strip(), (pc, insns[pc]))
+    return dict(forms=forms, module=module['name'], roots=len(module_roots(module)), functions=sum(r is not None for r in functions.values()),
                 translatable_functions=lifted, instructions=total, unknown_targets=len(external),
                 imports=dict(used_imports), unsupported_by_form=dict(by_form), unsupported_by_op=dict(by_op),
                 functions_by_op=dict(fn_by_op), sole_blocker=dict(only_blocker), examples=examples,
                 indirect_jumps=dict(indirect_kinds), blocked_functions=[hex(e) for e in sorted(blocked)])
 
 
-def audit_all(layout, objdump, cache, jobs, names=None):
+def form_check_source(forms):
+    """One tiny C function per distinct (mnemonic, operand form) found in the game."""
+    code = ['#include "rt.h"']
+    for key, (pc, insn) in sorted(forms.items(), key=lambda kv: kv[1][0]):
+        nxt, op, args = insn
+        mini = {pc: tuple(insn)}
+        targets = [nxt]
+        if op.startswith('j') or op == 'call':
+            try:
+                targets.append(int(args, 0))
+            except ValueError:
+                pass
+        for target in targets:
+            mini.setdefault(target, (target + 1, 'ret', ''))
+        try:
+            body, _ = lift.lift(pc, mini, frozenset(), set())
+        except lift.Unsupported:
+            continue
+        code.append(f'/* {key} */')
+        code.append(body.replace('static void', 'void', 1))
+    return '\n'.join(code) + '\n'
+
+
+def compile_forms(forms, out):
+    source = out.with_suffix('.forms.c')
+    source.write_text(form_check_source(forms))
+    result = subprocess.run(['clang', '-fsyntax-only', '-Wall', '-Wextra', '-Werror', '-Wno-missing-prototypes',
+                             '-Iruntime', str(source)], capture_output=True, text=True)
+    return source, result
+
+
+def audit_all(layout, objdump, cache, jobs, names=None, want_forms=False):
     imports = {item['addr']: item['name'] for item in layout['imports']}
     modules = [m for m in layout['modules'] if not names or m['name'] in names]
     # Largest modules first so the pool stays busy.
     modules.sort(key=lambda m: -Path(m['image']).stat().st_size)
     # Exported entries of other modules: direct cross-module jumps are tail calls.
-    work = [(m, imports, {e for o in layout['modules'] if o is not m for e in o['entries']}, objdump, cache)
-            for m in modules]
+    work = [(m, imports, {e for o in layout['modules'] if o is not m for e in o['entries']}, objdump, cache,
+             want_forms) for m in modules]
     if jobs > 1:
         with ProcessPoolExecutor(max_workers=jobs) as pool:
             results = list(pool.map(audit_module, work))
@@ -168,6 +208,10 @@ def audit_all(layout, objdump, cache, jobs, names=None):
         for key, counter in sums.items():
             counter.update(r[key])
     missing = {name: n for name, n in sums['imports'].items() if name not in lift.SHIMS}
+    forms = {}
+    for r in results:
+        for key, example in r.pop('forms').items():
+            forms.setdefault(key, example)
     return dict(note='Static audit: all symbol, export, init/fini and data-pointer roots of every prepared '
                      'module, followed through direct calls. Collect mode continues past rejected '
                      'instructions; indirect targets (vtables, switch tables) beyond data pointers are '
@@ -178,7 +222,7 @@ def audit_all(layout, objdump, cache, jobs, names=None):
                 unsupported_by_form=dict(sums['unsupported_by_form'].most_common()),
                 indirect_jumps=dict(sums['indirect_jumps']),
                 missing_imports=dict(sorted(missing.items(), key=lambda kv: -kv[1])),
-                modules=results)
+                distinct_forms=len(forms), modules=results), forms
 
 
 def print_summary(result, top):
@@ -202,12 +246,22 @@ def main():
     ap.add_argument('--cache', default='build/disasm-cache', type=Path)
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     ap.add_argument('--top', type=int, default=40)
+    ap.add_argument('--compile-forms', action='store_true',
+                    help='compile one lifted example of every distinct instruction form (clang -fsyntax-only)')
     args = ap.parse_args()
     if args.all:
-        result = audit_all(json.loads(args.layout.read_text()), args.objdump, args.cache, args.jobs, args.modules)
+        result, forms = audit_all(json.loads(args.layout.read_text()), args.objdump, args.cache, args.jobs,
+                                  args.modules, args.compile_forms)
         args.out.parent.mkdir(parents=True, exist_ok=True)
         args.out.write_text(json.dumps(result, indent=1) + '\n')
         print_summary(result, args.top)
+        if args.compile_forms:
+            source, compiled = compile_forms(forms, args.out)
+            print(f'{len(forms)} distinct instruction forms -> {source}: '
+                  + ('compiles' if not compiled.returncode else 'COMPILE ERRORS'))
+            if compiled.returncode:
+                print(compiled.stderr[:4000])
+                raise SystemExit(1)
         return
     result = audit(json.loads(args.layout.read_text()), args.objdump)
     args.out.parent.mkdir(parents=True, exist_ok=True)
