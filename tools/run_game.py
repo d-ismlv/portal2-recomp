@@ -19,7 +19,7 @@ if args.build:
 config = json.loads(Path('config/local.json').read_text())
 game_args = args.arguments
 if game_args[:1] == ['--']: game_args = game_args[1:]
-if not game_args: game_args = ['-novid', '-windowed', '-w', '1280', '-h', '720']
+if not game_args: game_args = ['-game', 'portal2', '-novid', '-windowed', '-w', '1280', '-h', '720']
 command = [str(Path('build/portal2-native').resolve()), '--images', str(Path('build/game/prep').resolve()),
            '--game-dir', config['game_root'], '--linux-root', config['linux_root'],
            '--user-dir', str(Path('../work/portal2-userdata').resolve()), '--', *game_args]

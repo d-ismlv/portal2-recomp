@@ -63,7 +63,13 @@ static int semaphore_wait(Semaphore *s, const struct timespec *deadline, int non
 }
 
 static int semaphore_shim(CPU *c, const char *name) {
-    if (strncmp(name, "sem_", 4)) return 0;
+    // Nom testé avant tout accès : un sem_* non pris en charge doit piéger
+    // (fournisseur suivant puis rt_trap), pas renvoyer EINVAL selon l'argument.
+    static const char *const known[] = {"sem_init", "sem_destroy", "sem_post", "sem_wait",
+                                        "sem_trywait", "sem_timedwait"};
+    size_t k = 0;
+    while (k < sizeof(known) / sizeof(*known) && strcmp(name, known[k])) ++k;
+    if (k == sizeof(known) / sizeof(*known)) return 0;
     uint32_t address = argument(c, 0);
     rt_guest_enter();
     int error = 0;

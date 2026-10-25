@@ -364,3 +364,9 @@ RT_CHECK(errorcheck_owner_across_cond_wait) {
     args[0] = attr; assert(call(&c, "pthread_mutexattr_destroy", args, 1) == 0);
     rt_guest_leave();
 }
+
+RT_CHECK(unknown_semaphore_function_is_not_handled) {
+    CPU c; rt_cpu_reset(&c); c.esp = 0x20010000; W32(c.esp + 4, 0x20011000);
+    assert(rt_shim(&c, "sem_getvalue") == 0);   // non pris en charge : le dispatcher piégera
+    assert(rt_shim(&c, "sem_open") == 0);
+}
