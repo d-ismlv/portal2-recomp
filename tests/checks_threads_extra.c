@@ -199,6 +199,7 @@ RT_CHECK(foreign_thread_invokes_guest_code) {
     assert(call(&c, "pthread_key_create", args, 2) == 0);
     uint32_t key = R32(DATA + 0x500), before = R32(0x2000b098);
     uint32_t main_errno = call(&c, "__errno_location", NULL, 0), main_self = call(&c, "pthread_self", NULL, 0);
+    uint32_t first_tcb = 0;
     for (int detach = 1; detach >= 0; --detach) {   // détachement explicite, puis à la sortie du thread hôte
         ForeignResult r = {.key = key, .detach = detach};
         pthread_t host;
@@ -212,6 +213,8 @@ RT_CHECK(foreign_thread_invokes_guest_code) {
         assert(R32(0x2000b098) == before + 2 - detach);   // destructeur TLS invité exécuté
         uint32_t kill_args[2] = {r.pthread_self, 0};
         assert(call(&c, "pthread_kill", kill_args, 2) == 3);   // enregistrement libéré
+        // Le TCB invité est rendu au tas : le thread suivant réutilise le bloc.
+        if (first_tcb) assert(r.pthread_self == first_tcb); else first_tcb = r.pthread_self;
     }
     assert(atomic_load(&probe_calls) == 2);
     args[0] = key; assert(call(&c, "pthread_key_delete", args, 1) == 0);
@@ -330,5 +333,34 @@ RT_CHECK(mutex_timedlock_and_static_initializers) {
     run_locker(5000); assert(timed_result == 0);
     assert(call(&c, "pthread_mutex_destroy", args, 1) == 0);
     W32(m + 12, 7); assert(call(&c, "pthread_mutex_lock", args, 1) == 22);   // ni initialiseur ni objet connu
+    rt_guest_leave();
+}
+
+// Un mutex errorcheck libéré par pthread_cond_wait ne doit pas garder un
+// propriétaire périmé : après le réveil, se reverrouiller donne EDEADLK.
+RT_CHECK(errorcheck_owner_across_cond_wait) {
+    CPU c; main_cpu(&c); rt_guest_enter();
+    uint32_t m = DATA + 0x800, attr = DATA + 0x840, cond = DATA + 0x880, ts = DATA + 0x8c0;
+    timed_mutex = m; timed_deadline = DATA + 0x8e0;
+    uint32_t args[3] = {attr};
+    assert(call(&c, "pthread_mutexattr_init", args, 1) == 0);
+    args[1] = 2; assert(call(&c, "pthread_mutexattr_settype", args, 2) == 0);
+    args[0] = m; args[1] = attr; assert(call(&c, "pthread_mutex_init", args, 2) == 0);
+    args[0] = cond; args[1] = 0; assert(call(&c, "pthread_cond_init", args, 2) == 0);
+    args[0] = m; assert(call(&c, "pthread_mutex_lock", args, 1) == 0);
+    pthread_t other; unsigned saved = rt_guest_suspend();
+    assert(!pthread_create(&other, NULL, timed_locker, (void *)(intptr_t)5000));
+    rt_guest_resume(saved);
+    deadline_in(ts, 150);
+    args[0] = cond; args[1] = m; args[2] = ts;
+    assert(call(&c, "pthread_cond_timedwait", args, 3) == 110);   // l'autre thread a pris et rendu m
+    host_join(other);
+    assert(timed_result == 0);
+    W32(ts, 0); W32(ts + 4, 0); args[0] = m; args[1] = ts;
+    assert(call(&c, "pthread_mutex_timedlock", args, 2) == 35);
+    assert(call(&c, "pthread_mutex_unlock", args, 1) == 0);
+    assert(call(&c, "pthread_mutex_destroy", args, 1) == 0);
+    args[0] = cond; assert(call(&c, "pthread_cond_destroy", args, 1) == 0);
+    args[0] = attr; assert(call(&c, "pthread_mutexattr_destroy", args, 1) == 0);
     rt_guest_leave();
 }

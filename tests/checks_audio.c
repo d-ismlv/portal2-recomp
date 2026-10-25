@@ -24,13 +24,14 @@ static void sleep_ms(unsigned ms) { unsigned saved = rt_guest_suspend(); usleep(
 static atomic_int callbacks;
 static uint32_t cb_userdata, cb_length, cb_stream, cb_tid;
 static int cb_silent = 1, cb_main_thread;
+static uint8_t cb_expected_silence;
 static pthread_t main_thread;
 static int audio_probe(CPU *c, const char *name) {
     if (strcmp(name, "__test_audio_callback")) return 0;
     cb_userdata = R32(c->esp + 4); cb_stream = R32(c->esp + 8); cb_length = R32(c->esp + 12);
     cb_tid = c->tid;
     if (pthread_equal(pthread_self(), main_thread)) cb_main_thread = 1;
-    for (uint32_t i = 0; i < cb_length; ++i) if (R8(cb_stream + i)) cb_silent = 0;
+    for (uint32_t i = 0; i < cb_length; ++i) if (R8(cb_stream + i) != cb_expected_silence) cb_silent = 0;
     memset(rt_write_span(c, cb_stream, cb_length), 0x5a, cb_length);   // le flux joué
     atomic_fetch_add(&callbacks, 1);
     return 1;
@@ -80,6 +81,28 @@ RT_CHECK(sdl_audio_guest_callback) {
         for (size_t i = 0; i < read; ++i) { assert(block[i] == 0 || block[i] == 0x5a); played += block[i] == 0x5a; }
     fclose(file); remove(AUDIO_FILE);
     assert(played >= 2048u * (unsigned)(final - 1));
+
+    // U8 sans `obtained` : silence (0x80) et taille calculés comme SDL, même si
+    // le code invité laisse ces champs à zéro.
+    assert(SDL_InitSubSystem(SDL_INIT_AUDIO) == 0);
+    rt_guest_enter();
+    memset(GPTR(desired), 0, 24);
+    W32(desired, 44100); W16(desired + 4, AUDIO_U8); W8(desired + 6, 1); W16(desired + 8, 256);
+    W32(desired + 16, rt_dynamic_import("__test_audio_callback")); W32(desired + 20, 0x5678);
+    atomic_store(&callbacks, 0); cb_silent = 1; cb_expected_silence = 0x80;
+    args[0] = 0; args[1] = 0; args[2] = desired; args[3] = 0; args[4] = 0;
+    id = call(&c, "SDL_OpenAudioDevice", args, 5);
+    assert(id >= 2);
+    args[0] = id; args[1] = 0; call(&c, "SDL_PauseAudioDevice", args, 2);
+    clock_gettime(CLOCK_MONOTONIC, &start);
+    while (atomic_load(&callbacks) < 2) {
+        sleep_ms(2); clock_gettime(CLOCK_MONOTONIC, &now); assert(now.tv_sec - start.tv_sec < 5);
+    }
+    call(&c, "SDL_CloseAudioDevice", args, 1);
+    assert(cb_silent && cb_userdata == 0x5678 && cb_length == 256);
+    rt_guest_leave();
+    SDL_QuitSubSystem(SDL_INIT_AUDIO);
+    remove(AUDIO_FILE);
     unsetenv("SDL_AUDIODRIVER"); unsetenv("SDL_AUDIO_DISK_OUTPUT_FILE"); unsetenv("SDL_DISKAUDIOFILE");
 }
 
