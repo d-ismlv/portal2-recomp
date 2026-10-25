@@ -65,6 +65,7 @@ static int reserved(const char *relative) {
 }
 static int overlay_link(const char *result,const char *relative,int preserve_existing,int follow_final,const char **out);
 const char *rt_read_path(const char *path) {
+    if(rt_is_proc_path(path))return rt_proc_path(path);   // fichiers /proc générés (procfs.c)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
     if(!within(canonical,game_root))return path;

@@ -1,5 +1,8 @@
 #include "rt.h"
 #include <dlfcn.h>
+#include <mach/mach.h>
+#include <mach/mach_vm.h>
+#include <execinfo.h>
 #include <signal.h>
 #include <stdatomic.h>
 #include <stdio.h>
@@ -45,6 +48,10 @@ static void host_fault(int signal, siginfo_t *info, void *context) {
 #else
     (void)context;
 #endif
+    fflush(NULL);
+    void *host_frames[24];
+    int depth = backtrace(host_frames, 24);
+    backtrace_symbols_fd(host_frames, depth, 2);
     guest_backtrace();
     struct sigaction fallback = {0};
     fallback.sa_handler = SIG_DFL;
@@ -113,6 +120,7 @@ int rt_load_segment(const char *directory, const char *name, uint32_t offset,
 }
 
 __attribute__((noreturn)) void rt_trap(CPU *c, uint32_t pc, const char *why) {
+    fflush(NULL);
     fprintf(stderr, "guest trap at %#x (esp=%#x): %s\n", pc, c->esp, why);
     guest_backtrace();
     abort();
@@ -200,7 +208,48 @@ void rt_return(CPU *c) { c->eip = POP(c); }
 // made by native code use RT_RETURN_SENTINEL and never let a transfer escape.
 static _Thread_local struct { uint32_t from_target, expected, actual; unsigned depth; } nonlocal;
 
+// Lisibilité réelle d'une adresse invitée (protection de la page hôte),
+// pour les diagnostics seulement.
+int rt_guest_readable(uint32_t address) {
+    if (!M) return 0;
+    mach_vm_address_t region = (mach_vm_address_t)(uintptr_t)(M + address);
+    mach_vm_size_t size = 0;
+    vm_region_basic_info_data_64_t info;
+    mach_msg_type_number_t count = VM_REGION_BASIC_INFO_COUNT_64;
+    mach_port_t object = MACH_PORT_NULL;
+    kern_return_t kr = mach_vm_region(mach_task_self(), &region, &size, VM_REGION_BASIC_INFO_64,
+                                      (vm_region_info_t)&info, &count, &object);
+    return kr == KERN_SUCCESS && region <= (mach_vm_address_t)(uintptr_t)(M + address) &&
+           (info.protection & VM_PROT_READ);
+}
+
+// Débogage : P2_WATCH_CALL=0x<adresse> affiche les 4 premiers arguments (et
+// les chaînes qu'ils désignent) de chaque appel invité de cette adresse.
+static uint32_t watched_call(void) {
+    static uint32_t value = UINT32_MAX;
+    if (value == UINT32_MAX) {
+        const char *e = getenv("P2_WATCH_CALL");
+        value = e ? (uint32_t)strtoul(e, NULL, 0) : 0;
+    }
+    return value;
+}
+static void report_watched_call(CPU *c, uint32_t target) {
+    fprintf(stderr, "[watch] call %#x from %#x:", target, R32(c->esp));
+    for (unsigned i = 1; i <= 4; ++i) {
+        uint32_t v = R32(c->esp + 4 * i);
+        fprintf(stderr, " %#x", v);
+        if (v >= 0x10000000u && v < 0xe0000000u && rt_guest_readable(v)) {
+            char text[121]; unsigned n = 0;
+            while (n < 120 && rt_guest_readable(v + n) && M[v + n]) { text[n] = (char)M[v + n]; ++n; }
+            text[n] = 0;
+            if (n >= 2) fprintf(stderr, " \"%s\"", text);
+        }
+    }
+    fputc('\n', stderr);
+}
+
 void rt_call(CPU *c, uint32_t target, uint32_t expected_return) {
+    if (target == watched_call() && target) { PUSH(c, expected_return); report_watched_call(c, target); c->esp += 4; }
     rt_guest_enter();
     if(frame_depth<256)frames[frame_depth]=(GuestFrame){target,expected_return};
     ++frame_depth;

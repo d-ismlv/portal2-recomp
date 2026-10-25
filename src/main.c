@@ -11,6 +11,7 @@ static uint32_t guest_string(const char *value) {
     return address;
 }
 int main(int argc, char **argv) {
+    setvbuf(stdout, NULL, _IOLBF, 0);   // journal lisible même si le processus meurt
     const char *images = NULL, *game = NULL, *linux = NULL, *user = NULL;
     int first = 1;
     while (first < argc) {
@@ -33,6 +34,16 @@ int main(int argc, char **argv) {
     W32(vector, guest_string("portal2_linux"));
     for (uint32_t i = 1; i < count; ++i) W32(vector + i * 4, guest_string(argv[first + (int)i - 1]));
     W32(vector + count * 4, 0);
+    {   // /proc/self/cmdline : arguments invités séparés par des NUL
+        size_t total = 0;
+        for (uint32_t i = 0; i < count; ++i) total += strlen((const char *)GPTR(R32(vector + i * 4))) + 1;
+        char *joined = malloc(total ? total : 1), *at = joined;
+        for (uint32_t i = 0; joined && i < count; ++i) {
+            size_t n = strlen((const char *)GPTR(R32(vector + i * 4))) + 1;
+            memcpy(at, GPTR(R32(vector + i * 4)), n); at += n;
+        }
+        if (joined) { rt_procfs_set_cmdline(joined, total); free(joined); }
+    }
     rt_loader_set_arguments(count, vector, 0);
     const GuestModule *program = rt_find_module("portal2_linux");
     uint32_t entry = program ? rt_module_symbol(program, "main") : 0;

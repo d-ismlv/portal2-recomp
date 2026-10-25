@@ -206,6 +206,7 @@ void rt_return(CPU *c);
 void rt_call(CPU *c, uint32_t target, uint32_t expected_return);
 const char *rt_import_name(uint32_t target);
 int rt_shim(CPU *c, const char *name);
+int rt_guest_readable(uint32_t address);   // diagnostic : page hôte lisible
 CPU *rt_shim_cpu(void);   // CPU du shim en cours sur ce thread, NULL hors shim
 void *rt_span(CPU *c, uint32_t address, uint64_t length);
 void *rt_write_span(CPU *c, uint32_t address, uint64_t length);
@@ -238,6 +239,9 @@ void rt_atexit_clear(size_t index);
 
 int rt_paths_init(const char *game, const char *linux, const char *user);
 const char *rt_read_path(const char *path);
+int rt_is_proc_path(const char *path);
+const char *rt_proc_path(const char *path);          // NULL + errno si non émulé
+void rt_procfs_set_cmdline(const char *bytes, size_t size);
 const char *rt_write_path(const char *path, int preserve_existing);
 const char *rt_program_path(void);
 int rt_stat_shim(CPU *c, const char *name);
