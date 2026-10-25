@@ -113,7 +113,8 @@ programs[0x28000] = [('lock_add','dword ptr [0x2000b104], 1'),
     ('call','0xf1000090'), ('add','esp, 20'), ('ret','')]
 fixture_imports = {0xf1000000:'pthread_mutex_lock', 0xf1000010:'pthread_mutex_unlock',
     0xf1000020:'pthread_cond_wait',0xf1000040:'pthread_setspecific',
-    0xf1000050:'pthread_self',0xf1000070:'__errno_location',0xf1000080:'pthread_once',0xf1000090:'syscall'}
+    0xf1000050:'pthread_self',0xf1000070:'__errno_location',0xf1000080:'pthread_once',0xf1000090:'syscall',
+    0xf10000a0:'_setjmp',0xf10000b0:'longjmp'}
 insns = {base + i: (base + i + 1, op, args)
          for base, instructions in programs.items() for i, (op, args) in enumerate(instructions)}
 
@@ -140,11 +141,13 @@ entries = set(programs) | set(functions.values())
 class FixtureTables(lift.JumpTables):
     def read32(self, address):
         table = {0x20018810 + 4 * i: labels[f'lfl_case{i}'] for i in range(3)}
+        table.update({0x20018a00: 0xf10000a0, 0x20018a04: 0xf10000b0})   # GOT slots of the PLT stubs
         return table.get(address)
 tables = FixtureTables({'modules': []}, insns)
 code = ['#include "modules.h"', 'const GuestModule rt_modules[1] = {{0}};', 'const size_t rt_module_count = 0;']
+is_setjmp = lambda target: lift.import_called(target, insns, fixture_imports, tables) in lift.SETJMP_IMPORTS
 for entry in sorted(entries):
-    body, _ = lift.lift(entry, insns, entries, set(), tables)
+    body, _ = lift.lift(entry, insns, entries, set(), tables, is_setjmp)
     code.append(body)
 code.append('uint32_t lifter_entry(const char *name);')
 code.append('uint32_t lifter_entry(const char *name) {')

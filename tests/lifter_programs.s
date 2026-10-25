@@ -276,3 +276,59 @@ lfl_end:
 lf_switch_other:                           # reached only through the dispatcher fallback
     mov dword ptr [0x20019800], 777
     ret
+
+# setjmp/longjmp through PLT-style stubs (GOT slots at IN+0xa00 hold the
+# runtime's import addresses), across two nested guest calls.
+.globl lf_plt_setjmp
+lf_plt_setjmp:
+.Lplt_setjmp:
+    jmp dword ptr [0x20018a00]
+.globl lf_plt_longjmp
+lf_plt_longjmp:
+.Lplt_longjmp:
+    jmp dword ptr [0x20018a04]
+
+.globl lf_setjmp
+lf_setjmp:
+    push ebx
+    push esi
+    mov ebx, 0x11111111
+    push 0x20018900
+    call .Lplt_setjmp
+    add esp, 4
+    add dword ptr [0x20019904], 1          # returns from setjmp
+    test eax, eax
+    jnz .Lsecond
+    mov ebx, 0x22222222                    # longjmp restores the saved EBX
+    push dword ptr [0x200189a0]            # value passed to longjmp
+    push 0x20018900
+    call .Ldeep
+    mov dword ptr [0x20019900], 0xdead     # never reached
+    jmp .Lout
+.Lsecond:
+    mov dword ptr [0x20019900], eax
+    mov dword ptr [0x2001990c], ebx
+    mov dword ptr [0x20019910], esp
+.Lout:
+    pop esi
+    pop ebx
+    ret
+
+.globl lf_deep
+lf_deep:
+.Ldeep:
+    push ebp
+    mov ebp, esp
+    push dword ptr [ebp + 12]
+    push dword ptr [ebp + 8]
+    call .Ldeeper
+    leave
+    ret
+
+.globl lf_deeper
+lf_deeper:
+.Ldeeper:
+    push dword ptr [esp + 8]
+    push dword ptr [esp + 8]
+    call .Lplt_longjmp
+    ud2

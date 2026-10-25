@@ -198,7 +198,7 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
         elif target.width != 32:
             raise Unsupported('call operand width')
         return (f'a = {target.read()}; c->flags = f; rt_call(c, a, {nxt:#x}u); '
-                f'f = c->flags; {end}'), [nxt]
+                f'if (c->eip != {nxt:#x}u) goto resume; f = c->flags; {end}'), [nxt]
     if op == 'jmp' or (op.startswith('j') and op[1:] in CC):
         target = Operand(args)
         if target.imm is None:
@@ -412,9 +412,12 @@ def translate(pc, insn, entries=frozenset(), callees=None, cases=None):
     return code + ' ' + end, [nxt]
 
 
-def lift(entry, insns, entries=frozenset(), callees=None, tables=None):
+def lift(entry, insns, entries=frozenset(), callees=None, tables=None, setjmp=None):
+    """Translate one function. `setjmp(target)` tells whether a direct call
+    target is setjmp; its return sites become resume points for longjmp."""
     pending = [entry]
     translated = {}
+    resume = set()
     while pending:
         pc = pending.pop()
         if pc in translated:
@@ -428,10 +431,24 @@ def lift(entry, insns, entries=frozenset(), callees=None, tables=None):
             raise Unsupported(f'{pc:#x}: {exc}') from exc
         translated[pc] = code
         pending.extend(successors)
+        nxt, op, args = insns[pc]
+        if op == 'call' and setjmp is not None:
+            try:
+                target = int(args, 0)
+            except ValueError:
+                target = None
+            if target is not None and setjmp(target):
+                resume.add(nxt)
     lines = [f'static void fn_{entry:x}(CPU *c) {{',
              '    FL f = c->flags; uint32_t a, b, r; int64_t product;',
              '    (void)f; (void)a; (void)b; (void)r; (void)product;', f'    goto L{entry:x};']
     lines.extend(f'L{pc:x}: {code}' for pc, code in sorted(translated.items()))
+    if any('goto resume;' in code for code in translated.values()):
+        # A call returned elsewhere (non-local transfer): resume here when the
+        # target belongs to this function, otherwise drop this host frame.
+        cases = ' '.join(f'case {pc:#x}u: goto L{pc:x};' for pc in sorted(resume))
+        lines.append(f'resume: f = c->flags; switch (c->eip) {{ {cases} default: return; }}' if resume
+                     else 'resume: return;')
     lines.append('}')
     return '\n'.join(lines), len(translated)
 
@@ -553,6 +570,25 @@ class JumpTables:
 
 
 MSK_BITS = {8: 0xff, 16: 0xffff, 32: 0xffffffff}
+SETJMP_IMPORTS = frozenset({'_setjmp', 'setjmp', '__sigsetjmp', 'sigsetjmp'})
+
+
+def import_called(target, insns, imports, tables):
+    """Import reached by a direct call: its thunk, or a PLT stub jumping through
+    a GOT slot (`jmp [ebx + X]` with EBX = GOT, or `jmp [X]`) holding the thunk."""
+    if target in imports:
+        return imports[target]
+    insn = insns.get(target)
+    if not insn or insn[1] != 'jmp':
+        return None
+    m = re.fullmatch(r'dword ptr \[(?:(ebx) \+ )?(0x[0-9a-f]+)\]', insn[2])
+    if not m:
+        return None
+    mod = tables.module(target)
+    if m[1] and not mod:
+        return None
+    value = tables.read32(((mod['gotplt'] if m[1] else 0) + int(m[2], 16)) & 0xffffffff)
+    return imports.get(value)
 
 
 def _guessed_successors(pc, insn):
@@ -723,7 +759,8 @@ def generate(layout, exports, objdump, allow_unimplemented=False, disasm_cache=N
             continue
         ensure_module(entry)
         callees = set()
-        body, count = lift(entry, insns, entries, callees, tables)
+        body, count = lift(entry, insns, entries, callees, tables,
+                           lambda t: import_called(t, insns, imports, tables) in SETJMP_IMPORTS)
         code.append(body)
         compiled.add(entry)
         total += count

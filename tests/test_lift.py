@@ -106,6 +106,27 @@ class LifterTests(unittest.TestCase):
         code, _ = lift.lift(0x10, insns, tables=tables)
         self.assertNotIn('switch', code)
 
+    def test_setjmp_return_site_is_a_resume_point(self):
+        insns = {0x10: (0x15, 'call', '0x40'), 0x15: (0x1a, 'call', '0x50'), 0x1a: (0x1b, 'ret', '')}
+        code, _ = lift.lift(0x10, insns, setjmp=lambda target: target == 0x40)
+        self.assertIn('if (c->eip != 0x15u) goto resume;', code)
+        self.assertIn('if (c->eip != 0x1au) goto resume;', code)
+        self.assertIn('switch (c->eip) { case 0x15u: goto L15; default: return; }', code)
+        plain, _ = lift.lift(0x10, insns)
+        self.assertIn('resume: return;', plain)
+        self.assertNotIn('resume', lift.lift(0x10, {0x10: (0x11, 'ret', '')})[0])
+
+    def test_plt_stub_resolves_to_import(self):
+        insns = {0x100: (0x106, 'jmp', 'dword ptr [ebx + 0xc]'), 0x200: (0x206, 'jmp', 'dword ptr [0x3000]')}
+        tables = lift.JumpTables({'modules': []}, insns)
+        tables.module = lambda address: {'gotplt': 0x2000}
+        tables.read32 = lambda address: {0x200c: 0xf0000010, 0x3000: 0xf0000020}.get(address)
+        imports = {0xf0000010: '_setjmp', 0xf0000020: 'longjmp'}
+        self.assertEqual(lift.import_called(0x100, insns, imports, tables), '_setjmp')
+        self.assertEqual(lift.import_called(0x200, insns, imports, tables), 'longjmp')
+        self.assertEqual(lift.import_called(0xf0000010, insns, imports, tables), '_setjmp')
+        self.assertIsNone(lift.import_called(0x300, insns, imports, tables))
+
     def test_audit_scan_collects_every_rejection(self):
         insns = {0x10: (0x12, 'rsm', ''), 0x12: (0x14, 'vzeroall', ''), 0x14: (0x15, 'ret', '')}
         count, failures, indirect = lift.scan(0x10, insns)

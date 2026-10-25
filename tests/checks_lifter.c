@@ -187,3 +187,18 @@ RT_CHECK(lifter_switch_tables) {
     run_named("lf_switch");
     assert(R32(OUT + 0x800) == 777);
 }
+
+RT_CHECK(lifter_setjmp_longjmp) {
+    for (uint32_t value = 0; value < 2; ++value) {
+        clear();
+        W32(IN + 0xa00, 0xf10000a0); W32(IN + 0xa04, 0xf10000b0);   // GOT slots -> _setjmp, longjmp
+        W32(IN + 0x9a0, value ? 7 : 0);   // after the 156-byte jmp_buf
+        CPU c = run_named("lf_setjmp");
+        assert(R32(OUT + 0x904) == 2);                         // setjmp returned twice
+        assert(R32(OUT + 0x900) == (value ? 7u : 1u));         // longjmp(env, 0) makes setjmp return 1
+        assert(R32(OUT + 0x90c) == 0x11111111u);               // callee-saved register from the buffer
+        assert(R32(OUT + 0x910) == 0x20010000u - 12);          // sentinel, EBX, ESI: argument popped
+        assert(R32(IN + 0x900 + 20) != 0 && R32(IN + 0x900 + 24) == 0);
+        (void)c;
+    }
+}
