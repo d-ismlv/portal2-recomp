@@ -36,6 +36,11 @@ static int absolute_path(const char *path,char *output) {
         if(length>1)output[length++]='/';
         memcpy(output+length,part,add+1); length+=add;
     }
+    // Sous une racine déjà canonique (jeu, dépôt Linux, données utilisateur) :
+    // pas de realpath, qui coûte un getattrlist par composant à chaque accès
+    // (20 % du temps CPU du jeu). Les liens créés par l'invité sont résolus
+    // à part (overlay_link).
+    if(within(output,game_root)||within(output,linux_root)||within(output,user_root))return 0;
     // Resolve existing prefixes too: /tmp is /private/tmp on macOS, including
     // when the requested file has not been created yet.
     char prefix[PATH_MAX], resolved[PATH_MAX]; strcpy(prefix,output);

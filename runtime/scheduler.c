@@ -8,8 +8,15 @@
 
 static pthread_mutex_t gate=PTHREAD_MUTEX_INITIALIZER;
 static _Thread_local unsigned depth, ticks;
+static _Atomic unsigned waiting;   // threads bloqués sur gate : céder seulement s'il y en a
+static void acquire(void) {
+    if(!pthread_mutex_trylock(&gate))return;
+    ++waiting;
+    if(pthread_mutex_lock(&gate))abort();
+    --waiting;
+}
 void rt_guest_enter(void) {
-    if(!depth && pthread_mutex_lock(&gate))abort();
+    if(!depth)acquire();
     ++depth;
     rt_guest_poll();
 }
@@ -24,11 +31,11 @@ unsigned rt_guest_suspend(void) {
 }
 void rt_guest_resume(unsigned saved) {
     if(depth)abort();
-    if(saved && pthread_mutex_lock(&gate))abort();
+    if(saved)acquire();
     depth=saved;
 }
 void rt_guest_poll(void) {
-    if(!depth || (++ticks & 1023))return;
+    if(!depth || (++ticks & 1023) || !waiting)return;
     unsigned saved=rt_guest_suspend();
     sched_yield();
     rt_guest_resume(saved);
