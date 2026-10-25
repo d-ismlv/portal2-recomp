@@ -154,9 +154,9 @@ code = ['#include "modules.h"',
         f'{f["lf_log_init"]:#x}u, {f["lf_log_fini"]:#x}u, fake_constructors, 1, fake_symbols, 1, NULL, 0}}}};',
         'const size_t rt_module_count = 1;']
 is_setjmp = lambda target: lift.import_called(target, insns, fixture_imports, tables) in lift.SETJMP_IMPORTS
-for entry in sorted(entries):
-    body, _ = lift.lift(entry, insns, entries, set(), tables, is_setjmp)
-    code.append(body)
+bodies = [lift.lift(entry, insns, entries, set(), tables, is_setjmp)[0] for entry in sorted(entries)]
+code += lift.prototypes(entries, static=True)
+code += [lift.link_direct(body, set(entries))[0] for body in bodies]
 code.append('uint32_t lifter_entry(const char *name);')
 code.append('uint32_t lifter_entry(const char *name) {')
 code += [f'if (!strcmp(name, "{name}")) return {address:#x}u;' for name, address in sorted(asm_entries.items())]

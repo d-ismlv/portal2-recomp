@@ -3,6 +3,7 @@
 #include <stdint.h>
 #include <string.h>
 #include <math.h>
+#include <stdatomic.h>
 
 typedef union {
     uint8_t b[16]; uint16_t w[8]; uint32_t d[4]; int32_t i[4];
@@ -32,30 +33,49 @@ typedef struct CPU {
 
 extern uint8_t *M;   // base hôte de l'espace d'adressage invité (4 Go réservés)
 
+// Les fonctions du runtime appelées par le code généré ne conservent pas le
+// pointeur CPU après leur retour (shim_cpu et once_cpu sont restaurés).
+// Sans cette garantie, clang considère `c` comme échappé dès le premier
+// appel et suppose qu'une écriture invitée peut modifier *c.
+#define RT_NOESCAPE __attribute__((noescape))
+
 typedef void (*gfn)(CPU *);
-void rt_dispatch(CPU *c, uint32_t target);                       // appelle le code invité à target
-__attribute__((noreturn)) void rt_trap(CPU *c, uint32_t pc, const char *why);
-void rt_div32(CPU *c, uint32_t divisor, int is_signed, uint32_t pc);
-void rt_div_narrow(CPU *c, uint32_t divisor, int width, int is_signed, uint32_t pc);  // DIV/IDIV 8 et 16 bits
-void rt_fprem(CPU *c, int ieee);                       // FPREM (0) / FPREM1 (1), bits C0-C3
+void rt_dispatch(RT_NOESCAPE CPU *c, uint32_t target);                       // appelle le code invité à target
+__attribute__((noreturn)) void rt_trap(RT_NOESCAPE CPU *c, uint32_t pc, const char *why);
+void rt_div32(RT_NOESCAPE CPU *c, uint32_t divisor, int is_signed, uint32_t pc);
+void rt_div_narrow(RT_NOESCAPE CPU *c, uint32_t divisor, int width, int is_signed, uint32_t pc);  // DIV/IDIV 8 et 16 bits
+void rt_fprem(RT_NOESCAPE CPU *c, int ieee);                       // FPREM (0) / FPREM1 (1), bits C0-C3
 double rt_load_extended(uint32_t address);             // flottant x87 80 bits -> double
 void rt_store_extended(uint32_t address, double value);
-double rt_sse_round(CPU *c, double value);
-double rt_x87_round(CPU *c, double value);
-void rt_cpu_reset(CPU *c);
-void rt_fxsave(CPU *c, uint32_t address);
-void rt_ldmxcsr(CPU *c, uint32_t value);
-void rt_cpuid(CPU *c);
+double rt_sse_round(RT_NOESCAPE CPU *c, double value);
+double rt_x87_round(RT_NOESCAPE CPU *c, double value);
+void rt_cpu_reset(RT_NOESCAPE CPU *c);
+void rt_fxsave(RT_NOESCAPE CPU *c, uint32_t address);
+void rt_ldmxcsr(RT_NOESCAPE CPU *c, uint32_t value);
+void rt_cpuid(RT_NOESCAPE CPU *c);
 uint64_t rt_rdtsc(void);
 uint32_t rt_rand32(void);
 
 #define GPTR(a) ((void *)(M + (uint32_t)(a)))
 
+// Adresses des imports statiques (0xf0000000+) et dynamiques (0xf8000000+) :
+// jamais du code traduit.
+#define RT_IMPORT_BASE 0xf0000000u
 #define RT_VM_BEGIN 0x21000000u  // au-dessus des modules (< 0x19000000) et de la zone de test 0x20000000
 #define RT_VM_END 0x70000000u
 extern uint8_t rt_vm_permissions[(RT_VM_END - RT_VM_BEGIN) / 4096];
 __attribute__((noreturn)) void rt_memory_trap(uint32_t address, uint64_t length, int mode);
+// RT_FAST_MEMORY : aucun contrôle logiciel par accès. La protection repose
+// alors sur les pages hôtes de 16 Kio (vm.c leur donne l'union des droits des
+// pages invitées de 4 Kio qu'elles contiennent) : un accès à une page invitée
+// sans droit qui partage sa page hôte avec une page accessible n'est plus
+// détecté (par ex. une page de garde de pile de 4 Kio). Un accès qui déborde
+// 4 Go tombe dans la page de garde réservée après l'espace invité (rt.c).
+// Toute autre faute reste une faute matérielle, traduite par host_fault.
 static inline void rt_check_memory(uint32_t address, unsigned size, int mode) {
+#ifdef RT_FAST_MEMORY
+    (void)address; (void)size; (void)mode;
+#else
     if (address > UINT32_MAX - (size - 1)) rt_memory_trap(address, size, mode);
     uint32_t last = address + size - 1;
     if (address >= RT_VM_BEGIN && address < RT_VM_END &&
@@ -64,25 +84,53 @@ static inline void rt_check_memory(uint32_t address, unsigned size, int mode) {
     if ((last >> 12) != (address >> 12) && last >= RT_VM_BEGIN && last < RT_VM_END &&
         (rt_vm_permissions[(last - RT_VM_BEGIN) >> 12] & mode) != mode)
         rt_memory_trap(address, size, mode);
+#endif
 }
 void rt_check_span(uint32_t address, uint64_t length, int mode);
-static inline uint8_t  R8 (uint32_t a) { rt_check_memory(a, 1, 1); return M[a]; }
-static inline uint16_t R16(uint32_t a) { rt_check_memory(a, 2, 1); uint16_t v; memcpy(&v, M + a, 2); return v; }
-static inline uint32_t R32(uint32_t a) { rt_check_memory(a, 4, 1); uint32_t v; memcpy(&v, M + a, 4); return v; }
-static inline uint64_t R64(uint32_t a) { rt_check_memory(a, 8, 1); uint64_t v; memcpy(&v, M + a, 8); return v; }
-static inline float    RF (uint32_t a) { rt_check_memory(a, 4, 1); float v; memcpy(&v, M + a, 4); return v; }
-static inline double   RD (uint32_t a) { rt_check_memory(a, 8, 1); double v; memcpy(&v, M + a, 8); return v; }
-static inline XMM      RX (uint32_t a) { rt_check_memory(a, 16, 1); XMM v; memcpy(&v, M + a, 16); return v; }
-static inline void W8 (uint32_t a, uint32_t v) { rt_check_memory(a, 1, 2); M[a] = (uint8_t)v; }
-static inline void W16(uint32_t a, uint32_t v) { rt_check_memory(a, 2, 2); uint16_t x = (uint16_t)v; memcpy(M + a, &x, 2); }
-static inline void W32(uint32_t a, uint32_t v) { rt_check_memory(a, 4, 2); memcpy(M + a, &v, 4); }
-static inline void W64(uint32_t a, uint64_t v) { rt_check_memory(a, 8, 2); memcpy(M + a, &v, 8); }
-static inline void WF (uint32_t a, float v)    { rt_check_memory(a, 4, 2); memcpy(M + a, &v, 4); }
-static inline void WD (uint32_t a, double v)   { rt_check_memory(a, 8, 2); memcpy(M + a, &v, 8); }
-static inline void WX (uint32_t a, XMM v)      { rt_check_memory(a, 16, 2); memcpy(M + a, &v, 16); }
+// Accès mémoire invités. La base vaut RT_MEM : M partout, mais le code
+// généré la recopie dans une variable locale (`mem_`, voir tools/lift.py).
+// Une écriture invitée passe par memcpy, sans type : clang devrait sinon
+// supposer qu'elle peut modifier le pointeur global M et le relire après
+// chaque écriture. Avec `CPU *restrict c` dans les fonctions générées
+// (le CPU vit hors de la mémoire invitée), les registres invités restent
+// dans des registres hôtes entre deux accès mémoire.
+#ifndef RT_MEM
+#define RT_MEM M
+#endif
+static inline uint8_t  rt_r8 (uint8_t *m, uint32_t a) { rt_check_memory(a, 1, 1); return m[a]; }
+static inline uint16_t rt_r16(uint8_t *m, uint32_t a) { rt_check_memory(a, 2, 1); uint16_t v; memcpy(&v, m + a, 2); return v; }
+static inline uint32_t rt_r32(uint8_t *m, uint32_t a) { rt_check_memory(a, 4, 1); uint32_t v; memcpy(&v, m + a, 4); return v; }
+static inline uint64_t rt_r64(uint8_t *m, uint32_t a) { rt_check_memory(a, 8, 1); uint64_t v; memcpy(&v, m + a, 8); return v; }
+static inline float    rt_rf (uint8_t *m, uint32_t a) { rt_check_memory(a, 4, 1); float v; memcpy(&v, m + a, 4); return v; }
+static inline double   rt_rd (uint8_t *m, uint32_t a) { rt_check_memory(a, 8, 1); double v; memcpy(&v, m + a, 8); return v; }
+static inline XMM      rt_rx (uint8_t *m, uint32_t a) { rt_check_memory(a, 16, 1); XMM v; memcpy(&v, m + a, 16); return v; }
+static inline void rt_w8 (uint8_t *m, uint32_t a, uint32_t v) { rt_check_memory(a, 1, 2); m[a] = (uint8_t)v; }
+static inline void rt_w16(uint8_t *m, uint32_t a, uint32_t v) { rt_check_memory(a, 2, 2); uint16_t x = (uint16_t)v; memcpy(m + a, &x, 2); }
+static inline void rt_w32(uint8_t *m, uint32_t a, uint32_t v) { rt_check_memory(a, 4, 2); memcpy(m + a, &v, 4); }
+static inline void rt_w64(uint8_t *m, uint32_t a, uint64_t v) { rt_check_memory(a, 8, 2); memcpy(m + a, &v, 8); }
+static inline void rt_wf (uint8_t *m, uint32_t a, float v)    { rt_check_memory(a, 4, 2); memcpy(m + a, &v, 4); }
+static inline void rt_wd (uint8_t *m, uint32_t a, double v)   { rt_check_memory(a, 8, 2); memcpy(m + a, &v, 8); }
+static inline void rt_wx (uint8_t *m, uint32_t a, XMM v)      { rt_check_memory(a, 16, 2); memcpy(m + a, &v, 16); }
+#define R8(a)  rt_r8 (RT_MEM, (a))
+#define R16(a) rt_r16(RT_MEM, (a))
+#define R32(a) rt_r32(RT_MEM, (a))
+#define R64(a) rt_r64(RT_MEM, (a))
+#define RF(a)  rt_rf (RT_MEM, (a))
+#define RD(a)  rt_rd (RT_MEM, (a))
+#define RX(a)  rt_rx (RT_MEM, (a))
+#define W8(a, v)  rt_w8 (RT_MEM, (a), (v))
+#define W16(a, v) rt_w16(RT_MEM, (a), (v))
+#define W32(a, v) rt_w32(RT_MEM, (a), (v))
+#define W64(a, v) rt_w64(RT_MEM, (a), (v))
+#define WF(a, v)  rt_wf (RT_MEM, (a), (v))
+#define WD(a, v)  rt_wd (RT_MEM, (a), (v))
+#define WX(a, v)  rt_wx (RT_MEM, (a), (v))
 
-static inline void PUSH(CPU *c, uint32_t v) { c->esp -= 4; W32(c->esp, v); }
-static inline uint32_t POP(CPU *c) { uint32_t v = R32(c->esp); c->esp += 4; return v; }
+// Macros (et non fonctions) pour utiliser la base locale du code généré.
+#define PUSH(cpu, v) do { CPU *push_cpu_ = (cpu); uint32_t push_value_ = (v); \
+    push_cpu_->esp -= 4; W32(push_cpu_->esp, push_value_); } while (0)
+#define POP(cpu) ({ CPU *pop_cpu_ = (cpu); uint32_t pop_value_ = R32(pop_cpu_->esp); \
+    pop_cpu_->esp += 4; pop_value_; })
 
 #define MSK(n) ((n) == 32 ? 0xffffffffu : ((1u << (n)) - 1))
 #define SGN(n) (1u << ((n) - 1))
@@ -198,12 +246,62 @@ int rt_time_data_import(const char *name, uint32_t address);  // time.c
 int rt_load_images(const char *directory);  // généré par lift.py
 uint32_t rt_export(const char *name);       // 0 si export non recompilé
 gfn rt_lookup(uint32_t target);
-uint32_t rt_atomic32(CPU *c, uint32_t address, uint32_t value, int operation);
-uint32_t rt_exchange32(CPU *c, uint32_t address, uint32_t value);
-uint32_t rt_compare_exchange32(CPU *c, uint32_t address, uint32_t expected, uint32_t value);
-uint64_t rt_compare_exchange64(CPU *c, uint32_t address, uint64_t expected, uint64_t value);
-void rt_return(CPU *c);
-void rt_call(CPU *c, uint32_t target, uint32_t expected_return);
+uint32_t rt_atomic32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t value, int operation);
+uint32_t rt_exchange32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t value);
+uint32_t rt_compare_exchange32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t expected, uint32_t value);
+uint64_t rt_compare_exchange64(RT_NOESCAPE CPU *c, uint32_t address, uint64_t expected, uint64_t value);
+void rt_return(RT_NOESCAPE CPU *c);
+void rt_call(RT_NOESCAPE CPU *c, uint32_t target, uint32_t expected_return);
+void rt_guest_poll(void);
+// Threads bloqués sur le verrou invité (scheduler.c). Le code généré ne cède
+// que s'il y en a : test en ligne, sans appel ni accès _Thread_local.
+extern _Atomic unsigned rt_guest_waiting;
+static inline void rt_poll(void) {
+    if (__builtin_expect(atomic_load_explicit(&rt_guest_waiting, memory_order_relaxed) != 0, 0)) rt_guest_poll();
+}
+// Appel et saut directs du code généré vers une fonction traduite connue
+// (tools/lift.py, link_direct). Hors RT_TRACED_CALLS, ni verrou invité (le
+// code généré le tient déjà), ni pile d'appels de diagnostic, ni
+// P2_WATCH_CALL, ni recherche de la cible : l'adresse de retour est empilée
+// et la fonction appelée comme le ferait rt_dispatch. Le protocole des
+// transferts non locaux est inchangé : l'appelant compare c->eip à son
+// adresse de retour. Chaque chemin rapide cède le verrou comme rt_dispatch
+// (rt_poll) : un cycle d'appels ou de sauts terminaux entre fonctions, sans
+// branche arrière, ne doit pas affamer les autres threads invités.
+static inline void rt_call_fn(CPU *c, gfn fn, uint32_t target, uint32_t expected_return) {
+#ifdef RT_TRACED_CALLS
+    (void)fn; rt_call(c, target, expected_return);
+#else
+    rt_poll(); PUSH(c, expected_return); c->eip = target; fn(c);
+#endif
+}
+// Appels et sauts indirects (fonctions virtuelles, pointeurs de fonction) :
+// une cible traduite est appelée directement ; toute autre (import, adresse
+// dynamique, cible inconnue) prend le chemin complet de rt_call/rt_dispatch.
+static inline void rt_call_any(CPU *c, uint32_t target, uint32_t expected_return) {
+#ifndef RT_TRACED_CALLS
+    gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
+    if (fn) { rt_poll(); PUSH(c, expected_return); c->eip = target; fn(c); return; }
+#endif
+    rt_call(c, target, expected_return);
+}
+static inline void rt_jump_any(CPU *c, uint32_t target) {
+#ifndef RT_TRACED_CALLS
+    gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
+    if (fn) { rt_poll(); c->eip = target; fn(c); return; }
+#endif
+    rt_dispatch(c, target);
+}
+// Appel direct d'un import (shim) depuis le code généré, qui tient déjà le
+// verrou invité : route mémorisée appelée directement, sinon rt_call.
+void rt_call_import(RT_NOESCAPE CPU *c, uint32_t target, uint32_t expected_return);
+static inline void rt_jump_fn(CPU *c, gfn fn, uint32_t target) {
+#ifdef RT_TRACED_CALLS
+    (void)fn; rt_dispatch(c, target);
+#else
+    rt_poll(); c->eip = target; fn(c);
+#endif
+}
 const char *rt_import_name(uint32_t target);
 int rt_shim(CPU *c, const char *name);
 int rt_guest_readable(uint32_t address);   // diagnostic : page hôte lisible
@@ -212,8 +310,8 @@ void *rt_span(CPU *c, uint32_t address, uint64_t length);
 void *rt_write_span(CPU *c, uint32_t address, uint64_t length);
 uint32_t rt_string_length(CPU *c, uint32_t address);
 int rt_register_tls(const char *directory, const char *name, uint32_t id, uint32_t offset, uint32_t filesz, uint32_t memsz, uint32_t alignment);
-uint32_t rt_thread_pointer(CPU *c);
-uint32_t rt_tls_address(CPU *c, uint32_t module, uint32_t offset);
+uint32_t rt_thread_pointer(RT_NOESCAPE CPU *c);
+uint32_t rt_tls_address(RT_NOESCAPE CPU *c, uint32_t module, uint32_t offset);
 void rt_tls_destroy(void);
 void rt_tls_release(uint32_t thread);
 int rt_loader_shim(CPU *c, const char *name);
