@@ -1,0 +1,249 @@
+# Real i386 code for tests/checks_lifter.c: assembled by clang, disassembled by
+# objdump and lifted by tools/lift.py exactly like the game modules.
+# Inputs live at IN = 0x20018000, outputs at OUT = 0x20019000.
+.intel_syntax noprefix
+.text
+.globl lf_bits
+lf_bits:                                   # bt/bts/btr/btc, register and bit-string forms
+    mov ecx, 0x80000001
+    mov edx, 31
+    bt ecx, edx
+    setc byte ptr [0x20019000]
+    mov edx, 33                            # register form: index modulo 32 -> bit 1
+    bt ecx, edx
+    setc byte ptr [0x20019001]
+    bts ecx, edx
+    mov dword ptr [0x20019004], ecx
+    mov edx, 0
+    btr ecx, edx
+    setc byte ptr [0x20019002]
+    mov dword ptr [0x20019008], ecx
+    mov edx, 4
+    btc ecx, edx
+    mov dword ptr [0x2001900c], ecx
+    mov eax, 0x20018010
+    mov edx, -1                            # bit string: bit 31 of the dword before
+    bts dword ptr [eax], edx
+    setc byte ptr [0x20019003]
+    mov edx, 40                            # dword after, bit 8
+    btr dword ptr [eax], edx
+    setc byte ptr [0x20019010]
+    bt dword ptr [eax], 35                 # immediate form: modulo 32 -> bit 3
+    setc byte ptr [0x20019011]
+    ret
+
+.globl lf_narrow
+lf_narrow:                                 # 8/16-bit multiply/divide, cbw/cwd, sahf/lahf
+    mov eax, 0xaaaa00f0
+    mov dl, 0x10
+    mul dl                                 # ax = 0x0f00, CF=OF=1
+    setc byte ptr [0x20019020]
+    mov dword ptr [0x20019024], eax
+    mov eax, 0x000000fe                    # al = -2
+    mov cl, 0x03
+    imul cl                                # ax = -6, fits in al: CF=0
+    setc byte ptr [0x20019021]
+    mov dword ptr [0x20019028], eax
+    mov eax, 0x11110064                    # ax = 100
+    mov cl, 7
+    div cl                                 # al = 14, ah = 2
+    mov dword ptr [0x2001902c], eax
+    mov eax, 0xffff0000 + 0xfff9           # ax = -7
+    cwd                                    # dx = 0xffff
+    mov ecx, 2
+    idiv cx                                # ax = -3, dx = -1
+    mov dword ptr [0x20019030], eax
+    mov dword ptr [0x20019034], edx
+    mov eax, 0x12345680
+    cbw                                    # ax = 0xff80
+    mov dword ptr [0x20019038], eax
+    mov eax, 0x0000c500                    # ah: SF ZF PF CF set (0xc5)
+    sahf
+    sets byte ptr [0x2001903c]
+    setz byte ptr [0x2001903d]
+    setp byte ptr [0x2001903e]
+    setc byte ptr [0x2001903f]
+    mov eax, 0
+    cmp eax, 1                             # CF=1 SF=1 AF=1 PF=1 (0xff has even parity)
+    lahf
+    mov dword ptr [0x20019040], eax
+    rep ret
+
+.globl lf_sse
+lf_sse:                                    # packed single shuffles and masks
+    movaps xmm0, xmmword ptr [0x20018100]  # 1 2 3 4
+    movaps xmm1, xmmword ptr [0x20018110]  # 5 6 7 8
+    movaps xmm2, xmm0
+    shufps xmm2, xmm1, 0x1b                # 4 3 6 5
+    movups xmmword ptr [0x20019100], xmm2
+    movaps xmm2, xmm0
+    unpcklps xmm2, xmm1                    # 1 5 2 6
+    movups xmmword ptr [0x20019110], xmm2
+    movaps xmm2, xmm0
+    unpckhps xmm2, xmm1                    # 3 7 4 8
+    movups xmmword ptr [0x20019120], xmm2
+    movaps xmm2, xmm0
+    movlhps xmm2, xmm1                     # 1 2 5 6
+    movhlps xmm2, xmm1                     # 7 8 5 6
+    movups xmmword ptr [0x20019130], xmm2
+    movaps xmm2, xmm0
+    movhps xmm2, qword ptr [0x20018110]    # 1 2 5 6
+    movlps xmm2, qword ptr [0x20018118]    # 7 8 5 6
+    movhps qword ptr [0x20019140], xmm2    # 5 6
+    movlps qword ptr [0x20019148], xmm2    # 7 8
+    movaps xmm3, xmmword ptr [0x20018120]  # -1 2 -3 0
+    movmskps eax, xmm3
+    mov dword ptr [0x20019150], eax
+    andnps xmm3, xmm0                      # ~mask & value
+    movups xmmword ptr [0x20019160], xmm3
+    movntps xmmword ptr [0x20019170], xmm1
+    ret
+
+.globl lf_sse_math
+lf_sse_math:                               # scalar/packed sqrt, min/max NaN rules, reciprocals
+    movss xmm0, dword ptr [0x20018200]     # 16
+    sqrtss xmm0, xmm0
+    movss dword ptr [0x20019200], xmm0
+    movsd xmm1, qword ptr [0x20018208]     # 2.25
+    sqrtsd xmm1, xmm1
+    movsd qword ptr [0x20019208], xmm1
+    movss xmm2, dword ptr [0x20018210]     # NaN
+    movss xmm3, dword ptr [0x20018214]     # 3
+    minss xmm2, xmm3                       # NaN first -> second operand (3)
+    movss dword ptr [0x20019210], xmm2
+    movss xmm2, dword ptr [0x20018214]     # 3
+    maxss xmm2, dword ptr [0x20018210]     # NaN second -> NaN
+    movss dword ptr [0x20019214], xmm2
+    movsd xmm4, qword ptr [0x20018218]     # -0.0
+    minsd xmm4, qword ptr [0x20018220]     # +0.0: equal -> second (+0.0)
+    movsd qword ptr [0x20019218], xmm4
+    movaps xmm5, xmmword ptr [0x20018230]  # 4 16 0.25 1
+    sqrtps xmm6, xmm5
+    movups xmmword ptr [0x20019220], xmm6
+    rcpps xmm6, xmm5
+    movups xmmword ptr [0x20019230], xmm6
+    rsqrtps xmm6, xmm5
+    movups xmmword ptr [0x20019240], xmm6
+    ret
+
+.globl lf_int
+lf_int:                                    # SSE2 integer lanes
+    movdqa xmm0, xmmword ptr [0x20018300]
+    movdqa xmm1, xmmword ptr [0x20018310]
+    pshufd xmm2, xmm0, 0x1b
+    movdqu xmmword ptr [0x20019300], xmm2
+    movdqa xmm2, xmm0
+    punpcklwd xmm2, xmm1
+    movdqu xmmword ptr [0x20019310], xmm2
+    movdqa xmm2, xmm0
+    paddd xmm2, xmm1
+    movdqu xmmword ptr [0x20019320], xmm2
+    movdqa xmm2, xmm0
+    pcmpeqd xmm2, xmm1
+    movdqu xmmword ptr [0x20019330], xmm2
+    movdqa xmm2, xmm0
+    pcmpgtw xmm2, xmm1
+    movdqu xmmword ptr [0x20019340], xmm2
+    movdqa xmm2, xmm0
+    pmuludq xmm2, xmm1
+    movdqu xmmword ptr [0x20019350], xmm2
+    movdqa xmm2, xmm0
+    packssdw xmm2, xmm1
+    movdqu xmmword ptr [0x20019360], xmm2
+    movdqa xmm2, xmm0
+    psrldq xmm2, 5
+    movdqu xmmword ptr [0x20019370], xmm2
+    movdqa xmm2, xmm0
+    pmullw xmm2, xmm1
+    movdqu xmmword ptr [0x20019380], xmm2
+    movdqa xmm2, xmm0
+    pmulhw xmm2, xmm1
+    movdqu xmmword ptr [0x20019390], xmm2
+    pcmpeqd xmm3, xmm3
+    movdqu xmmword ptr [0x200193a0], xmm3
+    ret
+
+.globl lf_mmx
+lf_mmx:
+    mov eax, 0x7fff8000
+    movd mm0, eax
+    movq mm1, qword ptr [0x20018400]
+    paddw mm0, mm1
+    movq qword ptr [0x20019400], mm0
+    psrad mm1, qword ptr [0x20018408]
+    movq qword ptr [0x20019408], mm1
+    packssdw mm1, mm0
+    movq qword ptr [0x20019410], mm1
+    movd ecx, mm1
+    mov dword ptr [0x20019418], ecx
+    movq2dq xmm0, mm0
+    movdqu xmmword ptr [0x20019420], xmm0
+    cvtpi2ps xmm1, mm0
+    movups xmmword ptr [0x20019430], xmm1
+    emms
+    ret
+
+.globl lf_x87_compare
+lf_x87_compare:                            # fcomi/fucomip/fcmov leave ZF PF CF in EFLAGS
+    fld qword ptr [0x20018500]             # 1
+    fld qword ptr [0x20018508]             # 2
+    fcomi st, st(1)                        # 2 > 1: ZF=PF=CF=0
+    seta byte ptr [0x20019500]
+    setp byte ptr [0x20019501]
+    fcmovnbe st, st(1)                     # condition true: st0 = 1
+    fstp qword ptr [0x20019508]
+    fld qword ptr [0x20018510]             # NaN
+    fucomip st, st(1)                      # unordered: ZF=PF=CF=1, pops
+    setp byte ptr [0x20019502]
+    sete byte ptr [0x20019503]
+    setb byte ptr [0x20019504]
+    fld qword ptr [0x20018508]             # 2
+    fcomi st, st(1)
+    fcmovb st, st(1)                       # false: keeps 2
+    fstp qword ptr [0x20019510]
+    fstp st(0)
+    ret
+
+.globl lf_x87_math
+lf_x87_math:
+    fnstcw word ptr [0x20019600]
+    mov word ptr [0x20019602], 0x0f7f      # round toward zero
+    fldcw word ptr [0x20019602]
+    fld qword ptr [0x20018600]             # -2.75
+    frndint
+    fstp qword ptr [0x20019608]            # -2
+    fldcw word ptr [0x20019600]
+    fld qword ptr [0x20018600]
+    frndint                                # nearest: -3
+    fimul dword ptr [0x20018608]           # * 5 -> -15
+    fidivr dword ptr [0x20018608]          # 5 / -15
+    fstp qword ptr [0x20019610]
+    fld qword ptr [0x20018610]             # 1
+    fld qword ptr [0x20018610]             # 1
+    fpatan                                 # atan2(1, 1)
+    fstp qword ptr [0x20019618]
+    fld qword ptr [0x20018610]             # y = 1
+    fld qword ptr [0x20018618]             # x = 8
+    fyl2x                                  # 1 * log2(8)
+    fstp qword ptr [0x20019620]
+    fld qword ptr [0x20018620]             # 0.5
+    fsin
+    fstp qword ptr [0x20019628]
+    fld qword ptr [0x20018620]
+    fptan                                  # pushes 1.0 above tan(0.5)
+    fstp qword ptr [0x20019630]
+    fstp qword ptr [0x20019638]
+    fld qword ptr [0x20018628]             # divisor 3
+    fld qword ptr [0x20018630]             # dividend -11
+1:  fprem
+    fnstsw ax
+    sahf
+    jp 1b
+    fstp qword ptr [0x20019640]            # -2
+    fstp st(0)
+    mov dword ptr [0x20019648], eax        # status word: C1 = Q1, C3 = Q0, C0 = Q2 of q=3
+    fld tbyte ptr [0x20018640]             # extended 1.5
+    fstp tbyte ptr [0x20019650]
+    fldlg2
+    fstp qword ptr [0x20019660]
+    ret

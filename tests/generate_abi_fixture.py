@@ -116,12 +116,32 @@ fixture_imports = {0xf1000000:'pthread_mutex_lock', 0xf1000010:'pthread_mutex_un
     0xf1000050:'pthread_self',0xf1000070:'__errno_location',0xf1000080:'pthread_once',0xf1000090:'syscall'}
 insns = {base + i: (base + i + 1, op, args)
          for base, instructions in programs.items() for i, (op, args) in enumerate(instructions)}
+
+# Real x86 bytes: tests/lifter_programs.s is assembled for i386 Linux and goes
+# through the same objdump parser as the game modules.
+import re
+import subprocess
+ASM_BASE = 0x400000
+source = Path(__file__).with_name('lifter_programs.s')
+obj = Path(sys.argv[1]).with_name('lifter_programs.o')
+subprocess.run(['clang', '-target', 'i386-linux-gnu', '-c', str(source), '-o', str(obj)], check=True)
+asm_insns = lift.disassemble(obj, ASM_BASE, 'objdump')
+table = subprocess.run(['objdump', '-t', str(obj)], check=True, capture_output=True, text=True).stdout
+asm_entries = {m[2]: int(m[1], 16) + ASM_BASE
+               for m in re.finditer(r'^([0-9a-f]{8}) g\s+\S*\s+\.text\s+[0-9a-f]+ (\S+)$', table, re.M)}
+assert asm_entries, 'no global symbols in lifter_programs.s'
+insns.update(asm_insns)
+entries = set(programs) | set(asm_entries.values())
 code = ['#include "modules.h"', 'const GuestModule rt_modules[1] = {{0}};', 'const size_t rt_module_count = 0;']
-for entry in programs:
-    body, _ = lift.lift(entry, insns, set(programs), set())
+for entry in sorted(entries):
+    body, _ = lift.lift(entry, insns, entries, set())
     code.append(body)
+code.append('uint32_t lifter_entry(const char *name);')
+code.append('uint32_t lifter_entry(const char *name) {')
+code += [f'if (!strcmp(name, "{name}")) return {address:#x}u;' for name, address in sorted(asm_entries.items())]
+code.append('return 0; }')
 code.append('gfn rt_lookup(uint32_t target) { switch (target) {')
-for entry in programs:
+for entry in sorted(entries):
     code.append(f'case {entry:#x}: return fn_{entry:x};')
 code += ['default: return NULL; } }',
          'const char *rt_import_name(uint32_t target) { switch(target) {' + ''.join(f'case {address:#x}u: return {name!r};'.replace(chr(39),chr(34)) for address,name in fixture_imports.items()) + 'default: return NULL; } }']

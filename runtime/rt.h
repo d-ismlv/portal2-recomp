@@ -27,6 +27,7 @@ typedef struct CPU {
     uint32_t mxcsr;
     XMM xmm[8];
     uint32_t tid;         // index du thread invité
+    uint64_t mm[8];       // MMX : registres distincts de st[] (x87 en double, voir float_lift.py)
 } CPU;
 
 extern uint8_t *M;   // base hôte de l'espace d'adressage invité (4 Go réservés)
@@ -35,6 +36,10 @@ typedef void (*gfn)(CPU *);
 void rt_dispatch(CPU *c, uint32_t target);                       // appelle le code invité à target
 __attribute__((noreturn)) void rt_trap(CPU *c, uint32_t pc, const char *why);
 void rt_div32(CPU *c, uint32_t divisor, int is_signed, uint32_t pc);
+void rt_div_narrow(CPU *c, uint32_t divisor, int width, int is_signed, uint32_t pc);  // DIV/IDIV 8 et 16 bits
+void rt_fprem(CPU *c, int ieee);                       // FPREM (0) / FPREM1 (1), bits C0-C3
+double rt_load_extended(uint32_t address);             // flottant x87 80 bits -> double
+void rt_store_extended(uint32_t address, double value);
 double rt_sse_round(CPU *c, double value);
 double rt_x87_round(CPU *c, double value);
 void rt_cpu_reset(CPU *c);
@@ -156,7 +161,7 @@ static inline int cond(const FL *f, int cc) {
 }
 // Comparaison scalaire SSE (comisd/ucomisd) : ZF, PF, CF ; OF=SF=0.
 static inline void f_comi(FL *f, double a, double b) {
-    f->of = f->sf = 0;
+    f->of = f->sf = f->af = 0;
     if (a != a || b != b) { f->zf = 1; f->cf = 1; f->pf = 0; }      // non ordonné : PF=1
     else { f->zf = a == b; f->cf = a < b; f->pf = 1; }               // PF=0
 }

@@ -42,7 +42,7 @@ uint64_t rt_rdtsc(void) {
 
 // Convert the runtime's binary64 x87 approximation to the architectural
 // 80-bit storage format, including subnormals, infinities and NaNs.
-static void store_extended(uint32_t address, double value) {
+void rt_store_extended(uint32_t address, double value) {
     uint64_t bits; memcpy(&bits, &value, 8);
     uint64_t fraction = bits & UINT64_C(0x000fffffffffffff), mantissa = 0;
     uint16_t exponent = (uint16_t)((bits >> 52) & 0x7ff);
@@ -70,7 +70,7 @@ void rt_fxsave(CPU *c, uint32_t address) {
     W32(address + 24, c->mxcsr);
     W32(address + 28, 0x0000ffffu);
     for (unsigned i = 0; i < 8; ++i) {
-        store_extended(address + 32 + 16 * i, c->st[(c->ftop + i) & 7]);
+        rt_store_extended(address + 32 + 16 * i, c->st[(c->ftop + i) & 7]);
         WX(address + 160 + 16 * i, c->xmm[i]);
     }
 }
@@ -112,5 +112,68 @@ double rt_sse_round(CPU *c, double value) {
     case 2: return ceil(value);
     case 3: return trunc(value);
     default: return nearbyint(value);
+    }
+}
+
+// Inverse of rt_store_extended. Rounds the 64-bit significand to binary64
+// (the documented precision limit of the x87 model); keeps NaN payload bits.
+double rt_load_extended(uint32_t address) {
+    uint64_t mantissa = R64(address);
+    uint16_t top = R16(address + 8);
+    int negative = top >> 15;
+    unsigned exponent = top & 0x7fffu;
+    double value;
+    if (exponent == 0x7fff) {
+        uint64_t fraction = mantissa & UINT64_C(0x7fffffffffffffff);
+        uint64_t bits = UINT64_C(0x7ff0000000000000) | (fraction >> 11);
+        if (fraction && !(fraction >> 11)) bits |= 1;   // keep it a NaN
+        memcpy(&value, &bits, 8);
+    } else {
+        int scale = (exponent ? (int)exponent : 1) - 16383 - 63;
+        value = ldexp((double)mantissa, scale);
+    }
+    return negative ? -value : value;
+}
+
+void rt_fprem(CPU *c, int ieee) {
+    double a = ST(0), b = ST(1);
+    c->fsw &= (uint16_t)~0x4700u;                        // C0, C1, C2, C3
+    if (isnan(a) || isnan(b) || isinf(a) || b == 0) { ST(0) = NAN; return; }
+    if (isinf(b)) return;                                // ST(0) unchanged, quotient 0
+    int quotient;
+    double result;
+    if (ieee) {
+        result = remquo(a, b, &quotient);
+        if (quotient < 0) quotient = -quotient;
+    } else {
+        double magnitude = remquo(fabs(a), fabs(b), &quotient);
+        if (magnitude < 0) { magnitude += fabs(b); --quotient; }
+        result = copysign(magnitude, a);
+    }
+    unsigned q = (unsigned)quotient & 7u;
+    c->fsw |= (uint16_t)(((q >> 2) & 1u) << 8 | (q & 1u) << 14 | ((q >> 1) & 1u) << 9);
+    ST(0) = result;
+}
+
+void rt_div_narrow(CPU *c, uint32_t divisor, int width, int is_signed, uint32_t pc) {
+    uint32_t mask = width == 8 ? 0xffu : 0xffffu;
+    divisor &= mask;
+    if (!divisor) rt_trap(c, pc, "integer divide by zero");
+    uint32_t dividend = width == 8 ? (c->eax & 0xffffu) : (((c->edx & 0xffffu) << 16) | (c->eax & 0xffffu));
+    uint32_t quotient, remainder;
+    if (is_signed) {
+        int32_t lhs = (int32_t)sx(dividend, width * 2), rhs = (int32_t)sx(divisor, width);
+        int32_t q = lhs / rhs;
+        int32_t limit = width == 8 ? 127 : 32767;
+        if (q > limit || q < -limit - 1) rt_trap(c, pc, "integer quotient overflow");
+        quotient = (uint32_t)q & mask; remainder = (uint32_t)(lhs % rhs) & mask;
+    } else {
+        if (dividend / divisor > mask) rt_trap(c, pc, "integer quotient overflow");
+        quotient = dividend / divisor; remainder = dividend % divisor;
+    }
+    if (width == 8) c->eax = (c->eax & 0xffff0000u) | (remainder << 8) | quotient;
+    else {
+        c->eax = (c->eax & 0xffff0000u) | quotient;
+        c->edx = (c->edx & 0xffff0000u) | remainder;
     }
 }

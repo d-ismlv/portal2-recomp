@@ -103,7 +103,7 @@ class Operand:
 
 
 def disassemble(image, base, objdump):
-    result = subprocess.run([objdump, '-d', '--x86-asm-syntax=intel',
+    result = subprocess.run([objdump, '-d', '-z', '--x86-asm-syntax=intel',
                              f'--adjust-vma={base:#x}', str(image)],
                             check=True, capture_output=True, text=True)
     insns = {}
@@ -178,6 +178,12 @@ def translate(pc, insn, entries=frozenset(), callees=None):
     string = string_instruction(op, args, nxt)
     if string is not None:
         return string
+    if op in ('rep', 'repz', 'repe') and args == 'ret':
+        op, args = 'ret', ''  # AMD branch-predictor idiom: REP is ignored on RET
+    if op.startswith('prefetch') or op in ('lfence', 'sfence', 'mfence'):
+        # Hints and fences: guest instructions are serialised on one logical CPU.
+        fence = '' if op.startswith('prefetch') else '__atomic_thread_fence(__ATOMIC_SEQ_CST); '
+        return fence + end, [nxt]
     if op == 'ret':
         adjustment = int(args, 0) if args else 0
         if not 0 <= adjustment <= 65535:
@@ -225,6 +231,45 @@ def translate(pc, insn, entries=frozenset(), callees=None):
         code = '{ uint64_t ticks = rt_rdtsc(); c->eax = (uint32_t)ticks; c->edx = (uint32_t)(ticks >> 32); }'
     elif op == 'cdq' and not operands:
         code = 'c->edx = 0u - (c->eax >> 31);'
+    elif op == 'cbw' and not operands:
+        code = 'c->eax = (c->eax & 0xffff0000u) | (sx(c->eax & 0xffu, 8) & 0xffffu);'
+    elif op == 'cwd' and not operands:
+        code = 'c->edx = (c->edx & 0xffff0000u) | ((c->eax & 0x8000u) ? 0xffffu : 0u);'
+    elif op == 'sahf' and not operands:
+        code = ('a = c->eax >> 8; f.cf = a & 1; f.pf = (a >> 2) & 1 ? 0 : 1; f.af = (a >> 4) & 1; '
+                'f.zf = (a >> 6) & 1; f.sf = (a >> 7) & 1;')
+    elif op == 'lahf' and not operands:
+        code = 'c->eax = (c->eax & 0xffff00ffu) | ((get_eflags(c, &f) & 0xd5u) | 2u) << 8;'
+    elif op in ('bt', 'bts', 'btr', 'btc') and len(operands) == 2 and operands[0].width in (16, 32):
+        base, index = operands
+        n = base.width
+        update = {'bt': None, 'bts': 'a | mask', 'btr': 'a & ~mask', 'btc': 'a ^ mask'}[op]
+        if base.addr is not None and index.reg:
+            # Bit-string form: a register offset may address any byte (signed).
+            offset = f'(uint32_t)((int32_t)sx({index.read()}, {index.width}) >> {5 if n == 32 else 4}) * {n // 8}u'
+            location = f'(uint32_t)({base.addr} + {offset})'
+            store = f'W{n}(address, {update});' if update else ''
+            code = (f'{{ uint32_t address = {location}; uint32_t mask = 1u << ({index.read()} & {n - 1}u); '
+                    f'a = R{n}(address); f.cf = (a & mask) != 0; {store} }}')
+        else:
+            code = (f'{{ uint32_t mask = 1u << ({index.read()} & {n - 1}u); a = {base.read()}; '
+                    f'f.cf = (a & mask) != 0; {base.write(update) if update else ""} }}')
+    elif op in ('mul', 'imul') and len(operands) == 1 and operands[0].width in (8, 16):
+        n = operands[0].width
+        src = operands[0].read()
+        if n == 8:
+            value = (f'(uint32_t)((c->eax & 0xffu) * {src})' if op == 'mul'
+                     else f'(uint32_t)((int32_t)(int8_t)(c->eax & 0xffu) * (int8_t){src})')
+            code = (f'r = {value} & 0xffffu; c->eax = (c->eax & 0xffff0000u) | r; '
+                    + ('f.cf = f.of = (r >> 8) != 0;' if op == 'mul' else 'f.cf = f.of = r != (sx(r & 0xffu, 8) & 0xffffu);'))
+        else:
+            value = (f'(uint32_t)((c->eax & 0xffffu) * {src})' if op == 'mul'
+                     else f'(uint32_t)((int32_t)(int16_t)(c->eax & 0xffffu) * (int16_t){src})')
+            code = (f'r = {value}; c->eax = (c->eax & 0xffff0000u) | (r & 0xffffu); '
+                    'c->edx = (c->edx & 0xffff0000u) | (r >> 16); '
+                    + ('f.cf = f.of = (r >> 16) != 0;' if op == 'mul' else 'f.cf = f.of = r != sx(r & 0xffffu, 16);'))
+    elif op in ('div', 'idiv') and len(operands) == 1 and operands[0].width in (8, 16):
+        code = f'rt_div_narrow(c, {operands[0].read()}, {operands[0].width}, {int(op == "idiv")}, {pc:#x}u);'
     elif op == 'cwde' and not operands:
         code = 'c->eax = sx(c->eax & 0xffffu, 16);'
     elif op == 'fxsave' and len(operands) == 1 and operands[0].addr:
@@ -497,7 +542,7 @@ def module_instructions(mod, objdump, disasm_cache=None):
     cache_path = None
     if disasm_cache is not None:
         tool = Path(shutil.which(objdump) or objdump).resolve()
-        identity = (f'parser-v1:{mod["base"]}:{tool}:'
+        identity = (f'parser-v2:{mod["base"]}:{tool}:'
                     f'{tool.stat().st_mtime_ns}:{tool.stat().st_size}').encode()
         digest = hashlib.sha256(identity + Path(mod['image']).read_bytes()).hexdigest()
         cache_path = Path(disasm_cache) / (digest + '.json')
