@@ -414,8 +414,13 @@ int rt_libc_shim(CPU *c, const char *name) {
             else file = virtual_cpuinfo();
         } else {
             int writing = mode[0]=='w' || mode[0]=='a' || strchr(mode,'+');
-            const char *resolved=writing?rt_write_path(path,mode[0]!='w'):rt_read_path(path);
-            file=resolved?fopen(resolved,mode):NULL;
+            // Lecture d'un fichier que le cache sait absent : ENOENT sans fopen
+            // hôte (le moteur sonde chaque dossier de recherche, ~110 fois/s).
+            if (!writing && rt_access_cached(path, F_OK) == -1 && errno == ENOENT) file = NULL;
+            else {
+                const char *resolved=writing?rt_write_path(path,mode[0]!='w'):rt_read_path(path);
+                file=resolved?fopen(resolved,mode):NULL;
+            }
         }
         if (!file) { save_errno(c); c->eax = 0; }
         else {
@@ -493,6 +498,9 @@ int rt_libc_shim(CPU *c, const char *name) {
         if (flags & 0x80000) native |= O_CLOEXEC;
         uint32_t supported = 3u|0x40|0x80|0x100|0x200|0x400|0x800|0x1000|0x8000|0x10000|0x20000|0x80000|0x100000;
         if (flags & ~supported) { errno = ENOTSUP; save_errno(c); c->eax = UINT32_MAX; return 1; }
+        if (!(flags & (3u | 0x40)) && rt_access_cached(path, F_OK) == -1 && errno == ENOENT) {
+            save_errno(c); c->eax = UINT32_MAX; return 1;   // lecture d'un absent connu : ENOENT direct
+        }
         if ((flags & 0x40) && strstr(name, "_2")) rt_trap(c,c->eip,"invalid fortified open flags");
         mode_t mode = flags & 0x40 ? (mode_t)argument(c, 2) : 0;
         if((flags & 0xc0)==0xc0) {

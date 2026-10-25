@@ -599,6 +599,8 @@ RT_CHECK(posix_access_cache_follows_guest_writes) {
     assert(rt_access_cached(parent, F_OK) == 0 && rt_access_cached("/", R_OK) == 0);   // parents de la racine
     assert(call("access", 2, gstr(game_path("absent.cfg")), 0) == UINT32_MAX && guest_errno() == 2);
     assert(call("access", 2, gstr(game_path("absent.cfg")), 4) == UINT32_MAX);   // servi par le cache
+    assert(call("fopen", 2, gstr(game_path("absent.cfg")), gstr("rb")) == 0 && guest_errno() == 2);
+    assert(call("open", 2, gstr(game_path("absent.cfg")), 0) == UINT32_MAX && guest_errno() == 2);
     uint32_t file = call("fopen", 2, gstr(game_path("absent.cfg")), gstr("w"));
     assert(file && call("fclose", 1, file) == 0);
     assert(call("access", 2, gstr(game_path("absent.cfg")), 0) == 0);           // créé : visible aussitôt

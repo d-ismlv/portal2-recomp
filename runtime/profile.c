@@ -14,7 +14,8 @@
 #include <unistd.h>
 
 #define SLOTS 65536u
-typedef struct { uintptr_t pc, caller, caller2; int main; } Key;
+#define DEPTH 12
+typedef struct { uintptr_t pc, caller, caller2; int main; uintptr_t chain[DEPTH]; } Key;
 static Key keys[SLOTS];
 static uint32_t used[SLOTS];   // 0 libre, 1 en cours, 2 prêt (accès __atomic)
 static _Atomic uint32_t hits[SLOTS];
@@ -38,6 +39,15 @@ static void tick(int signal, siginfo_t *info, void *context) {
 #else
     (void)context;
 #endif
+    // Chaîne de cadres (pointeur de cadre) pour retrouver le premier cadre de
+    // l'exécutable (pont GL/libc, fonction générée) sous une bibliothèque.
+    uintptr_t frame = (uintptr_t)uc->uc_mcontext->__ss.__fp;
+    for (int d = 0; d < DEPTH && frame && !(frame & 7); ++d) {
+        uintptr_t next = ((uintptr_t *)frame)[0];
+        key.chain[d] = ((uintptr_t *)frame)[1];
+        if (next <= frame || next - frame > (1u << 24)) break;
+        frame = next;
+    }
     key.main = pthread_main_np();
     ++total;
     uint32_t h = (uint32_t)(((key.pc >> 2) ^ (key.caller * 31) ^ (key.caller2 * 7) ^ (uintptr_t)key.main) * 2654435761u) & (SLOTS - 1);
@@ -75,7 +85,17 @@ static void dump_section(FILE *out, int main_only, int with_callers) {
         if (main_only && !keys[i].main) continue;
         section += hits[i];
         char name[512];
-        if (with_callers) snprintf(name, sizeof(name), "%s <- %s <- %s", symbol(keys[i].pc), symbol(keys[i].caller), symbol(keys[i].caller2));
+        if (with_callers == 2) {
+            // Feuille, puis premier cadre de l'exécutable principal dans la chaîne.
+            const char *own = "?";
+            Dl_info self, where;
+            dladdr((void *)&dump_section, &self);
+            for (int d = 0; d < DEPTH && keys[i].chain[d]; ++d)
+                if (dladdr((void *)keys[i].chain[d], &where) && where.dli_fbase == self.dli_fbase && where.dli_sname) {
+                    own = where.dli_sname; break;
+                }
+            snprintf(name, sizeof(name), "%s ... %s", symbol(keys[i].pc), own);
+        } else if (with_callers) snprintf(name, sizeof(name), "%s <- %s <- %s", symbol(keys[i].pc), symbol(keys[i].caller), symbol(keys[i].caller2));
         else snprintf(name, sizeof(name), "%s", symbol(keys[i].pc));
         size_t k = 0;
         while (k < n && strcmp(names[k], name)) ++k;
@@ -84,7 +104,7 @@ static void dump_section(FILE *out, int main_only, int with_callers) {
     }
     qsort(entries, n, sizeof(*entries), by_count);
     fprintf(out, "== %s, %s : %llu échantillons\n", main_only ? "thread principal" : "tous threads",
-            with_callers ? "avec appelants" : "par symbole", (unsigned long long)section);
+            with_callers == 2 ? "feuille ... premier cadre de l'exécutable" : with_callers ? "avec appelants" : "par symbole", (unsigned long long)section);
     for (size_t k = 0; k < n && k < 60; ++k)
         fprintf(out, "%6.2f%% %s\n", 100.0 * (double)entries[k].count / (double)(section ? section : 1), entries[k].name);
     free(entries); free(names);
@@ -98,6 +118,7 @@ static void dump(void) {
     fprintf(out, "samples %llu (dropped %llu)\n", (unsigned long long)total, (unsigned long long)dropped);
     dump_section(out, 1, 0);
     dump_section(out, 1, 1);
+    dump_section(out, 1, 2);
     dump_section(out, 0, 0);
     dump_section(out, 0, 1);
     fclose(out);
