@@ -1,4 +1,8 @@
 #include "posix.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+const char *rt_ios_case_path(const char *canonical, size_t trusted);
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <stdio.h>
@@ -88,6 +92,12 @@ int rt_paths_init(const char *game,const char *linux,const char *user) {
     if(mkdir(user_root,0755) && errno!=EEXIST)return -1;
     const char *roots[3]={game_root,linux_root,user_root};
     for(int i=0;i<3;++i)insensitive[i]=pathconf(roots[i],_PC_CASE_SENSITIVE)==0;
+#if TARGET_OS_IPHONE
+    // iOS compare la casse même sur un volume insensible (bac à sable) : les
+    // variantes du correcteur de casse de Source sont résolues ici et par
+    // rt_ios_case_path (runtime/ios/case_path.c).
+    for(int i=0;i<3;++i)insensitive[i]=1;
+#endif
     return 0;
 }
 // Le répertoire des marques de suppression n'existe pas dans la vue invitée.
@@ -100,7 +110,13 @@ const char *rt_read_path(const char *path) {
     if(rt_is_proc_path(path))return rt_proc_path(path);   // fichiers /proc générés (procfs.c)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
-    if(!within(canonical,game_root))return path;
+    if(!within(canonical,game_root)) {
+#if TARGET_OS_IPHONE
+        if(within(canonical,linux_root))return rt_ios_case_path(canonical,strlen(linux_root));
+        if(within(canonical,user_root))return rt_ios_case_path(canonical,strlen(user_root));
+#endif
+        return path;
+    }
     const char *relative=canonical+strlen(game_root); while(*relative=='/')++relative;
     if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer();
@@ -122,7 +138,11 @@ const char *rt_read_path(const char *path) {
         if(count>=0 && count<PATH_MAX && !stat(result,&info))return result;
     }
     if(rt_path_windows_binary(relative)){errno=ENOENT;return NULL;}   // binaire Windows : absent sous Linux
+#if TARGET_OS_IPHONE
+    return rt_ios_case_path(canonical,strlen(game_root));
+#else
     return path;
+#endif
 }
 #define WHITEOUTS RT_WHITEOUTS
 static _Thread_local char parent_buffer[PATH_MAX];
@@ -250,7 +270,13 @@ static const char *write_path(const char *path,int preserve_existing,int follow_
     ++generation;   // toute écriture invalide les caches de lecture (listes de dossiers)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
-    if(!within(canonical,game_root))return path;
+    if(!within(canonical,game_root)) {
+#if TARGET_OS_IPHONE
+        if(within(canonical,linux_root))return rt_ios_case_path(canonical,strlen(linux_root));
+        if(within(canonical,user_root))return rt_ios_case_path(canonical,strlen(user_root));
+#endif
+        return path;
+    }
     const char *relative=canonical+strlen(game_root); while(*relative=='/')++relative;
     if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer(); int count=snprintf(result,PATH_MAX,"%s/%s",user_root,relative);

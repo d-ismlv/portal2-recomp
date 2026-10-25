@@ -72,6 +72,10 @@ EXPORT bool SteamAPI_ManualDispatch_GetAPICallResult(int32_t pipe, uint64_t call
     (void)pipe; (void)call; (void)out; (void)size; (void)expected; if (failed) *failed = true; return false;
 }
 
+// ---- crochets d'avertissement (appelés par steam.c hors code généré) ----
+EXPORT void SteamAPI_ISteamClient_SetWarningMessageHook(void *self, void *hook) { (void)self; (void)hook; }
+EXPORT void SteamAPI_ISteamUtils_SetWarningMessageHook(void *self, void *hook) { (void)self; (void)hook; }
+
 // ---- accès aux interfaces ----
 // SteamInternal_ContextInit(ctx) : ctx = {pFn, compteur, contexte} ; pFn
 // remplit le contexte quand le compteur global a changé.

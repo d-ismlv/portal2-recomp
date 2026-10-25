@@ -3,6 +3,7 @@
 // invité et la lecture des données du jeu. Résultats sur la sortie standard.
 #include <SDL.h>
 #include <dlfcn.h>
+#include <errno.h>
 #include <stdio.h>
 #include <sys/mman.h>
 #include <sys/stat.h>
@@ -33,6 +34,14 @@ int main(int argc, char **argv) {
     struct stat st;
     if (data) printf("probe: game file %s (%lld bytes)\n", stat(data, &st) ? "UNREADABLE" : "ok",
                      data && !stat(data, &st) ? (long long)st.st_size : -1ll);
+    if (data) {
+        FILE *f = fopen(data, "rb");
+        unsigned char head[4] = {0};
+        size_t n = f ? fread(head, 1, 4, f) : 0;
+        printf("probe: fopen %s errno=%d, read %zu bytes %02x%02x%02x%02x\n", f ? "ok" : "FAILED", f ? 0 : errno, n,
+               head[0], head[1], head[2], head[3]);
+        if (f) fclose(f);
+    }
     // 3. Fenêtre et contexte OpenGL ES 2 par SDL, puis gl4es par-dessus.
     if (SDL_Init(SDL_INIT_VIDEO)) { printf("probe: SDL_Init failed: %s\n", SDL_GetError()); return 1; }
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -69,6 +78,16 @@ int main(int argc, char **argv) {
     ((read_pixels_fn)gl4es_GetProcAddress("glReadPixels"))(fb_w / 2, fb_h / 2, 1, 1, 0x1908, 0x1401, pixel);
     printf("probe: center pixel %u %u %u %u (expected 255 0 0 255)\n", pixel[0], pixel[1], pixel[2], pixel[3]);
     SDL_GL_SwapWindow(window);
+    // P2_PROBE_HOLD=n : garder l'image n secondes (capture d'écran du simulateur).
+    const char *hold = getenv("P2_PROBE_HOLD");
+    for (int i = 0; hold && i < atoi(hold) * 30; ++i) {
+        SDL_PumpEvents();
+        ((clear_fn)gl4es_GetProcAddress("glClear"))(0x4000);
+        begin(0x0004); color(1, 0, 0); vertex(-1, -1); vertex(3, -1); vertex(-1, 3);
+        ((end_fn)gl4es_GetProcAddress("glEnd"))();
+        SDL_GL_SwapWindow(window);
+        SDL_Delay(33);
+    }
     // 5. Fonctions GL demandées par togl (liste du pont, un nom par ligne).
     const char *names = getenv("P2_PROBE_GL_NAMES");
     FILE *list = names ? fopen(names, "r") : NULL;

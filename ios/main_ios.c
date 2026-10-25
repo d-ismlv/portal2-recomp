@@ -11,7 +11,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/resource.h>
 #include <sys/stat.h>
+#include <unistd.h>
 
 int p2_main(int argc, char **argv);
 
@@ -32,6 +34,21 @@ static void read_launch_file(const char *bundle) {
 }
 
 int main(int argc, char **argv) {
+    // Journal fiable : la console de simctl perd la fin quand le processus meurt.
+    const char *log = getenv("P2_LOG_FILE");
+    if (log && *log && freopen(log, "w", stderr)) {
+        dup2(fileno(stderr), fileno(stdout));
+        setvbuf(stderr, NULL, _IONBF, 0);
+    }
+    // Le moteur garde ouvertes ses archives VPK (172 pour Portal 2) : la limite
+    // de 256 descripteurs d'une app iOS ne suffit pas (ReadFile échoue alors).
+    struct rlimit files;
+    if (!getrlimit(RLIMIT_NOFILE, &files)) {
+        rlim_t wanted = files.rlim_max == RLIM_INFINITY || files.rlim_max > 10240 ? 10240 : files.rlim_max;
+        if (files.rlim_cur < wanted) { files.rlim_cur = wanted; setrlimit(RLIMIT_NOFILE, &files); }
+        getrlimit(RLIMIT_NOFILE, &files);
+        fprintf(stderr, "[ios] descripteurs de fichiers : %llu\n", (unsigned long long)files.rlim_cur);
+    }
     char exe[PATH_MAX], bundle[PATH_MAX];
     uint32_t size = sizeof(exe);
     if (_NSGetExecutablePath(exe, &size)) return 2;
