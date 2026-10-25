@@ -1,14 +1,25 @@
 #!/usr/bin/env python3
-"""Build the real Linux launcher plus foundation constructors as native ARM64.
+"""Build the real Linux game as one native ARM64 executable.
 
-Additional module/indirect roots can be persisted in config/game-roots.json.
+By default every known function of every prepared module is a root (symbols,
+exports, init/fini arrays, code pointers in data, see lift.module_roots), in
+addition to `main`, the foundation constructors and config/game-roots.json.
+The C is generated in files grouped by guest address (lift.generate_sharded),
+compiled in parallel, and each object is cached by the hash of its source,
+included headers, compiler and flags: an unchanged file is never recompiled.
 Generated code is AOT C, with traps for instructions/imports not yet ported.
 """
 import argparse
+from concurrent.futures import ThreadPoolExecutor
+import hashlib
 import json
+import os
 from pathlib import Path
+import re
+import shutil
 import subprocess
 import sys
+import time
 import lift
 
 # Identique à HOST_CFLAGS/HOST_LIBS du Makefile.
@@ -16,6 +27,10 @@ HOST_CFLAGS = ['-I/opt/homebrew/include', '-I/opt/homebrew/include/freetype2', '
                '-DOPENAL_DEPRECATED=', '-DAL_SILENCE_DEPRECATION']
 HOST_LIBS = ['-L/opt/homebrew/lib', '-lSDL2', '-lfreetype', '-lfontconfig', '-liconv',
              '-framework', 'OpenGL', '-framework', 'OpenAL']
+WARNINGS = ['-Wall', '-Wextra', '-Werror']
+DEBUG = {'full': '-g', 'lines': '-gline-tables-only', 'none': '-g0'}
+TOOLS = ['tools/lift.py', 'tools/float_lift.py', 'tools/registry.py', 'tools/build_game.py']
+KEEP_CONFIGURATIONS = 2   # objets conservés pour les deux derniers jeux d'options
 
 
 def roots(layout):
@@ -29,23 +44,207 @@ def roots(layout):
     return list(dict.fromkeys(result))
 
 
+def digest(*parts):
+    h = hashlib.sha256()
+    for part in parts:
+        h.update(part if isinstance(part, bytes) else str(part).encode())
+        h.update(b'\0')
+    return h.hexdigest()
+
+
+def generation_key(layout_path, layout, specs, whole_game):
+    images = [(m['image'], Path(m['image']).stat().st_size, Path(m['image']).stat().st_mtime_ns)
+              for m in layout['modules']]
+    objdump = shutil.which('objdump') or 'objdump'
+    return digest(*(Path(t).read_bytes() for t in TOOLS[:3]), layout_path.read_bytes(), images, specs,
+                  whole_game, objdump, Path(objdump).stat().st_mtime_ns if Path(objdump).exists() else 0,
+                  lift.SHARD_BITS, 'v1')
+
+
+def generate(args, layout, specs):
+    out = Path('build/game/gen')
+    manifest_path = out / 'manifest.json'
+    key = generation_key(args.layout, layout, specs, args.all)
+    if manifest_path.exists():
+        manifest = json.loads(manifest_path.read_text())
+        sources = out / 'src'
+        if manifest.get('key') == key and all((sources / n).exists() for n in manifest['shards']) \
+                and (sources / 'dispatch.c').exists():
+            print(f'generated C up to date: {manifest["functions"]} functions, '
+                  f'{manifest["instructions"]} instructions, {len(manifest["shards"])} files')
+            return manifest, 0.0
+    started = time.time()
+    manifest = lift.generate_sharded(layout, specs, args.all, 'objdump', Path('build/disasm-cache'), out, args.jobs)
+    manifest['key'] = key
+    manifest_path.write_text(json.dumps(manifest))
+    return manifest, time.time() - started
+
+
+INCLUDE = re.compile(rb'^\s*#\s*include\s+"([^"]+)"', re.M)
+
+
+class SourceIndex:
+    """Content digest and quoted includes of each file, recomputed only when
+    its size or modification time changes (rereading ~1 GB of generated C at
+    every build would cost seconds)."""
+
+    def __init__(self, path):
+        self.path = path
+        self.known = json.loads(path.read_text()) if path.exists() else {}
+        self.current = {}
+
+    def entry(self, path):
+        key = str(path)
+        if key not in self.current:
+            info = Path(path).stat()
+            stamp = f'{info.st_size}:{info.st_mtime_ns}'
+            cached = self.known.get(key)
+            if not cached or cached[0] != stamp:
+                data = Path(path).read_bytes()
+                cached = [stamp, digest(data), [n.decode() for n in INCLUDE.findall(data)]]
+            self.current[key] = cached
+        return self.current[key]
+
+    def closure(self, source, directories):
+        """Digest of the source and of every quoted include reachable from it."""
+        seen, pending = {}, [Path(source)]
+        while pending:
+            path = pending.pop()
+            _, value, includes = self.entry(path)
+            seen[str(path)] = value
+            for name in includes:
+                for directory in [path.parent, *directories]:
+                    candidate = (directory / name).resolve()
+                    if candidate.exists():
+                        if str(candidate) not in seen:
+                            pending.append(candidate)
+                        break
+        return [seen.pop(str(Path(source)))] + [f'{p}:{v}' for p, v in sorted(seen.items())]
+
+    def save(self):
+        self.known.update(self.current)
+        self.path.write_text(json.dumps(self.known))
+
+
+def compile_units(units, cache, jobs, compiler_identity):
+    """units: [(source, flags)] -> ([object], compiled count, cpu seconds)."""
+    cache.mkdir(parents=True, exist_ok=True)
+    index = SourceIndex(cache / 'source-digests.json')
+    planned, objects = [], []
+    for source, flags in units:
+        key = digest(compiler_identity, flags, *index.closure(source, [Path('runtime')]))
+        obj = cache / f'{key}.o'
+        objects.append(obj)
+        if not obj.exists():
+            planned.append((source, flags, obj))
+    index.save()
+    # Les plus gros d'abord : le pool reste occupé jusqu'au bout.
+    planned.sort(key=lambda item: -Path(item[0]).stat().st_size)
+
+    def run(item):
+        source, flags, obj = item
+        temporary = obj.with_name(f'.{obj.name}.{os.getpid()}.tmp')
+        started = time.time()
+        result = subprocess.run(['clang', '-c', *flags, str(source), '-o', str(temporary)],
+                                capture_output=True, text=True)
+        if result.returncode:
+            temporary.unlink(missing_ok=True)
+            return source, result.stderr, time.time() - started
+        os.replace(temporary, obj)
+        return source, None, time.time() - started
+
+    seconds, failures = 0.0, []
+    with ThreadPoolExecutor(max_workers=jobs) as pool:
+        for source, error, elapsed in pool.map(run, planned):
+            seconds += elapsed
+            if error:
+                failures.append(f'{source}:\n{error[:4000]}')
+    if failures:
+        raise SystemExit('compilation failed:\n' + '\n'.join(failures[:5]))
+    return objects, len(planned), seconds
+
+
+def collect_garbage(cache, configuration, objects):
+    """Keep the objects of the most recent option sets only (disk space)."""
+    manifests = cache / 'configurations.json'
+    known = json.loads(manifests.read_text()) if manifests.exists() else []
+    known = [k for k in known if k['configuration'] != configuration]
+    known.append(dict(configuration=configuration, objects=sorted(o.name for o in objects)))
+    known = known[-KEEP_CONFIGURATIONS:]
+    manifests.write_text(json.dumps(known))
+    live = {name for k in known for name in k['objects']}
+    removed = 0
+    for obj in cache.glob('*.o'):
+        if obj.name not in live:
+            removed += obj.stat().st_size
+            obj.unlink()
+    return removed
+
+
+def disk_usage(path):
+    return sum(p.stat().st_size for p in Path(path).rglob('*') if p.is_file())
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--layout', type=Path, default=Path('build/game/prep/layout.json'))
     parser.add_argument('--out', type=Path, default=Path('build/portal2-native'))
-    parser.add_argument('--opt', default='1', choices=['0', '1', '2', '3'])
+    parser.add_argument('--opt', default='1', choices=['0', '1', '2', '3'], help='generated code')
+    parser.add_argument('--runtime-opt', choices=['0', '1', '2', '3'], help='runtime and main (default: --opt)')
+    parser.add_argument('--debug', default='lines', choices=sorted(DEBUG),
+                        help='debug info of generated code (runtime is always -g)')
+    scope = parser.add_mutually_exclusive_group()
+    scope.add_argument('--all', dest='all', action='store_true', default=True,
+                       help='every known function of every module is a root (default)')
+    scope.add_argument('--roots-only', dest='all', action='store_false',
+                       help='only main, foundation constructors and config/game-roots.json')
+    parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
+    parser.add_argument('--stats', type=Path, default=Path('build/game/build-stats.json'))
     args = parser.parse_args()
+    sys.stdout.reconfigure(line_buffering=True)
+    started = time.time()
     layout = json.loads(args.layout.read_text())
     try:
-        code = lift.generate(layout, roots(layout), 'objdump', True, Path('build/disasm-cache'))
+        manifest, generation_time = generate(args, layout, roots(layout))
     except lift.Unsupported as exc:
         parser.exit(1, f'game lift: {exc}\n')
-    source = args.layout.parent.parent / 'game.c'
-    source.write_text(code)
-    runtime = sorted(str(p) for p in Path('runtime').glob('*.c'))
-    command = ['clang', f'-O{args.opt}', '-g', '-Wall', '-Wextra', '-Werror', '-Iruntime', *HOST_CFLAGS,
-               *runtime, str(source), 'src/main.c', *HOST_LIBS, '-o', str(args.out)]
-    subprocess.run(command, check=True)
+    imports = {item['addr']: item['name'] for item in layout['imports']}
+    unimplemented = sorted({imports[a] for a in manifest['used_imports']} - lift.SHIMS)
+    if unimplemented:
+        print('Runtime traps for unimplemented imports: ' + ', '.join(unimplemented))
+    identity = subprocess.run(['clang', '--version'], capture_output=True, text=True, check=True).stdout
+    runtime_flags = [f'-O{args.runtime_opt or args.opt}', '-g', *WARNINGS, '-Iruntime', *HOST_CFLAGS]
+    generated_flags = [f'-O{args.opt}', DEBUG[args.debug], *WARNINGS, '-Iruntime']
+    sources = Path('build/game/gen/src')
+    units = [(str(p), runtime_flags) for p in sorted(Path('runtime').glob('*.c'))]
+    units.append(('src/main.c', runtime_flags))
+    units += [(str(sources / name), generated_flags) for name in sorted(manifest['shards'])]
+    units.append((str(sources / 'dispatch.c'), generated_flags))
+    cache = Path('build/game/obj')
+    compile_started = time.time()
+    objects, compiled, cpu = compile_units(units, cache, args.jobs, identity)
+    compile_time = time.time() - compile_started
+    link_started = time.time()
+    response = Path('build/game/link.rsp')
+    response.write_text('\n'.join(str(o) for o in objects) + '\n')
+    temporary = args.out.with_name(f'.{args.out.name}.tmp')
+    subprocess.run(['clang', f'@{response}', *HOST_LIBS, '-o', str(temporary)], check=True)
+    os.replace(temporary, args.out)
+    link_time = time.time() - link_started
+    removed = collect_garbage(cache, digest(runtime_flags, generated_flags), objects)
+    stats = dict(functions=manifest['functions'], instructions=manifest['instructions'],
+                 roots=manifest['roots'], files=len(manifest['shards']) + 1, c_bytes=manifest['c_bytes'],
+                 generation_seconds=round(generation_time, 1), compiled_units=compiled, total_units=len(units),
+                 compile_seconds=round(compile_time, 1), compile_cpu_seconds=round(cpu, 1),
+                 link_seconds=round(link_time, 1), total_seconds=round(time.time() - started, 1),
+                 binary_bytes=args.out.stat().st_size, object_cache_bytes=disk_usage(cache),
+                 generated_source_bytes=disk_usage(sources), removed_object_bytes=removed,
+                 opt=args.opt, runtime_opt=args.runtime_opt or args.opt, debug=args.debug, whole_game=args.all)
+    args.stats.write_text(json.dumps(stats, indent=1) + '\n')
+    print(f'{compiled}/{len(units)} files compiled in {compile_time:.0f} s ({cpu:.0f} s CPU), '
+          f'link {link_time:.0f} s, total {stats["total_seconds"]:.0f} s; binary '
+          f'{stats["binary_bytes"] / 1e6:.0f} MB, objects {stats["object_cache_bytes"] / 1e9:.2f} GB, '
+          f'C {stats["generated_source_bytes"] / 1e9:.2f} GB')
 
 
 if __name__ == '__main__':
