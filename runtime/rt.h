@@ -259,10 +259,10 @@ int rt_futex(CPU *c,uint32_t address,uint32_t operation,uint32_t value,uint32_t 
 uint32_t rt_dynamic_import(const char *name);
 const char *rt_dynamic_import_name(uint32_t address);
 // Handles opaques pour les pointeurs hôtes (SDL_Window*, contexte GL, FT_Face...).
-// Le code invité ne doit jamais les déréférencer : la plage 0xe0000000 n'est
+// Le code invité ne doit jamais les déréférencer : la plage 0xe8000000 n'est
 // pas projetée, un accès invité y est une faute. `kind` est un identifiant non
 // nul choisi par chaque pont (par ex. un FOURCC) ; get/free vérifient le type.
-#define RT_HANDLE_BASE 0xe0000000u
+#define RT_HANDLE_BASE 0xe8000000u  // 0xe0000000 : données importées (elfprep SHIMDATA_BASE)
 #define RT_HANDLE_STRIDE 16u
 #define RT_HANDLE_LIMIT 0x800000u
 uint32_t rt_handle_new(void *host, uint32_t kind);

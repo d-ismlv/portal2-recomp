@@ -36,3 +36,10 @@ RT_CHECK(st0_return_helper) {
     rt_return_st0(c, 2.5);
     assert(ST(0) == 2.5);
 }
+
+RT_CHECK(handle_range_is_disjoint) {
+    // Données importées (stderr, timezone...) à 0xe0000000, imports statiques à 0xf0000000.
+    assert(RT_HANDLE_BASE >= 0xe0000000u + 0x1000000u);
+    assert((uint64_t)RT_HANDLE_BASE + (uint64_t)RT_HANDLE_LIMIT * RT_HANDLE_STRIDE <= 0xf0000000u);
+    assert(rt_standard_stream(2) < RT_HANDLE_BASE);
+}
