@@ -8,9 +8,10 @@
 // Une tape : poussée selon z (dos : vers l'utilisateur ; écran : à l'opposé)
 // ou selon y (tranche), à la position y de signe ry dans le repère de
 // l'appareil. CoreMotion rend l'opposé de l'accélération physique.
-// ring : vibration de la main qui suit la tape (g ; 30 Hz, amortie en 100 ms),
-// mesurée sur l'iPhone : le pic reste au-dessus de 35 % de son maximum 50 à 100 ms.
-typedef struct { double t; int ry; int axis; float accel, rot, ring; } Tap;
+// ring : vibration de la main qui suit la tape (g ; 30 Hz, amortie en
+// ring_tau, 100 ms par défaut), mesurée sur l'iPhone : le pic reste au-dessus
+// de 35 % de son maximum 50 à 100 ms.
+typedef struct { double t; int ry; int axis; float accel, rot, ring, ring_tau; } Tap;
 typedef struct {
     double rate, length;
     Tap taps[4]; int ntaps;
@@ -48,7 +49,8 @@ static Outcome play(const Scene *sc) {
             const Tap *p = &sc->taps[j];
             double x = t - 100 - p->t;
             float push = p->accel * half_sine(x, 0.020) - 0.3f * p->accel * half_sine(x - 0.020, 0.020);
-            if (x > 0.020) push += p->ring * (float)(exp(-(x - 0.020) / 0.100) * sin(2 * M_PI * 30 * (x - 0.020)));
+            double tau = p->ring_tau > 0 ? p->ring_tau : 0.100;
+            if (x > 0.020) push += p->ring * (float)(exp(-(x - 0.020) / tau) * sin(2 * M_PI * 30 * (x - 0.020)));
             s.a[p->axis] -= push;
             if (x >= 0) s.w[0] += p->ry * p->rot * (float)(x < 0.005 ? x / 0.005 : exp(-(x - 0.005) / 0.030));
         }
@@ -91,7 +93,7 @@ static Scene scene(double rate) {
 // Tape au dos du côté gauche (-1) ou droit (+1) de l'écran ; orient : +1 si
 // l'axe y de l'appareil pointe vers la droite de l'écran.
 static void back_tap(Scene *sc, double t, int screen_side) {
-    sc->taps[sc->ntaps++] = (Tap){t, screen_side * sc->orient, 2, 0.3f, 0.4f, 0};
+    sc->taps[sc->ntaps++] = (Tap){t, screen_side * sc->orient, 2, 0.3f, 0.4f, 0, 0};
 }
 static const double kRates[] = {100, 200};
 
@@ -127,7 +129,7 @@ RT_CHECK(backtap_side_tap_uses_lateral_acceleration) {
     for (int r = 0; r < 2; ++r) {
         // Tape sur la tranche gauche : poussée physique vers la droite (+y si orient = 1).
         Scene sc = scene(kRates[r]);
-        sc.taps[sc.ntaps++] = (Tap){1.0, 0, 1, 0.3f, 0, 0};
+        sc.taps[sc.ntaps++] = (Tap){1.0, 0, 1, 0.3f, 0, 0, 0};
         Outcome o = play(&sc);
         assert(o.accepted == 1 && o.side[0] == -1 && !strcmp(o.method[0], "latéral"));
         sc.params.lateral_sign = 0;
@@ -151,15 +153,45 @@ RT_CHECK(backtap_tap_with_hand_ringing_is_accepted) {
 
 // Tape forte (calibration) : la vibration de la main dépasse la poussée, le
 // maximum arrive 30 à 40 ms après le début ; la tape suivante, 0,45 s plus
-// tard, tombe encore dans cette vibration.
+// tard, tombe encore dans cette vibration (mesurée après les tapes de plus de
+// 0,5 g : 0,07 g de moyenne quadratique à 200-250 ms, 0,04 g à 250-300 ms).
 RT_CHECK(backtap_hard_taps_in_a_row_are_accepted) {
     for (int r = 0; r < 2; ++r) {
         Scene sc = scene(kRates[r]);
         back_tap(&sc, 1.0, -1); back_tap(&sc, 1.45, -1); back_tap(&sc, 1.9, 1);
-        for (int i = 0; i < 3; ++i) { sc.taps[i].accel = 0.4f; sc.taps[i].ring = 0.8f; }
+        for (int i = 0; i < 3; ++i) { sc.taps[i].accel = 0.4f; sc.taps[i].ring = 0.8f; sc.taps[i].ring_tau = 0.085f; }
         Outcome o = play(&sc);
         assert(o.reports == 3 && o.accepted == 3);
         assert(o.side[0] == -1 && o.side[1] == -1 && o.side[2] == 1);
+    }
+}
+
+// Frémissement (candidat faible) puis vraie tape 60 ms plus tard : la tape
+// prend la place du candidat faible au lieu d'être couverte par lui.
+RT_CHECK(backtap_tap_after_weak_blip_is_not_hidden) {
+    for (int r = 0; r < 2; ++r)
+        for (int side = -1; side <= 1; side += 2) {
+            Scene sc = scene(kRates[r]);
+            sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, 0.06f, 0, 0, 0};   // sous accel_min, au-dessus de sa moitié
+            back_tap(&sc, 1.06, side);
+            Outcome o = play(&sc);
+            assert(o.accepted == 1 && o.side[o.reports - 1] == side);
+        }
+}
+
+// Tapes à 0,28 s d’écart : la vibration de la première est encore dans la
+// fenêtre d'avant la seconde, mais elle est retombée (moins de 25 % du pic).
+RT_CHECK(backtap_quick_taps_whose_ringing_decays_are_accepted) {
+    for (int r = 0; r < 2; ++r) {
+        Scene sc = scene(kRates[r]);
+        back_tap(&sc, 1.0, 1); back_tap(&sc, 1.28, -1);
+        for (int i = 0; i < 2; ++i) { sc.taps[i].ring = 0.25f; sc.taps[i].ring_tau = 0.06f; }
+        Outcome o = play(&sc);
+        assert(o.accepted == 2 && o.side[0] == 1 && o.side[1] == -1);
+        for (int i = 0; i < 2; ++i) { sc.taps[i].ring = 0.6f; sc.taps[i].ring_tau = 1; }   // vibration qui ne retombe pas
+        o = play(&sc);
+        assert(o.accepted == 1 && o.side[0] == 1);   // la suite : agitation ou historique insuffisant
+        for (int i = 1; i < o.reports && i < 8; ++i) assert(o.reject[i]);
     }
 }
 
@@ -197,7 +229,7 @@ RT_CHECK(backtap_screen_touch_rejects_nearby_peak) {
     for (int r = 0; r < 2; ++r)
         for (int i = 0; i < 4; ++i) {
             Scene sc = scene(kRates[r]);
-            sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, -0.3f, 0.4f, 0};   // écran : poussée vers l'arrière
+            sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, -0.3f, 0.4f, 0, 0};   // écran : poussée vers l'arrière
             sc.touches[sc.ntouch++] = 1.0 + offsets[i];
             Outcome o = play(&sc);
             assert(o.reports == 1 && o.accepted == 0 && !strcmp(o.reject[0], "toucher à l'écran"));
@@ -264,12 +296,15 @@ RT_CHECK(backtap_motion_rejects) {
     assert(o.accepted == 0 && !strcmp(o.reject[0], "gravité qui change"));
     for (int r = 0; r < 2; ++r) {
         sc = scene(kRates[r]);
-        sc.wobble = 0.12f;    // geste lent : pas de candidat à lui seul, mais la tape est rejetée
+        sc.wobble = 0.12f;    // geste lent : rien à lui seul (au plus des candidats faibles), mais la tape est rejetée
         o = play(&sc);
-        assert(o.reports == 0);
+        assert(o.accepted == 0);
+        for (int i = 0; i < o.reports && i < 8; ++i) assert(o.weak[i]);
         back_tap(&sc, 1.0, 1);
         o = play(&sc);
-        assert(o.reports == 1 && o.accepted == 0 && !strcmp(o.reject[0], "agitation avant le pic"));
+        assert(o.reports >= 1 && o.accepted == 0);   // agitation, ou couverte par un candidat faible du geste
+        for (int i = 0; i < o.reports && i < 8; ++i)
+            assert(o.weak[i] || !strcmp(o.reject[i], "agitation avant le pic"));
     }
     sc = scene(100);
     sc.noise = 0.12f;     // marche : agitation continue
@@ -279,16 +314,36 @@ RT_CHECK(backtap_motion_rejects) {
     for (int i = 0; i < o.reports && i < 8; ++i) assert(o.reject[i]);
 }
 
-// Candidats sous les seuils : seulement avec log_factor < 1 (journal), sans
-// période réfractaire.
+// Candidats sous les seuils : signalés (journal), sans période réfractaire.
 RT_CHECK(backtap_weak_candidates_only_logged) {
     Scene sc = scene(200);
-    sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, 0.07f, 0.4f, 0};
+    sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, 0.04f, 0.4f, 0, 0};
+    sc.params.onset_factor = 1;
     Outcome o = play(&sc);
     assert(o.reports == 0);
-    sc.params.log_factor = 0.5f;
+    sc.params.onset_factor = 0.5f;
     back_tap(&sc, 1.12, -1);
     o = play(&sc);
     assert(o.reports == 2 && o.weak[0] && !strcmp(o.reject[0], "sous les seuils"));
     assert(o.accepted == 1 && o.side[1] == -1);
+}
+
+// Tape légère à gauche (calibration) : 0,07 à 0,10 g seulement, mais le
+// téléphone tourne de 0,4 à 0,7 rad/s : retenue par la voie gyroscope.
+RT_CHECK(backtap_light_tap_found_by_gyroscope) {
+    for (int r = 0; r < 2; ++r)
+        for (int side = -1; side <= 1; side += 2) {
+            Scene sc = scene(kRates[r]);
+            back_tap(&sc, 1.0, side);
+            sc.taps[0].accel = 0.07f; sc.taps[0].rot = 0.6f;
+            Outcome o = play(&sc);
+            assert(o.reports == 1 && o.accepted == 1 && o.side[0] == side);
+            sc.taps[0].rot = 0.15f;   // sans rotation franche : trop faible
+            o = play(&sc);
+            assert(o.accepted == 0);
+            // Candidat ouvert par la rotation seule : voie accélération hors d'atteinte.
+            sc.taps[0].rot = 0.6f; sc.params.accel_min = 1;
+            o = play(&sc);
+            assert(o.accepted == 1 && o.side[0] == side);
+        }
 }

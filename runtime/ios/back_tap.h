@@ -9,6 +9,11 @@ typedef struct {
     float accel_min;     // g : accélération utilisateur minimale au pic
     float jerk_min;      // g/s : secousse minimale (variation d'un échantillon au suivant)
     float rot_min;       // rad/s : rotation minimale autour de l'axe x pour décider le côté
+    // Voie gyroscope : tape légère (surtout à gauche) qui fait tourner le
+    // téléphone sans l'accélérer assez pour accel_min. gyro_rot_min > 10 la coupe.
+    float gyro_accel_min; // g : pic minimal d'accélération
+    float gyro_rot_min;   // rad/s : rotation minimale autour de x (écart à la moyenne d'avant)
+    float gyro_jerk_min;  // rad/s² : variation minimale de la rotation autour de x d'un échantillon au suivant
     float lateral_ratio; // tape latérale : part minimale de l'axe y dans le pic d'accélération
     int lateral_sign;    // tape latérale : 1 convention supposée, -1 inversée, 0 désactivée
     int invert;          // 1 : gauche et droite permutées
@@ -19,7 +24,7 @@ typedef struct {
     float flat_z;        // g : gravité selon z sous ce seuil = téléphone à plat, écran vers le haut (posé)
     float pre_rms_max;   // g : agitation maximale (moyenne quadratique) avant le pic
     float gravity_max;   // g : variation maximale de la gravité dans les 200 ms avant le pic
-    float log_factor;    // seuils de candidature multipliés par ce facteur (journal : < 1)
+    float onset_factor;  // candidats dès cette fraction des seuils (jugés ensuite aux seuils entiers)
 } rt_backtap_params;
 
 typedef struct {
@@ -40,11 +45,13 @@ typedef struct {
     float rise;            // s : du début du pic à son maximum (journal)
     float grav[3];         // g : gravité juste avant le pic (téléphone à plat : z ≈ ±1)
     float pre_rms;         // g : agitation avant le pic
+    float tail_rms;        // g : agitation dans les 50 ms d'avant, vibration de la tape d'avant comprise
     float gravity;         // g : variation de la gravité avant le pic
     double touch_dt;       // s : toucher le plus proche (t_toucher - t), 1e9 si aucun
     int orient;            // +1 : axe y de l'appareil vers la droite de l'écran, -1 : vers la gauche
     int side;              // -1 gauche (portail bleu), +1 droite (orange), 0 aucun
     const char *method;    // "rotation", "latéral" ou NULL
+    int gyro;              // retenu par la voie gyroscope seulement
     const char *reject;    // raison du rejet, NULL si accepté
     int weak;              // sous les seuils (candidat de journal seulement)
 } rt_backtap_report;
@@ -58,8 +65,10 @@ typedef struct {
     double touches[RT_BACKTAP_TOUCHES];   // derniers débuts et fins de toucher
     unsigned ntouch;
     double onset;                         // candidat en cours (0 : aucun)
+    int onset_strong;                     // il atteint les seuils entiers (sinon un pic plus tardif le remplace)
     double refractory_until;
-    double last_candidate;                // ses échantillons sont exclus de l'agitation suivante
+    double last_candidates[2];            // les deux derniers : leur vibration est exclue de l'agitation suivante
+    float last_peak;                      // son pic (g) : sa vibration doit s'être amortie
     double last_inactive;                 // dernier échantillon en menu (ses touchers échappent à la surcouche)
 } rt_backtap;
 

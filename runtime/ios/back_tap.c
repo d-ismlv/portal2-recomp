@@ -8,16 +8,22 @@
 //
 // Détection : un candidat commence quand l'accélération utilisateur dépasse
 // accel_min et que sa variation d'un échantillon au suivant (secousse)
-// dépasse jerk_min. Il est jugé DELAY plus tard, une fois connus son pic, sa
+// dépasse jerk_min, ou (voie gyroscope) quand la rotation varie brusquement
+// autour de x (gyro_jerk_min) avec un peu d'accélération (gyro_accel_min) ;
+// il est alors retenu si la secousse atteint jerk_min et la rotation autour
+// de x gyro_rot_min. Calibration : à
+// gauche, l'index tape près du bord et fait tourner le téléphone (0,4 à
+// 0,7 rad/s) en l'accélérant peu (0,07 à 0,10 g). Il est jugé DELAY plus tard, une fois connus son pic, sa
 // durée et les touchers qui l'entourent :
 // - durée : temps passé au-dessus de max(accel_min, 35 % du pic) ; la main
 //   fait vibrer le téléphone 50 à 100 ms après une tape (calibration) : la
 //   limite par défaut est au-delà de la fenêtre de mesure, donc inactive ;
-// - agitation : moyenne quadratique de |a| dans les 300 ms qui précèdent, sans
-//   les 300 ms qui suivent le candidat d'avant (une tape forte fait vibrer le
-//   téléphone jusque-là) ; un pic au milieu d'un mouvement n'est pas une tape ;
-//   il en faut au moins 80 ms hors de cette vibration (une secousse enchaîne
-//   les candidats tous les 250 ms : il n'en resterait rien) ;
+// - agitation : moyenne quadratique de |a| sur 300 ms avant le pic, prises en
+//   remontant jusqu'à 600 ms hors des 250 ms qui suivent chacun des deux
+//   candidats d'avant (une tape forte fait vibrer le téléphone jusque-là) ; un
+//   pic au milieu d'un mouvement n'est pas une tape ; et dans les 50 ms d'avant,
+//   vibration comprise, celle-ci doit être retombée sous 25 % du pic précédent
+//   (mesuré : ~10 % à 200 ms ; une secousse reste vers 70 %) ;
 // - téléphone à plat, écran vers le haut (gravité z ≈ -1) : posé sur une
 //   table, on ne tape pas son dos ; le poser ou le reprendre secoue ;
 // - gravité : sa variation dans les 200 ms qui précèdent (téléphone qu'on
@@ -41,7 +47,11 @@
 #include <math.h>
 #include <string.h>
 
-static const double kPre = 0.300, kPreGap = 0.015, kGravityLag = 0.200, kWindow = 0.040, kRinging = 0.300, kMinHistory = 0.080;
+#ifndef RT_BACKTAP_MIN_HISTORY
+#define RT_BACKTAP_MIN_HISTORY 0.080
+#endif
+static const double kPre = 0.300, kPreGap = 0.015, kGravityLag = 0.200, kWindow = 0.040, kPreMax = 0.600, kTail = 0.050,
+                    kDecay = 0.25, kRinging = 0.250, kMinHistory = RT_BACKTAP_MIN_HISTORY;
 
 // Valeurs par défaut : estimations à calibrer (docs/ios.md). Une tape d'index
 // sur un téléphone tenu à deux mains : pic de 0,1 à 0,5 g, rotation de 0,1 à
@@ -52,6 +62,9 @@ void rt_backtap_defaults(rt_backtap_params *p) {
     p->accel_min = 0.10f;     // 20 fois le bruit, sous une tape légère
     p->jerk_min = 6.0f;       // 0,06 g en 10 ms : un geste de la main monte 10 fois moins vite
     p->rot_min = 0.08f;       // 8 fois le bruit du gyroscope
+    p->gyro_accel_min = 0.06f; // au-dessus du bruit en jeu (0,02-0,05 g en moyenne quadratique), secousse jerk_min exigée aussi
+    p->gyro_rot_min = 0.30f;   // tapes à gauche manquées : 0,44 à 0,74 rad/s ; tapes retenues : 0,10 à 1,3
+    p->gyro_jerk_min = 15.0f;  // 0,15 rad/s en 10 ms : le poignet tourne bien plus lentement
     p->lateral_ratio = 0.7f;  // repli latéral seulement si y porte 70 % du pic
     p->lateral_sign = 1;
     p->invert = 0;
@@ -62,14 +75,14 @@ void rt_backtap_defaults(rt_backtap_params *p) {
     p->flat_z = -0.95f;       // en jeu (calibration) : -0,75 à -0,86 ; posé sur la table : -1,00
     p->pre_rms_max = 0.05f;   // téléphone tenu immobile : ~0,01 g ; marche : 0,1 g et plus
     p->gravity_max = 0.12f;   // ~7° de rotation en 200 ms
-    p->log_factor = 1.0f;
+    p->onset_factor = 0.5f;   // un candidat précoce cerne mieux le pic ; les faibles sont jugés « sous les seuils »
 }
 
 void rt_backtap_init(rt_backtap *d, const rt_backtap_params *p) {
     memset(d, 0, sizeof(*d));
     d->p = *p;
     d->refractory_until = -1e9;
-    d->last_candidate = -1e9;
+    d->last_candidates[0] = d->last_candidates[1] = -1e9;
     d->last_inactive = -1e9;
 }
 
@@ -88,9 +101,10 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     memset(r, 0, sizeof(*r));
     r->t = t0; r->touch_dt = 1e9;
 
-    // Avant le pic : agitation, rotation moyenne, gravité (dernier échantillon
-    // avant t0 - 15 ms, et 200 ms plus tôt).
-    double base[3] = {0, 0, 0}, sq = 0, span = 0; int n = 0;
+    // Avant le pic : gravité (dernier échantillon avant t0 - 15 ms, et 200 ms
+    // plus tôt), puis, en remontant jusqu'à 600 ms, 300 ms d'agitation et de
+    // rotation moyenne hors de la vibration des deux candidats d'avant.
+    double base[3] = {0, 0, 0}, sq = 0, span = 0, tail_sq = 0, prev_in = 0; int n = 0, n_tail = 0;
     const rt_backtap_sample *g_now = NULL, *g_then = NULL;
     unsigned long onset = end;   // indice du premier échantillon du pic
     for (unsigned long i = first; i < end; ++i) {
@@ -99,10 +113,17 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
         if (s->t > t0 - kPreGap) continue;
         g_now = s;
         if (!g_then || s->t <= t0 - kPreGap - kGravityLag) g_then = s;
-        if (s->t < t0 - kPre) continue;
-        if (s->t >= d->last_candidate && s->t < d->last_candidate + kRinging) continue;   // rebonds de la tape d'avant
-        const rt_backtap_sample *q = i > first ? at(d, i - 1) : NULL;
-        if (q) span += fmin(s->t - q->t, 0.02);
+    }
+    for (unsigned long i = onset; i-- > first;) {
+        const rt_backtap_sample *s = at(d, i);
+        if (s->t > t0 - kPreGap) continue;
+        if (s->t < t0 - kPreMax || span >= kPre) break;
+        if (s->t >= t0 - kPreGap - kTail) { tail_sq += (double)norm3(s->a) * norm3(s->a); ++n_tail; }
+        int ringing = 0;   // rebonds d'un candidat d'avant
+        for (int k = 0; k < 2; ++k) ringing |= s->t >= d->last_candidates[k] && s->t < d->last_candidates[k] + kRinging;
+        if (ringing) continue;
+        if (prev_in > 0) span += fmin(prev_in - s->t, 0.02);
+        prev_in = s->t;
         float m = norm3(s->a);
         sq += (double)m * m;
         for (int k = 0; k < 3; ++k) base[k] += s->w[k];
@@ -110,6 +131,7 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     }
     if (n) for (int k = 0; k < 3; ++k) base[k] /= n;
     r->pre_rms = n ? (float)sqrt(sq / n) : 0;
+    r->tail_rms = n_tail ? (float)sqrt(tail_sq / n_tail) : 0;
     if (g_now && g_then) {
         float dg[3] = {g_now->g[0] - g_then->g[0], g_now->g[1] - g_then->g[1], g_now->g[2] - g_then->g[2]};
         r->gravity = norm3(dg);
@@ -157,6 +179,9 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
 
     // Côté, dans le repère de l'appareil (+1 : vers +y), puis de l'écran.
     if (fabsf(r->rot[0]) >= p->rot_min) {
+        // Écart maximal : 30/30 en calibration ; l'intégrale du premier lobe ou
+        // l'écart à la rotation juste avant l'impact inversaient des séries
+        // entières à gauche (rejeu du 26/10).
         r->side = r->rot[0] > 0 ? 1 : -1; r->method = "rotation";
     } else if (p->lateral_sign && r->peak > 0 && fabsf(r->acc[1]) >= p->lateral_ratio * r->peak) {
         // Poussée physique vers +y (a_y CoreMotion < 0) : tape venue du côté -y.
@@ -164,7 +189,10 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     }
     r->side *= r->orient * (p->invert ? -1 : 1);
 
-    r->weak = r->peak < p->accel_min || r->jerk < p->jerk_min;
+    int by_accel = r->peak >= p->accel_min && r->jerk >= p->jerk_min;
+    int by_gyro = r->peak >= p->gyro_accel_min && r->jerk >= p->jerk_min && fabsf(r->rot[0]) >= p->gyro_rot_min;
+    r->weak = !by_accel && !by_gyro;
+    r->gyro = !by_accel && by_gyro;
     if (r->weak) r->reject = "sous les seuils";
     // En menu jusqu'à touch_guard avant le pic : le clic qui reprend la partie
     // (toucher passé à SDL, inconnu ici) secoue aussi le téléphone.
@@ -172,6 +200,8 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     else if (fabs(r->touch_dt) <= p->touch_guard) r->reject = "toucher à l'écran";
     else if (n < 3 || span < kMinHistory) r->reject = "historique insuffisant";
     else if (r->pre_rms > p->pre_rms_max) r->reject = "agitation avant le pic";
+    else if (d->last_candidates[0] + kRinging > t0 - kPreGap - kTail && r->tail_rms > fmaxf(p->pre_rms_max, kDecay * d->last_peak))
+        r->reject = "agitation avant le pic";   // vibration de la tape d'avant qui ne retombe pas : secousse
     else if (r->gravity > p->gravity_max) r->reject = "gravité qui change";
     else if (g_now && g_now->g[2] < p->flat_z) r->reject = "téléphone à plat";
     else if (r->width > p->max_width) r->reject = "pic trop long";
@@ -185,18 +215,35 @@ int rt_backtap_feed(rt_backtap *d, const rt_backtap_sample *s, int orient, int a
     d->ring[d->count++ % RT_BACKTAP_RING] = *s;
     if (!active) d->last_inactive = s->t;
     if (d->count < 2) return 0;
-    if (!d->onset) {
+    // Début d'un candidat dès onset_factor des seuils (il cerne mieux le pic) ;
+    // un candidat faible cède la place au premier échantillon qui atteint les
+    // seuils entiers avant son jugement : une tape qui suit de 40 à 100 ms un
+    // frémissement n'est pas perdue.
+    if (!d->onset || !d->onset_strong) {
         const rt_backtap_sample *prev = at(d, d->count - 2);
         double dt = s->t - prev->t;
-        if (s->t < d->refractory_until || dt <= 0 || dt > 0.1) return 0;
-        float da[3] = {s->a[0] - prev->a[0], s->a[1] - prev->a[1], s->a[2] - prev->a[2]};
-        float f = d->p.log_factor;
-        if (norm3(s->a) >= d->p.accel_min * f && norm3(da) / dt >= d->p.jerk_min * f) d->onset = s->t;
-        return 0;
+        if (s->t >= d->refractory_until && dt > 0 && dt <= 0.1) {
+            float da[3] = {s->a[0] - prev->a[0], s->a[1] - prev->a[1], s->a[2] - prev->a[2]};
+            float m = norm3(s->a), jerk = norm3(da) / (float)dt, wjerk = fabsf(s->w[0] - prev->w[0]) / (float)dt;
+            const rt_backtap_params *p = &d->p;
+            int strong = (m >= p->accel_min && jerk >= p->jerk_min) || (m >= p->gyro_accel_min && wjerk >= p->gyro_jerk_min);
+            float f = p->onset_factor;
+            if (strong && (!d->onset || s->t > d->onset + kWindow)) { d->onset = s->t; d->onset_strong = 1; }
+            else if (strong) d->onset_strong = 1;   // dans la fenêtre du pic : le candidat le couvre déjà
+            else if (!d->onset && ((m >= p->accel_min * f && jerk >= p->jerk_min * f) ||
+                                   (m >= p->gyro_accel_min * f && wjerk >= p->gyro_jerk_min * f)))
+                d->onset = s->t;
+        }
+        if (!d->onset) return 0;
     }
     if (s->t < d->onset + delay_of(&d->p)) return 0;
     judge(d, orient, active, r);
-    if (!r->weak) { d->refractory_until = d->onset + d->p.refractory; d->last_candidate = d->onset; }
-    d->onset = 0;
+    // Même rejeté (faute d'historique par exemple), un candidat fort fait
+    // vibrer le téléphone : sa vibration est exclue de l'agitation du suivant.
+    if (!r->weak) {
+        d->refractory_until = d->onset + d->p.refractory;
+        d->last_candidates[1] = d->last_candidates[0]; d->last_candidates[0] = d->onset; d->last_peak = r->peak;
+    }
+    d->onset = 0; d->onset_strong = 0;
     return 1;
 }

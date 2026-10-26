@@ -66,13 +66,17 @@ Console du jeu : `-condebug` l'écrit dans
 Tenu en paysage, un index qui tape le dos près du bord gauche tire le portail
 bleu, près du bord droit l'orange (`runtime/ios/back_tap.c`, testé par
 `tests/checks_back_tap.c` ; CoreMotion dans `touch_controls.m`, file dédiée,
-sans autorisation). Candidat : |accélération utilisateur| ≥ seuil et variation
-d'un échantillon au suivant ≥ seuil de secousse ; jugé 100 ms plus tard.
+sans autorisation). Candidat dès la moitié des seuils : |accélération
+utilisateur| et sa variation d'un échantillon au suivant (secousse), ou
+variation brusque de la rotation autour de x ; jugé 100 ms plus tard aux seuils
+entiers. Deux voies : accélération (0,10 g, 6 g/s) ou gyroscope (0,06 g,
+6 g/s et rotation de 0,30 rad/s) ; à gauche l'index fait tourner le téléphone
+(0,4 à 0,7 rad/s) en l'accélérant peu (0,07 à 0,10 g).
 Côté : signe de la rotation brève autour de l'axe x de l'appareil (vertical en
 paysage), rapporté à l'orientation de l'écran (gravité à défaut) ; repli
 « latéral » (tape sur la tranche) par le signe de l'accélération selon y.
 Rejets : menu ou surcouche masquée (jusqu'à 80 ms avant le pic), toucher qui commence ou finit à ±80 ms,
-agitation ou gravité qui change avant le pic (hors des 300 ms qui suivent le candidat d'avant, 80 ms d'historique au moins), téléphone posé à plat écran vers le haut (gravité z < -0,95). Clic :
+agitation ou gravité qui change avant le pic (300 ms pris en remontant jusqu'à 600 ms, hors des 250 ms qui suivent les deux candidats d'avant ; dans les 50 ms d'avant, leur vibration doit être retombée sous 25 % du pic, sinon c'est une secousse), téléphone posé à plat écran vers le haut (gravité z < -0,95). Clic :
 appui, relâchement après 50 ms et au moins deux images. Valeurs par défaut
 calibrées le 26/10/2026 sur iPhone 15 Pro Max (`P2_BACKTAP_LOG=1`) : 30 tapes au
 dos sur 30 du bon côté dans les deux paysages ; la main fait vibrer le
@@ -80,7 +84,7 @@ téléphone 50 à 100 ms après la tape, d'où la limite de durée relâchée ;
 CoreMotion livre 100 Hz au plus. Les tapes sur la tranche n'ont pas été
 essayées. Les tapes fortes culminent 30 à 40 ms après leur début et font vibrer
 le téléphone plus de 150 ms : critère de montée abandonné, vibration exclue sur
-300 ms. Limite connue : le premier à-coup d'un geste brusque depuis le repos
+250 ms (mesuré : 0,03 à 0,04 g de moyenne quadratique au-delà). Limite connue : le premier à-coup d'un geste brusque depuis le repos
 ressemble à une tape (l'écarter retarderait chaque tir).
 
 Enregistrement brut pour régler les seuils sur le Mac :
@@ -93,11 +97,14 @@ Enregistrement brut pour régler les seuils sur le Mac :
 | `P2_BACKTAP_ACCEL` | 0.10 g | pic minimal d'accélération |
 | `P2_BACKTAP_JERK` | 6 g/s | secousse minimale |
 | `P2_BACKTAP_ROT` | 0.08 rad/s | rotation minimale (axe x) pour décider le côté |
+| `P2_BACKTAP_GYRO_ACCEL` | 0.06 g | voie gyroscope : pic minimal d'accélération |
+| `P2_BACKTAP_GYRO_ROT` | 0.30 rad/s | voie gyroscope : rotation minimale autour de x (`99` la coupe) |
+| `P2_BACKTAP_GYRO_JERK` | 15 rad/s² | voie gyroscope : variation de rotation qui ouvre un candidat |
 | `P2_BACKTAP_REFRACTORY` | 0.25 s | rien après un candidat |
 | `P2_BACKTAP_TOUCH_GUARD` | 0.08 s | rien autour d'un début ou d'une fin de toucher |
 | `P2_BACKTAP_FLAT` | -0.95 g | gravité z sous ce seuil : téléphone à plat, ignoré (`-2` : jamais) |
 | `P2_BACKTAP_WIDTH` | 0.12 s | durée maximale du pic (au-dessus de 35 % de son maximum ; mesurée sur 100 ms, donc inactive par défaut) |
-| `P2_BACKTAP_AGITATION` | 0.05 g | moyenne quadratique maximale dans les 300 ms d'avant |
+| `P2_BACKTAP_AGITATION` | 0.05 g | moyenne quadratique maximale sur les 300 ms d'avant (hors vibration des tapes) |
 | `P2_BACKTAP_GRAVITY` | 0.12 g | variation maximale de la gravité dans les 200 ms d'avant |
 | `P2_BACKTAP_INVERT` | 0 | `1` : gauche et droite permutées |
 | `P2_BACKTAP_LATERAL` | 1 | tape sur la tranche : `-1` sens inversé, `0` ignorée |

@@ -156,8 +156,8 @@ static void backtap_log_report(const rt_backtap_report *r, double origin) {
     if (fabs(r->touch_dt) < 10) snprintf(touch, sizeof(touch), "%+.0f ms", r->touch_dt * 1000);
     else snprintf(touch, sizeof(touch), "aucun");
     if (r->reject) snprintf(verdict, sizeof(verdict), "rejet : %s", r->reject);
-    else snprintf(verdict, sizeof(verdict), "%s (%s)", r->side < 0 ? "GAUCHE, portail bleu" : "DROITE, portail orange",
-                  r->method);
+    else snprintf(verdict, sizeof(verdict), "%s (%s%s)", r->side < 0 ? "GAUCHE, portail bleu" : "DROITE, portail orange",
+                  r->method, r->gyro ? ", gyroscope" : "");
     fprintf(stderr, "[ios] tape %.3f s : pic %.2f g (x %+.2f y %+.2f z %+.2f), secousse %.0f g/s, "
             "rotation x %+.2f y %+.2f z %+.2f rad/s, montée %.0f ms, durée %.0f ms, avant %.3f g, "
             "gravité %.2f g (x %+.2f y %+.2f z %+.2f), "
@@ -202,6 +202,9 @@ static void backtap_start(void) {
     p.accel_min = env_float("P2_BACKTAP_ACCEL", p.accel_min, 0.001f);
     p.jerk_min = env_float("P2_BACKTAP_JERK", p.jerk_min, 0);
     p.rot_min = env_float("P2_BACKTAP_ROT", p.rot_min, 0.001f);
+    p.gyro_accel_min = env_float("P2_BACKTAP_GYRO_ACCEL", p.gyro_accel_min, 0.001f);
+    p.gyro_rot_min = env_float("P2_BACKTAP_GYRO_ROT", p.gyro_rot_min, 0.001f);
+    p.gyro_jerk_min = env_float("P2_BACKTAP_GYRO_JERK", p.gyro_jerk_min, 0);
     p.refractory = env_float("P2_BACKTAP_REFRACTORY", p.refractory, 0);
     p.touch_guard = env_float("P2_BACKTAP_TOUCH_GUARD", p.touch_guard, 0);
     p.max_width = env_float("P2_BACKTAP_WIDTH", p.max_width, 0.001f);
@@ -212,7 +215,6 @@ static void backtap_start(void) {
     p.z_sign = env_sign("P2_BACKTAP_ZSIGN", p.z_sign);
     p.invert = env_sign("P2_BACKTAP_INVERT", 0) > 0;
     backtap_log = getenv("P2_BACKTAP_LOG") && *getenv("P2_BACKTAP_LOG") != '0';
-    if (backtap_log) p.log_factor = 0.5f;   // candidats jusqu'à la moitié des seuils, marqués « sous les seuils »
     backtap_hold = env_float("P2_BACKTAP_HOLD", 0.05f, 0);
     const char *raw = getenv("P2_BACKTAP_RAW");
     if (raw && *raw) {
@@ -232,9 +234,10 @@ static void backtap_start(void) {
     backtap_queue.qualityOfService = NSQualityOfServiceUserInteractive;
     motion.deviceMotionUpdateInterval = 1.0 / hz;
     fprintf(stderr, "[ios] tapes au dos : %g Hz demandés ; seuils %.3g g, %.3g g/s, rotation %.3g rad/s ; "
+            "gyroscope %.3g g, %.3g rad/s, %.3g rad/s² ; "
             "réfractaire %.0f ms, toucher ±%.0f ms, à plat sous %.2f g, durée %.0f ms, agitation %.3g g, gravité %.3g g ; "
             "latéral %+d, z %+d, inversé %d, appui %.0f ms%s\n",
-            hz, p.accel_min, p.jerk_min, p.rot_min, p.refractory * 1e3, p.touch_guard * 1e3, p.flat_z, p.max_width * 1e3,
+            hz, p.accel_min, p.jerk_min, p.rot_min, p.gyro_accel_min, p.gyro_rot_min, p.gyro_jerk_min, p.refractory * 1e3, p.touch_guard * 1e3, p.flat_z, p.max_width * 1e3,
             p.pre_rms_max, p.gravity_max, p.lateral_sign, p.z_sign, p.invert, backtap_hold * 1e3,
             backtap_log ? ", journal" : "");
     [motion startDeviceMotionUpdatesToQueue:backtap_queue withHandler:^(CMDeviceMotion *m, NSError *error) {
