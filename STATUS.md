@@ -4,10 +4,15 @@
 voix, musique, début de partie, retour au menu, Cmd-Q). Performances
 mesurées en jeu (sp_a1_intro1, focus simulé, fenêtre cachée, M3 Pro) :
 
-| build | 1280×720 | 2560×1440 |
-|---|---|---|
-| `-O1` mémoire contrôlée (25 oct. soir) | ~117 fps | — |
-| `--release` (`-O2 --fast-memory`), 26 oct. matin | 235-255 fps | ~263 fps |
+| build | 1280×720 | « 2560×1440 » sans Retina (en fait 1512×982) | 2560×1440 Retina |
+|---|---|---|---|
+| `-O1` mémoire contrôlée (25 oct. soir) | ~117 fps | — | — |
+| `--release` (`-O2 --fast-memory`), 26 oct. | 235-255 fps | ~263-280 fps | ~215-230 fps (menu) |
+
+Attention : sans mode Retina, macOS réduit une fenêtre plus grande que
+l'écran (1512×982 points sur ce MacBook) ; les anciennes mesures
+« 2560×1440 » rendaient donc 1512×982 pixels. Le mode Retina rend vraiment
+2560×1440 (2,5 fois plus de pixels) dans une fenêtre de 1280×720 points.
 
 Gains de la nuit du 25 au 26 (mesurés avec `tools/bench_game.py`, moyenne de
 la seconde moitié de plusieurs parties) : `--release` (×1,7), QoS interactive
@@ -30,6 +35,18 @@ python3 tools/build_game.py --release  # pour jouer : -O2 sans contrôle mémoir
 python3 tools/build_game.py            # diagnostic : -O1, mémoire contrôlée (≈ 20 min à froid)
 SteamAppId=620 python3 tools/run_game.py --show --timeout 3600
 ```
+
+Pour jouer sans terminal : `python3 tools/make_app.py` crée
+`~/Applications/Portal 2 Natif.app` (lien vers `build/portal2-native`, chemins
+de `config/local.json`, Steam démarré au besoin, Retina, 2560×1440 fenêtré ;
+autres arguments : `python3 tools/make_app.py -- -game portal2 …`). Journal :
+`~/Library/Logs/Portal2Natif.log`. À refaire seulement si les chemins ou
+arguments changent ; une recompilation suffit sinon.
+
+`P2_RETINA=1` : mode Retina (fenêtre en points, rendu en pixels natifs ;
+tailles, écrans et positions de souris convertis, déplacements relatifs
+inchangés). F3 affiche/masque un compteur d'images hôte (`P2_FPS=1` : visible
+dès le départ).
 
 Diagnostics : `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
 (capture du tampon arrière), `P2_WATCH_CALL=0x<adresse>` (arguments d'un
