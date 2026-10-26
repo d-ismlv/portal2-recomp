@@ -241,6 +241,22 @@ RT_CHECK(sprintf_family_glibc_output) {
     assert(!strcmp((char *)GPTR(OUT), "<099>"));
 }
 
+// %ls et %lc dans printf étroit (texte localisé de Source, plantage en jeu sur
+// iPhone) : locale C de glibc, ASCII seulement, précision en octets.
+RT_CHECK(sprintf_wide_arguments_c_locale) {
+    Call k;
+    put_wide(DATA + 0x100, "portal");
+    begin(&k);
+    p32(&k, OUT); p32(&k, put(DATA, "[%ls|%-8.3ls|%S|%lc%C]")); p32(&k, DATA + 0x100); p32(&k, DATA + 0x100); p32(&k, 0);
+    p32(&k, 'x'); p32(&k, 'y');
+    invoke(&k, "sprintf");
+    const char *expected = "[portal|por     |(null)|xy]";
+    assert(!strcmp((char *)GPTR(OUT), expected) && k.cpu.eax == strlen(expected));
+    W32(DATA + 0x200, 0xE9); W32(DATA + 0x204, 0);   // « é » : non convertible dans la locale C
+    begin(&k); p32(&k, OUT); p32(&k, put(DATA, "%ls")); p32(&k, DATA + 0x200); invoke(&k, "sprintf");
+    assert(k.cpu.eax == UINT32_MAX);
+}
+
 RT_CHECK(swprintf_utf32_and_truncation) {
     Call k;
     put_wide(DATA + 0x100, "wide");
