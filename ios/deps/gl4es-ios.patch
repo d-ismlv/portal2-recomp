@@ -71,6 +71,129 @@ index 498ecc5..8652abf 100644
              iindices = copy_gl_array((glstate->vao->elements)?(void*)((char*)glstate->vao->elements->data + (uintptr_t)indices):indices,
                  type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
          else
+diff --git a/src/gl/fpe.c b/src/gl/fpe.c
+index c21bcf1..7917ceb 100644
+--- a/src/gl/fpe.c
++++ b/src/gl/fpe.c
+@@ -462,6 +462,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+     // state is not empty and glprogram already has some cache (it may be empty, but kh'thingy is initialized)
+     // TODO: what if program is composed of more then 1 vertex or fragment shader?
+     fpe_fpe_t *fpe = fpe_GetCache((fpe_cache_t*)glprogram->fpe_cache, state, 0);
++    if(fpe->failed) return glprogram;   // échec mémorisé : sinon recompilé à chaque dessin
+     if(fpe->glprogram==NULL) {
+         GLint status;
+         fpe->vert = gl4es_glCreateShader(GL_VERTEX_SHADER);
+@@ -472,7 +473,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->vert, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Vertex shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->frag = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
+         gl4es_glShaderSource(fpe->frag, 1, fpe_CustomFragmentShader(glprogram->last_frag->source, state), NULL);
+@@ -482,7 +483,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->frag, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Fragment shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->prog = gl4es_glCreateProgram();
+         gl4es_glAttachShader(fpe->prog, fpe->vert);
+@@ -501,7 +502,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+             char buff[1000];
+             gl4es_glGetProgramInfoLog(fpe->prog, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Program link failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         // now find the program
+         khint_t k_program;
+@@ -539,6 +540,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+     // state is not empty and glprogram already has some cache (it may be empty, but kh'thingy is initialized)
+     // TODO: what if program is composed of more then 1 vertex or fragment shader?
+     fpe_fpe_t *fpe = fpe_GetCache((fpe_cache_t*)glprogram->fpe_cache, state_vertex, 0);
++    if(fpe->failed) return glprogram;   // échec mémorisé : sinon recompilé à chaque dessin
+     if(fpe->glprogram==NULL) {
+         GLint status;
+         fpe->vert = gl4es_glCreateShader(GL_VERTEX_SHADER);
+@@ -549,7 +551,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->vert, 1000, NULL, buff);
+             printf("LIBGL: FPE Default Vertex shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->frag = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
+         gl4es_glShaderSource(fpe->frag, 1, fpe_CustomFragmentShader(glprogram->last_frag->source, state_vertex), NULL);
+@@ -559,7 +561,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->frag, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Fragment shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->prog = gl4es_glCreateProgram();
+         gl4es_glAttachShader(fpe->prog, fpe->vert);
+@@ -578,7 +580,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+             char buff[1000];
+             gl4es_glGetProgramInfoLog(fpe->prog, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Program with Default Vertex link failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         // now find the program
+         khint_t k_program;
+@@ -1105,15 +1107,27 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+                 glprogram->fpe_cache = fpe_NewCache();
+             glprogram = fpe_CustomShader_DefaultVertex(glprogram, &vertex_state);    // fetch from cache if exist or create it
+             program = glprogram->id;
+-        } else if(!fpe_IsEmpty(&state))
+-        {
+-            // need to create a new program for that...
+-            DBG(printf("GLSL program %d need customization => ", program);)
+-            if(!glprogram->fpe_cache)
+-                glprogram->fpe_cache = fpe_NewCache();
+-            glprogram = fpe_CustomShader(glprogram, &state);    // fetch from cache if exist or create it
+-            program = glprogram->id;
+-            DBG(printf("%d\n", program);)
++        } else {
++            // Plans de découpe : seul un nuanceur qui écrit gl_ClipVertex sait quoi découper. Les
++            // autres (copies d'écran, celles de gl4es) ne doivent pas l'être, et leur variante
++            // utiliserait gl_Vertex, dont l'emplacement 0 est déjà pris : l'édition échoue.
++            if(state.plane && glprogram->last_vert) {
++                if(glprogram->clip_checked_src != glprogram->last_vert->source) {
++                    glprogram->clip_checked_src = glprogram->last_vert->source;
++                    glprogram->clipvertex = glprogram->last_vert->source && strstr(glprogram->last_vert->source, "gl4es_ClipVertex");
++                }
++                if(!glprogram->clipvertex) state.plane = 0;
++            }
++            if(!fpe_IsEmpty(&state))
++            {
++                // need to create a new program for that...
++                DBG(printf("GLSL program %d need customization => ", program);)
++                if(!glprogram->fpe_cache)
++                    glprogram->fpe_cache = fpe_NewCache();
++                glprogram = fpe_CustomShader(glprogram, &state);    // fetch from cache if exist or create it
++                program = glprogram->id;
++                DBG(printf("%d\n", program);)
++            }
+         }
+         if(glstate->gleshard->program != program)
+         {
+diff --git a/src/gl/fpe.h b/src/gl/fpe.h
+index 4c51179..9bdaf3c 100644
+--- a/src/gl/fpe.h
++++ b/src/gl/fpe.h
+@@ -227,6 +227,7 @@ typedef struct fpe_fpe_s {
+   GLuint  frag, vert, prog;   // shader info
+   fpe_state_t state;          // state relevant to the current fpe program
+   program_t *glprogram;
++  int failed;                 // échec de compilation ou d'édition : ne pas réessayer
+ } fpe_fpe_t;
+ 
+ #ifndef kh_fpecachelist_t
 diff --git a/src/gl/framebuffers.c b/src/gl/framebuffers.c
 index b0f0299..3929400 100644
 --- a/src/gl/framebuffers.c
@@ -114,6 +237,19 @@ index 34f00db..ba56cdd 100644
          type_case(GL_UNSIGNED_BYTE, GLubyte, write_each(, * 255.0,))
          type_case(GL_UNSIGNED_SHORT, GLushort, write_each(, / 65535.0f,))
          type_case(GL_INT8_REV, GLubyte, write_each(, * 255.0,))
+diff --git a/src/gl/program.h b/src/gl/program.h
+index a788da4..e0dcd0c 100644
+--- a/src/gl/program.h
++++ b/src/gl/program.h
+@@ -214,6 +214,8 @@ typedef struct {
+     GLuint          *attach;
+     struct shader_s        *last_vert;
+     struct shader_s        *last_frag;
++    const char      *clip_checked_src;  // source déjà examinée pour gl4es_ClipVertex
++    int             clipvertex;         // le nuanceur de sommets écrit gl_ClipVertex
+     int             default_vertex;
+     int             default_fragment;
+     shaderconv_need_t *default_need;    // filled only if default_vertex or default_fragment is used
 diff --git a/src/gl/raster.c b/src/gl/raster.c
 index b006721..13eb2ca 100644
 --- a/src/gl/raster.c
