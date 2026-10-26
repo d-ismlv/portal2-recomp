@@ -202,6 +202,67 @@ fail:
     return shader;
 }
 
+// Nombre d'occurrences de « word » en mot entier.
+static int occurrences(const char *source, const char *word) {
+    size_t n = strlen(word);
+    int count = 0;
+    for (const char *p = strstr(source, word); p; p = strstr(p + 1, word))
+        count += (p == source || !ident_char((unsigned char)p[-1])) && !ident_char((unsigned char)p[n]);
+    return count;
+}
+
+// Sortie de nuanceur de sommets déclarée mais jamais écrite : le GLSL de
+// bureau la laisse indéfinie, l'éditeur de liens d'OpenGL ES d'Apple refuse le
+// programme si le nuanceur de fragments la lit (« Input of fragment shader
+// '_gl4es_FrontColor' not written by vertex shader »). Cas de
+// bufferclearobeystencil_vs20 sans couleur (gl4es y déclare tout de même
+// _gl4es_FrontColor), apparié à un nuanceur de fragments qui lit gl_Color :
+// togl ne trace jamais ce programme, et l'effacement de la profondeur dans le
+// pochoir d'un portail (BufferClearObeyStencil) disparaissait, d'où une vue à
+// travers le portail rejetée entière par le test de profondeur. Chaque sortie
+// scalaire ou vecteur sans autre occurrence que sa déclaration reçoit une
+// valeur au début de main : blanc opaque pour les couleurs (couleur courante
+// par défaut d'OpenGL), zéro sinon.
+static char *initialize_unwritten_outputs(char *shader) {
+    Buffer init = {0};
+    for (const char *p = shader; *p;) {
+        const char *end = strchr(p, '\n'); size_t n = end ? (size_t)(end - p) + 1 : strlen(p);
+        char line[256], word[5][64];
+        size_t m = n < sizeof(line) - 1 ? n : sizeof(line) - 1;
+        memcpy(line, p, m); line[m] = 0;
+        p += n;
+        int words = sscanf(line, " %63s %63s %63s %63s %63s", word[0], word[1], word[2], word[3], word[4]), w = 0;
+        // [centroid|flat|smooth] out [précision] type nom;
+        if (words > 0 && (!strcmp(word[0], "centroid") || !strcmp(word[0], "flat") || !strcmp(word[0], "smooth"))) ++w;
+        if (words < w + 3 || strcmp(word[w], "out")) continue;
+        ++w;
+        if (!strcmp(word[w], "lowp") || !strcmp(word[w], "mediump") || !strcmp(word[w], "highp")) ++w;
+        if (words < w + 2) continue;
+        const char *type = word[w];
+        char *name = word[w + 1];
+        size_t length = strcspn(name, " \t;");
+        if (name[length] != ';' || strchr(line, '[')) continue;   // tableaux exclus
+        name[length] = 0;
+        int components = !strcmp(type, "float") ? 1 : !strcmp(type, "vec2") ? 2 : !strcmp(type, "vec3") ? 3
+                       : !strcmp(type, "vec4") ? 4 : 0;
+        if (!components || occurrences(shader, name) != 1) continue;
+        const char *value = strstr(name, "Color") && components == 4 ? "vec4(1.0)" : components == 1 ? "0.0"
+                          : components == 2 ? "vec2(0.0)" : components == 3 ? "vec3(0.0)" : "vec4(0.0)";
+        char assignment[128];
+        snprintf(assignment, sizeof(assignment), "\n%s = %s;", name, value);
+        if (puts_(&init, assignment)) { free(init.data); return shader; }
+    }
+    if (!init.data) return shader;
+    char *entry = !strncmp(shader, "void main", 9) ? shader : strstr(shader, "\nvoid main");
+    char *brace = entry ? strchr(entry, '{') : NULL;
+    Buffer out = {0};
+    if (!brace || put(&out, shader, (size_t)(brace + 1 - shader)) || puts_(&out, init.data) || puts_(&out, brace + 1)) {
+        free(init.data); free(out.data); return shader;
+    }
+    free(init.data); free(shader);
+    return out.data;
+}
+
 char *rt_essl1_to_essl3(const char *source, int is_fragment, int emulate) {
     const char *p = source;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
@@ -298,6 +359,7 @@ char *rt_essl1_to_essl3(const char *source, int is_fragment, int emulate) {
         }
         if (puts_(&out, "}\n")) goto fail;
     }
+    if (!is_fragment) out.data = initialize_unwritten_outputs(out.data);
     if (!is_fragment && !(getenv("P2_IOS_BGRA") && !strcmp(getenv("P2_IOS_BGRA"), "0"))) return bgra_attributes(out.data);
     return out.data;
 fail:

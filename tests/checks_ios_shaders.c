@@ -76,3 +76,26 @@ RT_CHECK(essl3_vertex_attributes_swizzle_bgra_by_mask) {
     assert(out && !strstr(out, "p2_bgra"));   // sans attribut vN : inchangé
     free(out);
 }
+
+// Sortie déclarée mais jamais écrite (bufferclearobeystencil_vs20 sans
+// couleur, où gl4es déclare _gl4es_FrontColor) : l'éditeur de liens d'ES
+// d'Apple refuse le programme si le nuanceur de fragments la lit, et togl ne
+// trace alors jamais l'effacement de profondeur des portails. Valeur donnée au
+// début de main ; les sorties écrites restent intactes.
+RT_CHECK(essl3_unwritten_vertex_outputs_are_initialized) {
+    const char *vs = "#version 100\nvarying lowp vec4 _gl4es_FrontColor;\ncentroid varying vec4 oT1;\n"
+                     "varying vec4 oT0;\nvarying vec2 uv;\nvarying vec4 arr[2];\nattribute vec4 v0;\n"
+                     "void main()\n{\noT0 = v0;\ngl_Position = v0;\n}\n";
+    char *out = rt_essl1_to_essl3(vs, 0, 1);
+    assert(out);
+    assert(strstr(out, "void main()\n{\n_gl4es_FrontColor = vec4(1.0);\noT1 = vec4(0.0);\nuv = vec2(0.0);\n"));
+    assert(!strstr(out, "oT0 = vec4(0.0)"));    // écrite par le nuanceur
+    assert(!strstr(out, "arr = "));             // tableau laissé tel quel
+    free(out);
+    // Nuanceur de fragments : ses entrées ne sont pas touchées.
+    const char *fs = "#version 100\nprecision highp float;\nvarying lowp vec4 _gl4es_FrontColor;\n"
+                     "void main()\n{\ngl_FragColor = vec4(1.0);\n}\n";
+    out = rt_essl1_to_essl3(fs, 1, 0);
+    assert(out && !strstr(out, "_gl4es_FrontColor = "));
+    free(out);
+}
