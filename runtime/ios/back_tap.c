@@ -10,8 +10,8 @@
 // accel_min et que sa variation d'un échantillon au suivant (secousse)
 // dépasse jerk_min, ou (voie gyroscope) quand la rotation varie brusquement
 // autour de x (gyro_jerk_min) avec un peu d'accélération (gyro_accel_min) ;
-// il est alors retenu si la secousse atteint jerk_min et la rotation autour
-// de x gyro_rot_min. Calibration : à
+// il est alors retenu si la secousse atteint jerk_min, la rotation autour de x
+// gyro_rot_min, et si le téléphone était immobile juste avant (gyro_calm_max). Calibration : à
 // gauche, l'index tape près du bord et fait tourner le téléphone (0,4 à
 // 0,7 rad/s) en l'accélérant peu (0,07 à 0,10 g). Il est jugé DELAY plus tard, une fois connus son pic, sa
 // durée et les touchers qui l'entourent :
@@ -65,6 +65,7 @@ void rt_backtap_defaults(rt_backtap_params *p) {
     p->gyro_accel_min = 0.06f; // au-dessus du bruit en jeu (0,02-0,05 g en moyenne quadratique), secousse jerk_min exigée aussi
     p->gyro_rot_min = 0.30f;   // tapes à gauche manquées : 0,44 à 0,74 rad/s ; tapes retenues : 0,10 à 1,3
     p->gyro_jerk_min = 15.0f;  // 0,15 rad/s en 10 ms : le poignet tourne bien plus lentement
+    p->gyro_calm_max = 0.03f;  // tapes légères retenues : 0,016-0,025 g ; tirs parasites en jeu : 0,037-0,054 g
     p->lateral_ratio = 0.7f;  // repli latéral seulement si y porte 70 % du pic
     p->lateral_sign = 1;
     p->invert = 0;
@@ -190,7 +191,8 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     r->side *= r->orient * (p->invert ? -1 : 1);
 
     int by_accel = r->peak >= p->accel_min && r->jerk >= p->jerk_min;
-    int by_gyro = r->peak >= p->gyro_accel_min && r->jerk >= p->jerk_min && fabsf(r->rot[0]) >= p->gyro_rot_min;
+    int by_gyro = r->peak >= p->gyro_accel_min && r->jerk >= p->jerk_min && fabsf(r->rot[0]) >= p->gyro_rot_min &&
+                  r->tail_rms <= p->gyro_calm_max;
     r->weak = !by_accel && !by_gyro;
     r->gyro = !by_accel && by_gyro;
     if (r->weak) r->reject = "sous les seuils";

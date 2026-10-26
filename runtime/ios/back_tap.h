@@ -14,6 +14,7 @@ typedef struct {
     float gyro_accel_min; // g : pic minimal d'accélération
     float gyro_rot_min;   // rad/s : rotation minimale autour de x (écart à la moyenne d'avant)
     float gyro_jerk_min;  // rad/s² : variation minimale de la rotation autour de x d'un échantillon au suivant
+    float gyro_calm_max;  // g : agitation maximale dans les 50 ms d'avant (une tape légère ne se voit que téléphone immobile)
     float lateral_ratio; // tape latérale : part minimale de l'axe y dans le pic d'accélération
     int lateral_sign;    // tape latérale : 1 convention supposée, -1 inversée, 0 désactivée
     int invert;          // 1 : gauche et droite permutées

@@ -205,6 +205,7 @@ static void backtap_start(void) {
     p.gyro_accel_min = env_float("P2_BACKTAP_GYRO_ACCEL", p.gyro_accel_min, 0.001f);
     p.gyro_rot_min = env_float("P2_BACKTAP_GYRO_ROT", p.gyro_rot_min, 0.001f);
     p.gyro_jerk_min = env_float("P2_BACKTAP_GYRO_JERK", p.gyro_jerk_min, 0);
+    p.gyro_calm_max = env_float("P2_BACKTAP_GYRO_CALM", p.gyro_calm_max, 0);
     p.refractory = env_float("P2_BACKTAP_REFRACTORY", p.refractory, 0);
     p.touch_guard = env_float("P2_BACKTAP_TOUCH_GUARD", p.touch_guard, 0);
     p.max_width = env_float("P2_BACKTAP_WIDTH", p.max_width, 0.001f);

@@ -345,5 +345,14 @@ RT_CHECK(backtap_light_tap_found_by_gyroscope) {
             sc.taps[0].rot = 0.6f; sc.params.accel_min = 1;
             o = play(&sc);
             assert(o.accepted == 1 && o.side[0] == side);
+            // Téléphone qui bouge un peu (pouces sur l'écran, 0,04 g) : la voie
+            // gyroscope se tait (tirs parasites du 26/10), une tape franche passe.
+            sc.params.accel_min = 0.10f; sc.noise = 0.04f;
+            o = play(&sc);
+            assert(o.accepted == 0);
+            sc.taps[0].accel = 0.3f;
+            o = play(&sc);
+            assert(o.accepted == 1);
+            for (int i = 0; i < o.reports && i < 8; ++i) if (!o.reject[i]) assert(o.side[i] == side);
         }
 }

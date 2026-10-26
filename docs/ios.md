@@ -70,7 +70,7 @@ sans autorisation). Candidat dès la moitié des seuils : |accélération
 utilisateur| et sa variation d'un échantillon au suivant (secousse), ou
 variation brusque de la rotation autour de x ; jugé 100 ms plus tard aux seuils
 entiers. Deux voies : accélération (0,10 g, 6 g/s) ou gyroscope (0,06 g,
-6 g/s et rotation de 0,30 rad/s) ; à gauche l'index fait tourner le téléphone
+6 g/s, rotation de 0,30 rad/s, téléphone immobile juste avant) ; à gauche l'index fait tourner le téléphone
 (0,4 à 0,7 rad/s) en l'accélérant peu (0,07 à 0,10 g).
 Côté : signe de la rotation brève autour de l'axe x de l'appareil (vertical en
 paysage), rapporté à l'orientation de l'écran (gravité à défaut) ; repli
@@ -100,6 +100,7 @@ Enregistrement brut pour régler les seuils sur le Mac :
 | `P2_BACKTAP_GYRO_ACCEL` | 0.06 g | voie gyroscope : pic minimal d'accélération |
 | `P2_BACKTAP_GYRO_ROT` | 0.30 rad/s | voie gyroscope : rotation minimale autour de x (`99` la coupe) |
 | `P2_BACKTAP_GYRO_JERK` | 15 rad/s² | voie gyroscope : variation de rotation qui ouvre un candidat |
+| `P2_BACKTAP_GYRO_CALM` | 0.03 g | voie gyroscope : agitation maximale dans les 50 ms d'avant (téléphone immobile) |
 | `P2_BACKTAP_REFRACTORY` | 0.25 s | rien après un candidat |
 | `P2_BACKTAP_TOUCH_GUARD` | 0.08 s | rien autour d'un début ou d'une fin de toucher |
 | `P2_BACKTAP_FLAT` | -0.95 g | gravité z sous ce seuil : téléphone à plat, ignoré (`-2` : jamais) |
