@@ -215,8 +215,9 @@ static void redraw(UIView *view) {
         {KEY_CTRL, @"arrow.down", ink, {x + w * .80, y + h * .40}, kButtonSize},
         {KEY_E, @"hand.point.up.left.fill", ink, {x + w * .94, y + h * .80}, kButtonSize},
         {KEY_ESCAPE, @"pause.fill", ink, {x + w * .5, y + h * .08}, kButtonSize * .75},
-        // Mode de la caméra : l'icône montre le mode actuel.
-        {LOOK_MODE, trackpad ? @"hand.draw.fill" : @"r.joystick.fill", ink, {x + w * .67, y + h * .40}, kButtonSize * .75},
+        // Mode de la caméra, dans le coin en bas à gauche : l'icône montre le mode actuel.
+        {LOOK_MODE, trackpad ? @"hand.draw.fill" : @"r.joystick.fill", ink,
+         {x + kButtonSize * .45, y + h - kButtonSize * .45}, kButtonSize * .75},
     };
     int n = (int)(sizeof(all) / sizeof(*all));
     for (int i = 0; i < n && i < MAX_BUTTONS; ++i) b[i] = all[i];
