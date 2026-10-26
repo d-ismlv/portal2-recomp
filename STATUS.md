@@ -32,6 +32,18 @@ Retina, baisser l'antialiasing dans le menu Vidéo est le levier principal.
 Les lancements de diagnostic (sans `--show`) utilisent maintenant une copie
 des données utilisateur (`../work/portal2-userdata-diag`).
 
+Profil CPU fiable (26 oct., `/usr/bin/sample` sur le jeu en régime établi ;
+le profileur SIGPROF intégré surpondère les appels système sous macOS) :
+thread principal ≈ 50 % code du jeu traduit, 16 % runtime, 11 % pilote
+GL/Metal, 8 % présentation (requêtes WindowServer, peut-être dues à la
+fenêtre cachée de diagnostic). Gains du jour, sans MSAA en 2560×1440 (limité
+CPU), A/B alterné : routes directes des imports chauds (`P2_IMPORT_COUNTS`
+pour les compter) 120,9 → 125,6 fps ; cache de cible par site d'appel
+indirect + `rt_return` en macro 117,4 → 124,4 fps (machine chargée). Avec
+MSAA 4x en 1440p le GPU limite (~13 ms/image) : ces gains n'y changent rien.
+Pistes suivantes : ThinLTO/PGO, accès TLS en ligne, présentation en fenêtre
+visible à mesurer.
+
 Le thread principal attend surtout le pilote OpenGL d'Apple (soumissions
 Metal sur glBufferSubData de tampons en vol, compilation GLSL à la volée,
 mise en cache par togl dans `update/glshaders.cfg`). La carte graphique a de
