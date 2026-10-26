@@ -50,6 +50,16 @@ def push(udid, source, destination):
               '--source', str(source), '--destination', destination)
 
 
+def stop_game(udid):
+    """Arrête le jeu (SIGKILL) avant de toucher à sa configuration : un arrêt
+    normal pourrait réécrire video.txt avec ses propres réglages."""
+    listing = devicectl(udid, 'device', 'info', 'processes', check=False).stdout
+    for line in listing.splitlines():
+        if line.rstrip().endswith('/Portal2.app/portal2'):
+            devicectl(udid, 'device', 'process', 'terminate', '--pid', line.split()[0], '--kill', check=False)
+    time.sleep(2)
+
+
 def with_settings(text, values):
     for key, value in values.items():
         pattern = rf'("setting\.{key}"\s+)"[^"]*"'
@@ -63,10 +73,12 @@ def main():
     ap.add_argument('configs', nargs='+', help='nom:antialias:échelle')
     ap.add_argument('--seconds', type=int, default=120)
     ap.add_argument('--points', default='932x430', help="taille de l'écran en points (paysage)")
+    ap.add_argument('--vsync', default='0', help='setting.mat_vsync (0 : sans synchro verticale)')
     args = ap.parse_args()
     udid = device()
     OUT.mkdir(parents=True, exist_ok=True)
     original = OUT / 'video.orig.txt'
+    stop_game(udid)
     pull(udid, VIDEO, original)
     base = original.read_text()
     pw, ph = (int(v) for v in args.points.split('x'))
@@ -76,8 +88,9 @@ def main():
             name, aa, scale = spec.split(':')
             factor = 3.0 if scale == 'native' else float(scale)
             video = OUT / f'video.{name}.txt'
-            video.write_text(with_settings(base, {'mat_antialias': aa, 'mat_aaquality': '0',
+            video.write_text(with_settings(base, {'mat_antialias': aa, 'mat_aaquality': '0', 'mat_vsync': args.vsync,
                                                   'defaultres': round(pw * factor), 'defaultresheight': round(ph * factor)}))
+            stop_game(udid)
             push(udid, video, VIDEO)
             env = {'P2_LOG_FILE': 'Documents/game.log', 'P2_FRAME_LOG': '1', 'P2_IOS_RENDER_SCALE': scale}
             launched = devicectl(udid, 'device', 'process', 'launch', '--terminate-existing', '--environment-variables',
@@ -94,6 +107,7 @@ def main():
             print(f'{name:12} {results[-1][1]:>10}  moyenne {results[-1][2]:5.1f}  min {results[-1][3]:5.1f}  '
                   f'max {results[-1][4]:5.1f} i/s', flush=True)
     finally:
+        stop_game(udid)
         push(udid, original, VIDEO)
         print('video.txt d\'origine remis')
 

@@ -756,6 +756,40 @@ void *rt_ios_gl_share_group(void *context) {
     return context ? (__bridge void *)((__bridge EAGLContext *)context).sharegroup : NULL;
 }
 
+// Écran ProMotion : sans demande explicite, iOS laisse l'écran à 60 Hz et la
+// présentation du renderbuffer y est cadencée (mesuré : 60,0 i/s quels que
+// soient l'antialiasing, l'échelle et la synchro du jeu). Un CADisplayLink
+// qui demande jusqu'à 120 Hz fait monter la fréquence de l'écran ; il ne fait
+// rien d'autre. Avec CADisableMinimumFrameDurationOnPhone (Info.plist).
+// P2_IOS_MAX_FPS=60 garde l'ancien comportement.
+@interface P2FrameRate : NSObject
+- (void)tick:(CADisplayLink *)link;
+@end
+@implementation P2FrameRate
+- (void)tick:(CADisplayLink *)link {
+    // Diagnostic : fréquence réelle des rappels (donc de l'écran), une fois.
+    static CFTimeInterval first; static int count, reported;
+    if (reported) return;
+    if (!first) first = link.timestamp;
+    if (++count == 600) {
+        reported = 1;
+        fprintf(stderr, "[gl-ios] écran : %.0f Hz mesurés, économie d'énergie %s\n", (count - 1) / (link.timestamp - first),
+                NSProcessInfo.processInfo.lowPowerModeEnabled ? "active" : "inactive");
+    }
+}
+@end
+static void request_frame_rate(void) {
+    static CADisplayLink *link;
+    if (link) return;
+    const char *e = getenv("P2_IOS_MAX_FPS");
+    float wanted = e && atof(e) > 0 ? (float)atof(e) : (float)UIScreen.mainScreen.maximumFramesPerSecond;
+    if (wanted <= 60) return;
+    link = [CADisplayLink displayLinkWithTarget:[P2FrameRate new] selector:@selector(tick:)];
+    link.preferredFrameRateRange = CAFrameRateRangeMake(60, wanted, wanted);
+    [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    fprintf(stderr, "[gl-ios] fréquence d'affichage demandée : jusqu'à %.0f Hz\n", wanted);
+}
+
 float rt_ios_render_scale(void);   // sdl_ios.m
 SDL_GLContext rt_ios_gl_create_context(SDL_Window *window) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
@@ -780,6 +814,7 @@ SDL_GLContext rt_ios_gl_create_context(SDL_Window *window) {
         }
     }
     SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
+    request_frame_rate();
     pthread_once(&once, start_gl4es);
     fprintf(stderr, "[gl-ios] contexte ES 3, FBO système %u, %dx%d\n", system_framebuffer,
             drawable_width, drawable_height);
