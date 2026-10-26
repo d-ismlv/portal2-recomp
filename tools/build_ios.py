@@ -65,6 +65,9 @@ def main():
     units.append(('ios/main_ios.c', runtime_flags))
     units += [(str(sources / name), generated_flags) for name in sorted(manifest['shards'])]
     units.append((str(sources / 'dispatch.c'), generated_flags))
+    # Greffons PE de Miles traduits (voix MP3...), comme le build macOS.
+    plugin_sources, _ = build_game.generate_plugins(Path('config/local.json'))
+    units += [(str(p), generated_flags) for p in plugin_sources]
     identity = subprocess.run(['clang', '--version'], capture_output=True, text=True, check=True).stdout
     cache = Path(f'build/ios/{args.target}/obj')
     objects, compiled, cpu = build_game.compile_units(units, cache, args.jobs, identity)

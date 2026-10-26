@@ -3,7 +3,7 @@
 #if TARGET_OS_IPHONE
 #define GLES_SILENCE_DEPRECATION 1
 #import <OpenGLES/EAGL.h>
-#include <OpenGLES/ES2/gl.h>
+#include <OpenGLES/ES3/gl.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include <dlfcn.h>
@@ -48,8 +48,78 @@ static const GLubyte *es_get_string(GLenum name) {
             "GL_OES_texture_half_float GL_OES_texture_float GL_OES_fbo_render_mipmap", s) < 0) return s;
     return (const GLubyte *)extensions;
 }
+// P2_IOS_GL_TRACE=1 : échecs de compilation et d'édition de liens des shaders
+// ES que gl4es produit à partir du GLSL de togl (journal + source, 20 premiers).
+static void (*es_compile_shader)(GLuint);
+static void (*es_link_program)(GLuint);
+static void es_compile(GLuint shader) {
+    es_compile_shader(shader);
+    GLint ok = 1; glGetShaderiv(shader, GL_COMPILE_STATUS, &ok);
+    if (ok) return;
+    char log[2048] = {0};
+    glGetShaderInfoLog(shader, sizeof(log), NULL, log);
+    // Clé : première ligne ERROR (sans numéro de ligne), comptée ; source
+    // journalisée pour la première occurrence de chaque erreur distincte.
+    const char *error = strstr(log, "ERROR:");
+    char key[160] = "?";
+    if (error) {
+        const char *colon = strchr(error + 6, ':'); colon = colon ? strchr(colon + 1, ':') : NULL;
+        snprintf(key, sizeof(key), "%s", colon ? colon + 1 : error);
+        key[strcspn(key, "\n")] = 0;
+    }
+    static struct { char key[160]; int count; } seen[64];
+    static int distinct, total;
+    ++total;
+    for (int i = 0; i < distinct; ++i)
+        if (!strcmp(seen[i].key, key)) {
+            if (++seen[i].count % 50 == 0) fprintf(stderr, "[gl-shader] %d× : %s (total %d)\n", seen[i].count, key, total);
+            return;
+        }
+    if (distinct < 64) { snprintf(seen[distinct].key, sizeof(seen[0].key), "%s", key); seen[distinct++].count = 1; }
+    char *source = malloc(65536);
+    if (source) glGetShaderSource(shader, 65536, NULL, source);
+    fprintf(stderr, "[gl-shader] nouvelle erreur (total %d) : %s\n%s\n--- source ---\n%s\n--- fin ---\n", total, key, log,
+            source ? source : "");
+    free(source);
+}
+static void es_link(GLuint program) {
+    es_link_program(program);
+    static int failures;
+    GLint ok = 1; glGetProgramiv(program, GL_LINK_STATUS, &ok);
+    if (ok || failures++ >= 20) return;
+    char log[2048] = {0};
+    glGetProgramInfoLog(program, sizeof(log), NULL, log);
+    fprintf(stderr, "[gl-shader] échec d'édition de liens %u : %s\n", program, log);
+}
+// Contexte ES 3 : le GLSL ES 1.00 produit par gl4es est réécrit en 3.00
+// (textures 3D, échantillonneurs d'ombre ; voir essl3.c).
+char *rt_essl1_to_essl3(const char *source, int is_fragment);
+static void (*es_shader_source)(GLuint, GLsizei, const GLchar *const *, const GLint *);
+static void shader_source(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
+    const char *version = (const char *)real_get_string(GL_VERSION);
+    if (!version || !strstr(version, "OpenGL ES 3") || count <= 0) { es_shader_source(shader, count, strings, lengths); return; }
+    size_t total = 0;
+    for (GLsizei i = 0; i < count; ++i) total += lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+    char *joined = malloc(total + 1), *at = joined;
+    if (!joined) { es_shader_source(shader, count, strings, lengths); return; }
+    for (GLsizei i = 0; i < count; ++i) {
+        size_t n = lengths && lengths[i] >= 0 ? (size_t)lengths[i] : strlen(strings[i]);
+        memcpy(at, strings[i], n); at += n;
+    }
+    *at = 0;
+    GLint type = 0; glGetShaderiv(shader, GL_SHADER_TYPE, &type);
+    char *converted = rt_essl1_to_essl3(joined, type == GL_FRAGMENT_SHADER);
+    const GLchar *one = converted ? converted : joined;
+    es_shader_source(shader, 1, &one, NULL);
+    free(converted); free(joined);
+}
 static void *gles_function(const char *name) {
     if (!strcmp(name, "glGetString")) return (void *)es_get_string;
+    if (!strcmp(name, "glShaderSource")) { es_shader_source = dlsym(gles, name); return (void *)shader_source; }
+    if (getenv("P2_IOS_GL_TRACE")) {
+        if (!strcmp(name, "glCompileShader")) { es_compile_shader = dlsym(gles, name); return (void *)es_compile; }
+        if (!strcmp(name, "glLinkProgram")) { es_link_program = dlsym(gles, name); return (void *)es_link; }
+    }
     if (!strcmp(name, "glBindFramebuffer")) return (void *)bind_framebuffer;
     if (!strcmp(name, "glGetIntegerv")) return (void *)get_integerv;
     return dlsym(gles, name);
@@ -63,6 +133,10 @@ static void start_gl4es(void) {
     real_bind_framebuffer = dlsym(gles, "glBindFramebuffer");
     real_get_integerv = dlsym(gles, "glGetIntegerv");
     real_get_string = dlsym(gles, "glGetString");
+    // Surcharges int/float de clamp/min/max/pow/mod ajoutées par gl4es pour
+    // GLSL ES 1.00 : interdites en 3.00 (surcharge d'une fonction intégrée) et
+    // inutiles pour togl, qui écrit ses littéraux en flottants.
+    setenv("LIBGL_NOINTOVLHACK", "1", 0);
     set_getprocaddress(gles_function);
     set_getmainfbsize(main_framebuffer_size);
     initialize_gl4es();
@@ -84,6 +158,10 @@ static void (*es_get_synciv)(SyncObject, GLenum, GLsizei, GLsizei *, GLint *);
 static void (*gl4es_flush_fn)(void);
 static const GLubyte *(*gl4es_get_string)(GLenum);
 static GLenum (*gl4es_check_status)(GLenum);
+static void (*gl4es_bind_texture)(GLenum, GLuint);
+static void (*gl4es_tex_parameterf)(GLenum, GLenum, GLfloat);
+static void (*gl4es_tex_parameterfv)(GLenum, GLenum, const GLfloat *);
+static void (*gl4es_get_integerv)(GLenum, GLint *);
 static void (*gl4es_tex_parameteri)(GLenum, GLenum, GLint);
 static void (*gl4es_tex_parameteriv)(GLenum, GLenum, const GLint *);
 static void *es_symbol(const char *name) {
@@ -103,6 +181,10 @@ static void load_extras(void) {
     gl4es_check_status = gl4es_GetProcAddress("glCheckFramebufferStatus");
     gl4es_tex_parameteri = gl4es_GetProcAddress("glTexParameteri");
     gl4es_tex_parameteriv = gl4es_GetProcAddress("glTexParameteriv");
+    gl4es_tex_parameterf = gl4es_GetProcAddress("glTexParameterf");
+    gl4es_tex_parameterfv = gl4es_GetProcAddress("glTexParameterfv");
+    gl4es_bind_texture = gl4es_GetProcAddress("glBindTexture");
+    gl4es_get_integerv = gl4es_GetProcAddress("glGetIntegerv");
     if (!es_fence_sync) fprintf(stderr, "[gl-ios] OpenGL ES sans APPLE_sync : fences indisponibles\n");
 }
 static SyncObject fence_sync(GLenum condition, GLbitfield flags) {
@@ -121,8 +203,17 @@ static const GLubyte *get_string(GLenum name) {
     static char *extensions;
     const GLubyte *s = gl4es_get_string(name);
     if (name != GL_EXTENSIONS || !s) return s;
-    if (!extensions && asprintf(&extensions, "%s%s%s", s, es_fence_sync ? " GL_ARB_sync" : "",
-                                " GL_EXT_texture_sRGB_decode") < 0) return s;
+    if (!extensions) {
+        // EXT_direct_state_access de gl4es : togl en prendrait un chemin de liaison
+        // des textures que l'OpenGL d'Apple (référence du portage Mac) n'a jamais
+        // emprunté ; retiré, togl garde le même chemin que sur Mac.
+        char *copy = strdup((const char *)s), *hit;
+        while (copy && (hit = strstr(copy, "GL_EXT_direct_state_access")))
+            memset(hit, ' ', strlen("GL_EXT_direct_state_access"));
+        if (!copy || asprintf(&extensions, "%s%s%s", copy, es_fence_sync ? " GL_ARB_sync" : "",
+                              " GL_EXT_texture_sRGB_decode") < 0) { free(copy); return s; }
+        free(copy);
+    }
     return (const GLubyte *)extensions;
 }
 // Diagnostic : un FBO refusé par OpenGL ES est décrit attachement par attachement.
@@ -162,11 +253,145 @@ static GLenum check_framebuffer_status(GLenum target) {
 // EXT_texture_sRGB_decode est annoncé à togl : son paramètre de texture est
 // absorbé ici au lieu d'atteindre gl4es/OpenGL ES (GL_INVALID_ENUM).
 #define TEXTURE_SRGB_DECODE 0x8A48
+static void tex_parameter_3d_i(GLenum target, GLenum name, GLint value);
 static void tex_parameteri(GLenum target, GLenum name, GLint value) {
-    if (name != TEXTURE_SRGB_DECODE) gl4es_tex_parameteri(target, name, value);
+    if (name == TEXTURE_SRGB_DECODE) return;
+    if (target == 0x806F) tex_parameter_3d_i(target, name, value);
+    else gl4es_tex_parameteri(target, name, value);
 }
 static void tex_parameteriv(GLenum target, GLenum name, const GLint *values) {
-    if (name != TEXTURE_SRGB_DECODE) gl4es_tex_parameteriv(target, name, values);
+    if (name == TEXTURE_SRGB_DECODE) return;
+    if (target == 0x806F) tex_parameter_3d_i(target, name, values[0]);
+    else gl4es_tex_parameteriv(target, name, values);
+}
+
+// P2_IOS_GL_TRACE=1 : chaque combinaison distincte d'envoi de texture
+// (fonction, cible, niveau, formats) est journalisée une fois, avec l'erreur GL.
+static int trace_enabled(void) {
+    static int enabled = -1;
+    if (enabled < 0) { const char *e = getenv("P2_IOS_GL_TRACE"); enabled = e && *e == '1'; }
+    return enabled;
+}
+static void trace_upload(const char *fn, GLenum target, GLint level, GLenum internal, GLsizei w, GLsizei h,
+                         GLenum format, GLenum type, const void *data) {
+    static struct { const char *fn; GLenum target, internal, format, type; GLint level; int data; } seen[256];
+    static int count;
+    GLenum (*error)(void) = gl4es_GetProcAddress("glGetError");
+    GLenum e = error();
+    for (int i = 0; i < count; ++i)
+        if (seen[i].fn == fn && seen[i].target == target && seen[i].internal == internal && seen[i].format == format &&
+            seen[i].type == type && seen[i].level == (level > 0) && seen[i].data == (data != NULL) && !e) return;
+    if (count < 256) seen[count++] = (typeof(seen[0])){fn, target, internal, format, type, level > 0, data != NULL};
+    GLint unpack = 0; gl4es_get_integerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &unpack);
+    fprintf(stderr, "[gl-trace] %s cible %#x niveau %d interne %#x %dx%d format %#x type %#x données %p PBO %d -> erreur %#x\n",
+            fn, target, level, internal, w, h, format, type, data, unpack, e);
+}
+static void (*g4_tex_image_2d)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+static void (*g4_tex_sub_image_2d)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *);
+static void (*g4_compressed_tex_image_2d)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *);
+static void (*g4_compressed_tex_sub_image_2d)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void *);
+static void tr_tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *d) {
+    g4_tex_image_2d(t, l, i, w, h, b, f, ty, d); trace_upload("glTexImage2D", t, l, (GLenum)i, w, h, f, ty, d);
+}
+static void tr_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *d) {
+    g4_tex_sub_image_2d(t, l, x, y, w, h, f, ty, d); trace_upload("glTexSubImage2D", t, l, 0, w, h, f, ty, d);
+}
+static void tr_compressed_tex_image_2d(GLenum t, GLint l, GLenum i, GLsizei w, GLsizei h, GLint b, GLsizei n, const void *d) {
+    g4_compressed_tex_image_2d(t, l, i, w, h, b, n, d); trace_upload("glCompressedTexImage2D", t, l, i, w, h, 0, (GLenum)n, d);
+}
+static void tr_compressed_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLsizei n, const void *d) {
+    g4_compressed_tex_sub_image_2d(t, l, x, y, w, h, f, n, d); trace_upload("glCompressedTexSubImage2D", t, l, 0, w, h, f, (GLenum)n, d);
+}
+static void *traced(const char *name) {
+    if (!trace_enabled()) return NULL;
+    static const struct { const char *name; void **real; void *wrapper; } table[] = {
+        {"glTexImage2D", (void **)&g4_tex_image_2d, (void *)tr_tex_image_2d},
+        {"glTexSubImage2D", (void **)&g4_tex_sub_image_2d, (void *)tr_tex_sub_image_2d},
+        {"glCompressedTexImage2D", (void **)&g4_compressed_tex_image_2d, (void *)tr_compressed_tex_image_2d},
+        {"glCompressedTexImage2DARB", (void **)&g4_compressed_tex_image_2d, (void *)tr_compressed_tex_image_2d},
+        {"glCompressedTexSubImage2D", (void **)&g4_compressed_tex_sub_image_2d, (void *)tr_compressed_tex_sub_image_2d},
+        {"glCompressedTexSubImage2DARB", (void **)&g4_compressed_tex_sub_image_2d, (void *)tr_compressed_tex_sub_image_2d},
+    };
+    for (size_t i = 0; i < sizeof(table) / sizeof(*table); ++i)
+        if (!strcmp(name, table[i].name)) {
+            if (!*table[i].real) *table[i].real = gl4es_GetProcAddress(name);
+            return *table[i].real ? table[i].wrapper : NULL;
+        }
+    return NULL;
+}
+
+// ---- textures 3D : directement en OpenGL ES 3 ----
+// gl4es simule GL_TEXTURE_3D par une texture 2D (première tranche). Les
+// shaders en GLSL ES 3.00 (essl3.c) échantillonnent un vrai sampler3D : la
+// table de correction colorimétrique de togl (sampler15) donnait du noir. Les
+// noms de textures de gl4es sont ceux d'OpenGL ES ; seule l'unité active est
+// à reprendre de gl4es (il en diffère l'envoi), puis à rétablir.
+#define TARGET_3D 0x806F
+#define BGRA 0x80E1
+#define UNSIGNED_INT_8_8_8_8_REV 0x8367
+static GLint with_unit_begin(void) {
+    GLint unit = GL_TEXTURE0, previous = GL_TEXTURE0;
+    gl4es_get_integerv(GL_ACTIVE_TEXTURE, &unit);
+    real_get_integerv(GL_ACTIVE_TEXTURE, &previous);
+    if (unit != previous) glActiveTexture((GLenum)unit);
+    return previous;
+}
+static void with_unit_end(GLint previous) {
+    GLint current = 0; real_get_integerv(GL_ACTIVE_TEXTURE, &current);
+    if (current != previous) glActiveTexture((GLenum)previous);
+}
+static void bind_texture(GLenum target, GLuint name) {
+    if (target != TARGET_3D) { gl4es_bind_texture(target, name); return; }
+    GLint previous = with_unit_begin();
+    glBindTexture(TARGET_3D, name);
+    with_unit_end(previous);
+}
+// BGRA (et 8_8_8_8_REV, le même ordre d'octets) n'existe pas pour les textures
+// 3D en ES : recopie en RGBA.
+static const void *rgba_copy(GLenum *format, GLenum *type, const void *data, size_t texels, void **owned) {
+    *owned = NULL;
+    if (*format != BGRA || (*type != GL_UNSIGNED_BYTE && *type != UNSIGNED_INT_8_8_8_8_REV)) return data;
+    *format = GL_RGBA; *type = GL_UNSIGNED_BYTE;
+    if (!data) return NULL;
+    unsigned char *copy = malloc(texels * 4);
+    if (!copy) return data;
+    const unsigned char *src = data;
+    for (size_t i = 0; i < texels; ++i) {
+        copy[4 * i] = src[4 * i + 2]; copy[4 * i + 1] = src[4 * i + 1];
+        copy[4 * i + 2] = src[4 * i]; copy[4 * i + 3] = src[4 * i + 3];
+    }
+    *owned = copy;
+    return copy;
+}
+static GLint sized_rgba(GLint internal) {
+    switch (internal) { case GL_RGBA: case 4: case 0x8058 /* RGBA8 */: return 0x8058; default: return internal; }
+}
+static void tex_image_3d(GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h, GLsizei d, GLint border,
+                         GLenum format, GLenum type, const void *data) {
+    void *owned; const void *pixels = rgba_copy(&format, &type, data, (size_t)w * h * d, &owned);
+    GLint previous = with_unit_begin();
+    glTexImage3D(target, level, sized_rgba(internal), w, h, d, border, format, type, pixels);
+    with_unit_end(previous);
+    free(owned);
+}
+static void tex_sub_image_3d(GLenum target, GLint level, GLint x, GLint y, GLint z, GLsizei w, GLsizei h, GLsizei d,
+                             GLenum format, GLenum type, const void *data) {
+    void *owned; const void *pixels = rgba_copy(&format, &type, data, (size_t)w * h * d, &owned);
+    GLint previous = with_unit_begin();
+    glTexSubImage3D(target, level, x, y, z, w, h, d, format, type, pixels);
+    with_unit_end(previous);
+    free(owned);
+}
+static void tex_parameter_3d_i(GLenum target, GLenum name, GLint value) {
+    GLint previous = with_unit_begin(); glTexParameteri(target, name, value); with_unit_end(previous);
+}
+static void tex_parameterf(GLenum target, GLenum name, GLfloat value) {
+    if (target != TARGET_3D) { gl4es_tex_parameterf(target, name, value); return; }
+    GLint previous = with_unit_begin(); glTexParameterf(target, name, value); with_unit_end(previous);
+}
+static void tex_parameterfv(GLenum target, GLenum name, const GLfloat *values) {
+    if (target != TARGET_3D) { gl4es_tex_parameterfv(target, name, values); return; }
+    GLint previous = with_unit_begin(); glTexParameterfv(target, name, values); with_unit_end(previous);
 }
 
 // Références directes de gl.c, que gl4es n'exporte pas sous ces noms.
@@ -183,6 +408,10 @@ void *rt_host_gl_symbol(void *library, const char *name) {
         {"glGetSynciv", (void *)get_synciv}, {"glGetString", (void *)get_string},
         {"glCheckFramebufferStatus", (void *)check_framebuffer_status},
         {"glTexParameteri", (void *)tex_parameteri}, {"glTexParameteriv", (void *)tex_parameteriv},
+        {"glTexParameterf", (void *)tex_parameterf}, {"glTexParameterfv", (void *)tex_parameterfv},
+        {"glBindTexture", (void *)bind_texture}, {"glBindTextureEXT", (void *)bind_texture},
+        {"glTexImage3D", (void *)tex_image_3d}, {"glTexImage3DEXT", (void *)tex_image_3d},
+        {"glTexSubImage3D", (void *)tex_sub_image_3d}, {"glTexSubImage3DEXT", (void *)tex_sub_image_3d},
         {"glCheckFramebufferStatusEXT", (void *)check_framebuffer_status},
     };
     for (size_t i = 0; i < sizeof(extras) / sizeof(*extras); ++i) {
@@ -191,6 +420,8 @@ void *rt_host_gl_symbol(void *library, const char *name) {
         int sync = strstr(name, "Sync") != NULL;
         return sync && !es_fence_sync ? NULL : extras[i].fn;
     }
+    void *wrapper = gl4es_get_string ? traced(name) : NULL;
+    if (wrapper) return wrapper;
     return gl4es_GetProcAddress(name);
 }
 

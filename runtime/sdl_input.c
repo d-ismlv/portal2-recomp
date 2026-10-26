@@ -11,6 +11,10 @@
 // SHIMS: SDL_HapticOpenFromJoystick SDL_HapticClose SDL_HapticRumbleInit SDL_HapticRumblePlay
 #include "modules.h"
 #include <SDL2/SDL.h>
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+#include "ios/sdl_ios.h"   // coordonnées en pixels pour le jeu
+#endif
 #include <stddef.h>
 #include <stdio.h>
 #include <stdlib.h>

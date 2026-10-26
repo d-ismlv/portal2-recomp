@@ -12,6 +12,8 @@ LINUX_ROOT=$(python3 -c "import json;print(json.load(open('config/local.json'))[
 xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || xcrun simctl boot "$DEVICE"
 xcrun simctl install "$DEVICE" build/ios/sim/Portal2.app
 export SIMCTL_CHILD_P2_LOG_FILE="$PWD/build/ios/sim/game.log"
+# Le simulateur joue le son sur les haut-parleurs du Mac : muet sauf P2_SIM_AUDIO=1.
+[ "${P2_SIM_AUDIO:-0}" = 1 ] || export SIMCTL_CHILD_SDL_AUDIODRIVER=dummy
 perl -e "alarm $SECONDS_MAX; exec @ARGV" xcrun simctl launch --console-pty --terminate-running-process "$DEVICE" \
   fr.kanapitsas.portal2 --images "$PWD/build/game/prep" --game-dir "$GAME_ROOT" --linux-root "$LINUX_ROOT" \
   -- "${GAME_ARGS[@]}" > build/ios/sim/launch.log 2>&1
