@@ -6,8 +6,17 @@ mesurées en jeu (sp_a1_intro1, focus simulé, fenêtre cachée, M3 Pro) :
 
 | build | 1280×720 | 2560×1440 |
 |---|---|---|
-| `-O1` mémoire contrôlée | ~117 fps | — |
-| `--release` (`-O2 --fast-memory`) | 200-250 fps | ~180 fps |
+| `-O1` mémoire contrôlée (25 oct. soir) | ~117 fps | — |
+| `--release` (`-O2 --fast-memory`), 26 oct. matin | 235-255 fps | ~263 fps |
+
+Gains de la nuit du 25 au 26 (mesurés avec `tools/bench_game.py`, moyenne de
+la seconde moitié de plusieurs parties) : `--release` (×1,7), QoS interactive
+(+15 %), caches de fichiers (access/fopen des absents, parents de la racine,
+flux libc indexés), et surtout ajouts `glBufferSubData` non synchronisés dans
+un stockage neuf (+30 %, relu trois fois par Codex, `P2_GL_STREAM_UNSYNC=0`
+pour désactiver). Essais écartés, mesures à l'appui : annoncer 2 ou 4 CPU
+(plus lent), relâcher le verrou invité pendant les appels GL (plus lent),
+forcer l'usage des tampons, `gl_bufmode`.
 
 Le thread principal attend surtout le pilote OpenGL d'Apple (soumissions
 Metal sur glBufferSubData de tampons en vol, compilation GLSL à la volée,
