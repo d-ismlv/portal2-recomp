@@ -1,6 +1,9 @@
 // Pont OpenGL : appels invités i386 vers le GL hôte, dans un contexte CGL
 // legacy hors écran (celui que SDL crée sous macOS pour togl).
 #include "checks.h"
+#include <stdlib.h>
+uint64_t rt_gl_stream_unsync_writes(void);
+__attribute__((constructor)) static void enable_stream_unsync(void) { setenv("P2_GL_STREAM_UNSYNC", "1", 0); }
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
@@ -306,5 +309,51 @@ RT_CHECK(gl_stream_subdata_keeps_buffer_contents) {
     assert(serialized == GL_TRUE);                                             // paramètres restaurés
     assert(glGetError() == GL_NO_ERROR);
     W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(saved);
+}
+
+static uint32_t new_buffer(uint32_t target, uint32_t size) {
+    W32(DATA, 0); gl("glGenBuffersARB", 2, 1, DATA);
+    uint32_t buffer = R32(DATA);
+    gl("glBindBufferARB", 2, target, buffer);
+    gl("glBufferDataARB", 4, target, size, 0, GL_STREAM_DRAW);
+    return buffer;
+}
+RT_CHECK(gl_stream_unsync_only_beyond_written_data) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    for (uint32_t i = 0; i < 64; ++i) W8(DATA + 0x100 + i, (uint8_t)(i + 7));
+    uint32_t buffer = new_buffer(GL_ARRAY_BUFFER, 64);
+    uint64_t before = rt_gl_stream_unsync_writes();
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == before + 1);                     // ajout dans un stockage neuf
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == before + 1);                     // réécriture : synchronisé
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 16, 8, DATA + 0x110);
+    assert(rt_gl_stream_unsync_writes() == before + 2);
+    // Échec de glBufferData (taille négative) : état inconnu, chemin synchronisé.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);
+    assert(glGetError() == GL_INVALID_VALUE);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 40, 8, DATA + 0x128);
+    assert(rt_gl_stream_unsync_writes() == before + 2);
+    // Lecture de texture vers ce tampon lié en PACK : le GPU peut y écrire.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);
+    gl("glBindBufferARB", 2, GL_PIXEL_PACK_BUFFER, buffer);
+    GLuint texture; glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
+    uint32_t pixel = 0x11223344u; glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &pixel);
+    gl("glGetTexImage", 5, GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);   // le GPU écrit dans le tampon PACK
+    glDeleteTextures(1, &texture);
+    gl("glBindBufferARB", 2, GL_PIXEL_PACK_BUFFER, 0);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 32, 8, DATA + 0x120);
+    assert(rt_gl_stream_unsync_writes() == before + 2);
+    // Suppression puis réutilisation du nom : aucun état hérité.
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
+    uint32_t again = new_buffer(GL_ARRAY_BUFFER, 64);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == before + 3);
+    uint8_t back[8]; glGetBufferSubData(GL_ARRAY_BUFFER, 0, 8, back);
+    for (int i = 0; i < 8; ++i) assert(back[i] == (uint8_t)(i + 7));
+    assert(glGetError() == GL_NO_ERROR);
+    W32(DATA, again); gl("glDeleteBuffersARB", 2, 1, DATA);
     CGLSetCurrentContext(saved);
 }

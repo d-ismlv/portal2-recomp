@@ -105,6 +105,7 @@ uint32_t rt_gl_proc_address(const char *name) {
     return entry && host_function(entry) ? rt_dynamic_import(name) : 0;
 }
 
+static int gl_execute(CPU *c, const char *name, const RtGlEntry *entry, void *fn);
 static int gl_shim(CPU *c, const char *name) {
     if (is_glx(name)) return glx_shim(c, name);
     const RtGlEntry *entry = find_entry(name);
@@ -121,13 +122,14 @@ static int gl_shim(CPU *c, const char *name) {
         c->eax = 0; c->edx = 0;
         return 1;
     }
-    return entry->thunk(c, fn);
+    return gl_execute(c, name, entry, fn);
 }
 // Résolution unique par adresse d'import : l'aiguillage rappelle ensuite
 // directement gl_call avec l'entrée, sans comparaison GLX ni recherche
 // dichotomique parmi ~180 noms à chaque appel (des millions par seconde).
 static int stream_enabled(void);
-static int stream_hook(CPU *c, const char *name, void *fn);
+static int stream_before(CPU *c, const char *name);
+static void stream_after(CPU *c, const char *name);
 
 // Diagnostic P2_GL_TIMING=1 : temps réel cumulé par fonction GL (et échange
 // d'images, sdl_video.c), affiché toutes les 5 s, sans signaux.
@@ -174,17 +176,27 @@ void rt_gl_timing_add(const char *label, uint64_t ticks) {   // échange d'image
     gl_ticks[rt_gl_entry_count] += ticks; ++gl_counts[rt_gl_entry_count];
     gl_timing_report();
 }
+static int gl_execute(CPU *c, const char *name, const RtGlEntry *entry, void *fn);
 static int gl_call(CPU *c, const char *name, void *data) {
     const RtGlEntry *entry = data;
     void *fn = host_function(entry);
     if (!fn) rt_trap(c, c->eip, "fonction GL absente de OpenGL.framework");
     if (!CGLGetCurrentContext()) return gl_shim(c, name);   // chemin rare : même traitement que sans résolution
-    if (stream_enabled() && stream_hook(c, name, fn)) return 1;
-    if (__builtin_expect(!gl_timing(), 1)) return entry->thunk(c, fn);
-    uint64_t start = mach_absolute_time();
-    int handled = entry->thunk(c, fn);
-    size_t index = (size_t)(entry - rt_gl_entries);
-    gl_ticks[index] += mach_absolute_time() - start; ++gl_counts[index];
+    return gl_execute(c, name, entry, fn);
+}
+// Seul chemin d'exécution d'un thunk GL, premier appel compris (avant que
+// l'aiguillage ait mémorisé gl_call) : suivi des tampons et chronométrage.
+static int gl_execute(CPU *c, const char *name, const RtGlEntry *entry, void *fn) {
+    if (stream_enabled() && stream_before(c, name)) return 1;
+    int handled;
+    if (__builtin_expect(!gl_timing(), 1)) handled = entry->thunk(c, fn);
+    else {
+        uint64_t start = mach_absolute_time();
+        handled = entry->thunk(c, fn);
+        size_t index = (size_t)(entry - rt_gl_entries);
+        gl_ticks[index] += mach_absolute_time() - start; ++gl_counts[index];
+    }
+    if (stream_enabled()) stream_after(c, name);
     return handled;
 }
 static int gl_resolve(const char *name, RtShimRoute *route) {
@@ -510,6 +522,7 @@ static int flush_range(CPU *c, void *fn) {
     return 1;
 }
 void rt_gl_stream_serialized(uint32_t name, int serialized);
+void rt_gl_stream_forget(uint32_t name);
 int rt_gl_manual_glBufferParameteriAPPLE(CPU *c, void *fn) {
     uint32_t target = rt_gl_u32(c, 0), pname = rt_gl_u32(c, 1);
     int32_t value = (int32_t)rt_gl_u32(c, 2);
@@ -537,6 +550,7 @@ int rt_gl_manual_glDeleteBuffersARB(CPU *c, void *fn) {
     CGLShareGroupObj share = current_share();
     for (int32_t i = 0; i < n; ++i) {
         uint32_t name = R32(list + 4 * (uint32_t)i);
+        rt_gl_stream_forget(name);
         for (Mirror **p = &mirrors; *p; p = &(*p)->next) {
             if ((*p)->share != share || (*p)->name != name || !name) continue;
             Mirror *dead = *p; *p = dead->next;
@@ -625,51 +639,68 @@ int rt_gl_manual_glGetTexParameterPointervAPPLE(CPU *c, void *fn) {
     return 1;
 }
 
-// ---- Écritures en flux sans synchronisation (actif par défaut ; P2_GL_STREAM_UNSYNC=0 pour désactiver) ----
+// ---- Écritures en flux sans synchronisation (P2_GL_STREAM_UNSYNC=1 pour activer) ----
 // togl remplit ses tampons dynamiques par ajouts croissants (glBufferSubData) et
 // les réalloue (glBufferData) une fois pleins ; le pilote d'Apple synchronise
 // chaque ajout avec le GPU (~26 µs). Une écriture entièrement au-delà de tout
 // ce qui a été écrit dans le stockage courant ne peut être lue par aucune
 // commande en attente : elle passe par une projection non sérialisée
-// (APPLE_flush_buffer_range, comme le portage Mac de Valve). Mesuré : 218 -> 274 fps
-// en jeu (--release, 1280x720). Tout chevauchement,
-// projection invitée en cours ou état inconnu garde le chemin synchronisé.
-typedef struct { uint32_t name; uint32_t size, written_end; int known, serialized; } Stream;
-static Stream *streams; static uint32_t stream_capacity;   // adressage ouvert, nom 0 = vide
+// (APPLE_flush_buffer_range, comme le portage Mac de Valve). Mesuré : 218 -> 274
+// fps en jeu (--release, 1280x720). L'état est suivi par (share group, nom) ;
+// tout chevauchement, projection, écriture possible du GPU (lecture de pixels
+// vers un tampon, copie), échec de glBufferData ou état inconnu rend le
+// stockage « entièrement écrit » : chemin synchronisé jusqu'à la réallocation.
+typedef struct { CGLShareGroupObj share; uint32_t name; uint32_t size, written_end; int known, serialized, used; } Stream;
+static Stream *streams; static uint32_t stream_capacity, stream_used;
+static uint64_t stream_unsync_writes;
+uint64_t rt_gl_stream_unsync_writes(void) { return stream_unsync_writes; }   // tests   // used : occupés + supprimés
+static uint32_t stream_hash(CGLShareGroupObj share, uint32_t name) {
+    return (uint32_t)(((uintptr_t)share >> 4) * 0x9e3779b1u) ^ (name * 2654435761u);
+}
 static Stream *stream_state(uint32_t name, int create) {
     if (!name) return NULL;
-    if (create && (!streams || stream_capacity < 64)) {
-        free(streams); stream_capacity = 4096; streams = calloc(stream_capacity, sizeof(*streams));
-        if (!streams) { stream_capacity = 0; return NULL; }
+    CGLShareGroupObj share = current_share();
+    if (create && (stream_used + 1) * 2 > stream_capacity) {
+        uint32_t capacity = stream_capacity ? stream_capacity * 2 : 4096;
+        Stream *grown = calloc(capacity, sizeof(*grown));
+        if (!grown) return NULL;
+        uint32_t live = 0;
+        for (uint32_t i = 0; i < stream_capacity; ++i) if (streams[i].used == 1) {
+            uint32_t h = stream_hash(streams[i].share, streams[i].name) & (capacity - 1);
+            while (grown[h].used) h = (h + 1) & (capacity - 1);
+            grown[h] = streams[i]; ++live;
+        }
+        free(streams); streams = grown; stream_capacity = capacity; stream_used = live;
     }
-    if (!streams) return NULL;
-    for (uint32_t i = 0, h = (name * 2654435761u) & (stream_capacity - 1); i < stream_capacity; ++i, h = (h + 1) & (stream_capacity - 1)) {
-        if (streams[h].name == name) return &streams[h];
-        if (!streams[h].name) {
+    if (!stream_capacity) return NULL;
+    Stream *tombstone = NULL;
+    for (uint32_t i = 0, h = stream_hash(share, name) & (stream_capacity - 1); i < stream_capacity; ++i, h = (h + 1) & (stream_capacity - 1)) {
+        Stream *e = &streams[h];
+        if (e->used == 1 && e->share == share && e->name == name) return e;
+        if (e->used == 2) { if (!tombstone) tombstone = e; continue; }   // supprimé
+        if (!e->used) {
             if (!create) return NULL;
-            streams[h] = (Stream){name, 0, 0, 0, 1};
-            return &streams[h];
+            if (!tombstone) { tombstone = e; ++stream_used; }
+            *tombstone = (Stream){share, name, 0, 0, 0, 1, 1};
+            return tombstone;
         }
     }
     return NULL;
 }
 static int stream_enabled(void) {
     static int value = -1;
-    if (value < 0) { const char *e = getenv("P2_GL_STREAM_UNSYNC"); value = !e || strcmp(e, "0"); }   // actif par défaut
+    if (value < 0) { const char *e = getenv("P2_GL_STREAM_UNSYNC"); value = e && strcmp(e, "0"); }
     return value;
 }
 void rt_gl_stream_serialized(uint32_t name, int serialized) {
+    if (!stream_enabled()) return;
     Stream *st = stream_state(name, 1); if (st) st->serialized = serialized;
 }
-static void stream_storage(uint32_t target, uint32_t size, int with_data) {
-    Stream *st = stream_state(bound_buffer(target), 1);
-    if (st) { st->size = size; st->written_end = with_data ? size : 0; st->known = 1; }
+void rt_gl_stream_forget(uint32_t name) {   // glDeleteBuffers : le nom pourra être réutilisé
+    if (!stream_enabled()) return;
+    Stream *st = stream_state(name, 0); if (st) st->used = 2;
 }
-static void stream_written(uint32_t target, uint32_t end) {
-    Stream *st = stream_state(bound_buffer(target), 0);
-    if (st && end > st->written_end) st->written_end = end;
-}
-static void stream_unknown(uint32_t target) {
+static void stream_unknown(uint32_t target) {   // stockage considéré entièrement écrit
     Stream *st = stream_state(bound_buffer(target), 0);
     if (st) st->written_end = st->size;
 }
@@ -695,21 +726,34 @@ static int stream_subdata(CPU *c, uint32_t target, uint32_t offset, uint32_t siz
     if (was_serialized) glBufferParameteriAPPLE(target, GL_BUFFER_SERIALIZED_MODIFY_APPLE, GL_TRUE);
     if (!host) return 0;
     st->written_end = offset + size;
+    ++stream_unsync_writes;
     return 1;
 }
-// Appelé avant le thunk : suit le stockage des tampons et détourne les ajouts.
-static int stream_hook(CPU *c, const char *name, void *fn) {
-    (void)fn;
+// Avant le thunk : détourne les ajouts, marque les écritures possibles.
+static int stream_before(CPU *c, const char *name) {
     uint32_t a = c->esp + 4;
     if (!strcmp(name, "glBufferSubData") || !strcmp(name, "glBufferSubDataARB")) {
         uint32_t target = R32(a), offset = R32(a + 4), size = R32(a + 8), data = R32(a + 12);
         if (stream_subdata(c, target, offset, size, data)) return 1;
-        stream_written(target, offset + size);
-    } else if (!strcmp(name, "glBufferData") || !strcmp(name, "glBufferDataARB")) {
-        stream_storage(R32(a), R32(a + 4), R32(a + 8) != 0);
-    } else if (!strncmp(name, "glMapBuffer", 11) || !strcmp(name, "glCopyBufferSubData")) {
-        stream_unknown(!strcmp(name, "glCopyBufferSubData") ? R32(a + 4) : R32(a));
+        Stream *st = stream_state(bound_buffer(target), 0);
+        if (st) { uint64_t end = (uint64_t)offset + size; if (end > st->written_end) st->written_end = end > st->size ? st->size : (uint32_t)end; }
+    } else if (!strncmp(name, "glMapBuffer", 11)) {
+        stream_unknown(R32(a));
+    } else if (!strcmp(name, "glCopyBufferSubData")) {
+        stream_unknown(R32(a + 4));                            // cible d'écriture
+    } else if (!strcmp(name, "glReadPixels") || !strcmp(name, "glGetTexImage") ||
+               !strncmp(name, "glGetCompressedTexImage", 23)) {
+        stream_unknown(GL_PIXEL_PACK_BUFFER);                  // le GPU peut écrire dans le tampon de pixels lié
     }
     return 0;
 }
-
+// Après le thunk : glBufferData n'est pris en compte que s'il a réussi.
+static void stream_after(CPU *c, const char *name) {
+    if (strcmp(name, "glBufferData") && strcmp(name, "glBufferDataARB")) return;
+    uint32_t a = c->esp + 4, target = R32(a), size = R32(a + 4), data = R32(a + 8);
+    Stream *st = stream_state(bound_buffer(target), 1);
+    if (!st) return;
+    GLint actual = -1; glGetBufferParameteriv(target, GL_BUFFER_SIZE, &actual);
+    if ((int32_t)size < 0 || actual < 0 || (uint32_t)actual != size) { st->known = 0; return; }
+    st->size = size; st->written_end = data ? size : 0; st->known = 1;
+}
