@@ -72,7 +72,7 @@ index 498ecc5..8652abf 100644
                  type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
          else
 diff --git a/src/gl/fpe.c b/src/gl/fpe.c
-index c21bcf1..7917ceb 100644
+index c21bcf1..6072743 100644
 --- a/src/gl/fpe.c
 +++ b/src/gl/fpe.c
 @@ -462,6 +462,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
@@ -145,7 +145,21 @@ index c21bcf1..7917ceb 100644
          }
          // now find the program
          khint_t k_program;
-@@ -1105,15 +1107,27 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+@@ -1051,6 +1053,13 @@ int fpe_gettexture(int TMU) {
+     return target;
+ }
+ 
++// Portal 2 iOS (runtime/ios/gl_ios.m) : un attribut GL_BGRA d'octets lu dans
++// un tampon est passé tel quel (RGBA normalisé) et permuté par le nuanceur de
++// sommets (uniforme p2_bgra, bit i : attribut i), au lieu d'être converti en
++// flottants sur le CPU à chaque dessin, ce qui forçait aussi le chemin
++// « mode immédiat » du pilote (recopie de tous les sommets).
++extern int gl4es_p2_bgra_program(GLuint program) __attribute__((weak));
++extern void gl4es_p2_bgra_mask(GLuint program, unsigned mask) __attribute__((weak));
+ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* indices, scratch_t* scratch) {
+     // the handling of GL_BGRA size of GL_DOUBLE using 1 scratch in not ideal, and a waste when dealing with Buffers
+     // TODO: have the scratch buffer part of the VBO, and tag it dirty when buffer is changed (or always dirty for VBO 0)
+@@ -1105,15 +1114,27 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
                  glprogram->fpe_cache = fpe_NewCache();
              glprogram = fpe_CustomShader_DefaultVertex(glprogram, &vertex_state);    // fetch from cache if exist or create it
              program = glprogram->id;
@@ -182,6 +196,51 @@ index c21bcf1..7917ceb 100644
          }
          if(glstate->gleshard->program != program)
          {
+@@ -1440,6 +1461,8 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+         #undef GO
+     }
+     // set VertexAttrib if needed
++    int p2_bgra_ok = gl4es_p2_bgra_program ? gl4es_p2_bgra_program(glstate->gleshard->program) : 0;
++    unsigned p2_bgra = 0;
+     for(int i=0; i<hardext.maxvattrib; i++) 
+     if(glprogram->va_size[i])   // only check used VA...
+     {
+@@ -1461,6 +1484,8 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+             else
+                 gles_glDisableVertexAttribArray(i);
+         }
++        if(p2_bgra_ok && v->enabled && w->size==GL_BGRA && w->type==GL_UNSIGNED_BYTE && w->real_buffer)
++            p2_bgra |= 1u<<i;
+         // check if new value has to be sent to hardware
+         if(v->enabled) {
+             // array case
+@@ -1469,7 +1494,17 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+                 || v->stride!=w->stride || v->buffer!=w->buffer || (w->real_buffer==0 && v->pointer!=ptr)
+                 || v->real_buffer!=w->real_buffer || (w->real_buffer!=0 && v->real_pointer != w->real_pointer) 
+                 || w->real_buffer!=glstate->bind_buffer.array) {
+-                if((w->size==GL_BGRA || w->type==GL_DOUBLE) && scratch->size<8) { 
++                if(p2_bgra_ok && w->size==GL_BGRA && w->type==GL_UNSIGNED_BYTE && w->real_buffer) {
++                    v->size = 4;
++                    v->type = GL_UNSIGNED_BYTE;
++                    v->normalized = GL_TRUE;
++                    v->integer = 0;
++                    v->stride = w->stride;
++                    v->real_buffer = w->real_buffer;
++                    v->real_pointer = w->real_pointer;
++                    v->pointer = v->real_pointer;
++                    v->buffer = w->buffer;
++                } else if((w->size==GL_BGRA || w->type==GL_DOUBLE) && scratch->size<8) { 
+                     // need to adjust, so first need the min/max (a shame as I already must have that somewhere)
+                     int imin, imax;
+                     if(type==0) {
+@@ -1571,6 +1606,7 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+             gles_glDisableVertexAttribArray(i);
+         }
+     }
++    if(p2_bgra_ok) gl4es_p2_bgra_mask(glstate->gleshard->program, p2_bgra);
+ }
+ 
+ void realize_blitenv(int alpha) {
 diff --git a/src/gl/fpe.h b/src/gl/fpe.h
 index 4c51179..9bdaf3c 100644
 --- a/src/gl/fpe.h

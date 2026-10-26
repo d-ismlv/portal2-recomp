@@ -171,6 +171,37 @@ static const char shadow_emulation_helpers[] =
     "vec4 p2_gl4es_shadow2DProjLod(int u, sampler2DShadow s, vec4 c, float l) { vec4 t = gl4es_shadow2DProjLod(s, c, l); return p2_outside(u, c.xy / c.w) ? vec4(0.0) : t; }\n";
 
 // NULL si le source n'est pas du GLSL ES 1.00 (déjà 3.00, ou autre version).
+// Attributs de togl « in vec4 vN; » : gl4es leur passe les couleurs D3DCOLOR
+// (GL_BGRA) telles quelles depuis le tampon, et le nuanceur les remet dans
+// l'ordre selon le bit N de p2_bgra (voir gl4es_p2_bgra_mask, gl_ios.m).
+// Chaque usage de vN passe par p2_vN() : un #define après la déclaration,
+// la fonction définie avant lui lisant l'attribut réel.
+static char *bgra_attributes(char *shader) {
+    Buffer out = {0};
+    int declared = 0;
+    for (const char *p = shader; *p;) {
+        const char *end = strchr(p, '\n'); size_t n = end ? (size_t)(end - p) + 1 : strlen(p);
+        unsigned index; char tail[8] = {0}; int used = 0;
+        int attribute = !strncmp(p, "in vec4 v", 9) && sscanf(p + 9, "%u%7[; \t]%n", &index, tail, &used) == 2 &&
+                        strchr(tail, ';') && index < 32;
+        if (attribute && !declared) { if (puts_(&out, "uniform int p2_bgra;\n")) goto fail; declared = 1; }
+        if (put(&out, p, n)) goto fail;
+        if (attribute) {
+            char helper[200];
+            snprintf(helper, sizeof(helper), "%svec4 p2_v%u() { return ((p2_bgra >> %u) & 1) != 0 ? v%u.zyxw : v%u; }\n#define v%u p2_v%u()\n",
+                     end ? "" : "\n", index, index, index, index, index, index);
+            if (puts_(&out, helper)) goto fail;
+        }
+        p += n;
+    }
+    if (!declared) { free(out.data); return shader; }
+    free(shader);
+    return out.data;
+fail:
+    free(out.data);
+    return shader;
+}
+
 char *rt_essl1_to_essl3(const char *source, int is_fragment, int emulate) {
     const char *p = source;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
@@ -267,6 +298,7 @@ char *rt_essl1_to_essl3(const char *source, int is_fragment, int emulate) {
         }
         if (puts_(&out, "}\n")) goto fail;
     }
+    if (!is_fragment && !(getenv("P2_IOS_BGRA") && !strcmp(getenv("P2_IOS_BGRA"), "0"))) return bgra_attributes(out.data);
     return out.data;
 fail:
     free(out.data);

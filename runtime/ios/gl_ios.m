@@ -190,6 +190,32 @@ static void es3_buffer_sub_data(GLenum t, GLintptr offset, GLsizeiptr size, cons
     }
     es_buffer_sub_data(t, offset, size, data);
 }
+// Couleurs BGRA lues dans le tampon (correctif de gl4es, realize_glenv) : le
+// nuanceur de sommets les permute selon l'uniforme p2_bgra (essl3.c). Par
+// programme ES : emplacement de l'uniforme et dernière valeur envoyée, oubliés
+// à chaque édition de liens.
+typedef struct { GLuint program; GLint location; unsigned value; unsigned generation; } BgraEntry;
+static BgraEntry bgra_cache[1024];
+static unsigned bgra_generation = 1;
+static GLint (*es_get_uniform_location)(GLuint, const GLchar *);
+static void (*es_uniform1i)(GLint, GLint);
+static void (*es_link_program_always)(GLuint);
+static void link_program_always(GLuint program) { ++bgra_generation; es_link_program_always(program); }
+static BgraEntry *bgra_entry(GLuint program) {
+    if (!program || !es_get_uniform_location) return NULL;
+    BgraEntry *e = &bgra_cache[(program * 2654435761u) % 1024];
+    if (e->program != program || e->generation != bgra_generation) {
+        *e = (BgraEntry){program, es_get_uniform_location(program, "p2_bgra"), ~0u, bgra_generation};
+    }
+    return e;
+}
+int gl4es_p2_bgra_program(GLuint program) { BgraEntry *e = bgra_entry(program); return e && e->location >= 0; }
+void gl4es_p2_bgra_mask(GLuint program, unsigned mask) {
+    BgraEntry *e = bgra_entry(program);
+    if (!e || e->location < 0 || e->value == mask) return;
+    e->value = mask;
+    es_uniform1i(e->location, (GLint)mask);   // programme courant : celui du dessin
+}
 static void *gles_function(const char *name) {
     if (!strcmp(name, "glBufferSubData")) {
         es_buffer_sub_data = dlsym(gles, name);
@@ -204,6 +230,12 @@ static void *gles_function(const char *name) {
     if (getenv("P2_IOS_GL_TRACE")) {
         if (!strcmp(name, "glCompileShader")) { es_compile_shader = dlsym(gles, name); return (void *)es_compile; }
         if (!strcmp(name, "glLinkProgram")) { es_link_program = dlsym(gles, name); return (void *)es_link; }
+    }
+    if (!strcmp(name, "glLinkProgram")) {
+        es_link_program_always = dlsym(gles, name);
+        es_get_uniform_location = dlsym(gles, "glGetUniformLocation");
+        es_uniform1i = dlsym(gles, "glUniform1i");
+        return (void *)link_program_always;
     }
     if (!strcmp(name, "glBindFramebuffer")) return (void *)bind_framebuffer;
     if (!strcmp(name, "glGetIntegerv")) return (void *)get_integerv;

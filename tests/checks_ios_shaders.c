@@ -58,3 +58,21 @@ RT_CHECK(essl3_emulation_wraps_sampling_and_output) {
     assert(out && !strstr(out, "p2_") && strstr(out, "texture( sampler1, t.xy )"));
     free(out);
 }
+
+// Attributs vN de togl : couleurs BGRA permutées dans le nuanceur selon le bit
+// N de p2_bgra, sans copie CPU (gl4es les lit alors dans le tampon).
+RT_CHECK(essl3_vertex_attributes_swizzle_bgra_by_mask) {
+    const char *vs = "#version 100\nattribute vec4 v0; \nattribute vec4 v3;\nvarying vec4 c;\n"
+                     "void main() {\nc = v3 * v0.x;\ngl_Position = v0;\n}\n";
+    char *out = rt_essl1_to_essl3(vs, 0, 1);
+    assert(out);
+    assert(strstr(out, "uniform int p2_bgra;\nin vec4 v0;"));   // uniforme déclarée avant les fonctions
+    assert(strstr(out, "vec4 p2_v3() { return ((p2_bgra >> 3) & 1) != 0 ? v3.zyxw : v3; }\n#define v3 p2_v3()\n"));
+    assert(strstr(out, "#define v0 p2_v0()"));
+    assert(strstr(out, "c = v3 * v0.x;"));   // usages laissés au préprocesseur
+    free(out);
+    const char *plain = "#version 100\nattribute vec2 aPosition;\nvoid main() {\ngl_Position = vec4(aPosition, 0.0, 1.0);\n}\n";
+    out = rt_essl1_to_essl3(plain, 0, 1);
+    assert(out && !strstr(out, "p2_bgra"));   // sans attribut vN : inchangé
+    free(out);
+}
