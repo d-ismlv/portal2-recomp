@@ -69,6 +69,12 @@ Console du jeu : `-condebug` l'écrit dans
 | `glBufferSubData` non synchronisé | ~19 |
 | couleurs BGRA dans le tampon, permutées par le nuanceur | ~47 |
 
+Sans plafond d'écran (`tools/ios_bench.py`, `P2_IOS_NO_PRESENT=1`),
+sp_a2_laser_stairs au point d'arrivée : natif 2796×1290 90 i/s (MSAA 4×) ou
+94 (sans) ; échelle 2 (1864×860) 154 ; 1,5 178. Le GPU limite : échelle 2 par
+défaut sur appareil. L'écran ProMotion arrondit la cadence affichée (120, 60,
+40…) : une image de plus de 8,3 ms s'affiche à 60.
+
 Leçons : le code du jeu traduit pèse peu ; le coût est dans le pilote ES
 d'Apple, qui attend le GPU sur toute écriture dans un tampon en vol et
 recopie tous les sommets dès qu'un attribut vient de la mémoire client.

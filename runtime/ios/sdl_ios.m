@@ -10,9 +10,9 @@
 
 // Échelle points -> pixels : celle de l'écran sur appareil. Sur simulateur
 // (rendu OpenGL ES logiciel, 0,5 image/s en 2622×1206), 1 par défaut.
-// P2_IOS_RENDER_SCALE=1 ou =native force l'un ou l'autre ; une valeur entre
-// les deux (2, 1,5…) rend moins de pixels, agrandis par l'écran (la vue GL
-// prend cette échelle : rt_ios_gl_create_context, gl_ios.m).
+// Sur appareil, 2 par défaut (voir plus bas). P2_IOS_RENDER_SCALE=1, =native
+// ou une valeur entre les deux (1,5…) : moins de pixels, agrandis par l'écran
+// (la vue GL prend cette échelle : rt_ios_gl_create_context, gl_ios.m).
 float rt_ios_render_scale(void) {
     static float scale;
     if (scale > 0) return scale;
@@ -27,6 +27,10 @@ float rt_ios_render_scale(void) {
     if ([NSThread isMainThread]) native = UIScreen.mainScreen.nativeScale;
     else dispatch_sync(dispatch_get_main_queue(), ^{ native = UIScreen.mainScreen.nativeScale; });
     if (native <= 1) return scale = 1.0f;
+    // Par défaut 2 (iPhone 15 Pro Max : 1864×860 au lieu de 2796×1290) : sans
+    // plafond d'écran, 154 i/s contre 90 en natif dans sp_a2_laser_stairs ; le
+    // GPU limite (mesuré par tools/ios_bench.py).
+    if (!requested && !native_requested) requested = 2.0f;
     return scale = requested > 1.0f && requested < native ? requested : (float)native;
 }
 static int up(int v) { return (int)lroundf((float)v * rt_ios_render_scale()); }
