@@ -110,6 +110,27 @@ static void dump_section(FILE *out, int main_only, int with_callers) {
     free(entries); free(names);
 }
 
+// Chaînes complètes des clés les plus fréquentes du thread principal.
+static void dump_chains(FILE *out) {
+    uint32_t best[8] = {0}; uint32_t counts[8] = {0};
+    for (uint32_t i = 0; i < SLOTS; ++i) {
+        if (__atomic_load_n(&used[i], __ATOMIC_ACQUIRE) != 2 || !keys[i].main) continue;
+        uint32_t h = hits[i];
+        for (int k = 0; k < 8; ++k) if (h > counts[k]) {
+            memmove(&counts[k + 1], &counts[k], (7 - k) * sizeof(*counts));
+            memmove(&best[k + 1], &best[k], (7 - k) * sizeof(*best));
+            counts[k] = h; best[k] = i; break;
+        }
+    }
+    fprintf(out, "== piles complètes du thread principal (8 plus fréquentes)\n");
+    for (int k = 0; k < 8 && counts[k]; ++k) {
+        const Key *key = &keys[best[k]];
+        fprintf(out, "%u : %s", counts[k], symbol(key->pc));
+        for (int d = 0; d < DEPTH && key->chain[d]; ++d) fprintf(out, " <- %s", symbol(key->chain[d]));
+        fputc('\n', out);
+    }
+}
+
 static void dump(void) {
     char temporary[1100];
     snprintf(temporary, sizeof(temporary), "%s.tmp", output);
@@ -119,6 +140,7 @@ static void dump(void) {
     dump_section(out, 1, 0);
     dump_section(out, 1, 1);
     dump_section(out, 1, 2);
+    dump_chains(out);
     dump_section(out, 0, 0);
     dump_section(out, 0, 1);
     fclose(out);
