@@ -71,6 +71,7 @@ static int string_event(uint32_t type) {
 // (ex. 0x205, SDL_EVENT_WINDOW_MOVED) : un jeu SDL2 ne les verrait jamais,
 // ils ne lui sont donc pas transmis (ni par observateur ni par PollEvent).
 int rt_sdl_event_is_sdl2(uint32_t type);
+void fps_overlay_toggle(void);
 int rt_sdl_event_is_sdl2(uint32_t type) {
     return plain_event(type) || string_event(type) || (type >= SDL_USEREVENT && type <= SDL_LASTEVENT) ||
            type == SDL_TEXTEDITING_EXT || type == SDL_SENSORUPDATE || type == SDL_CONTROLLERSENSORUPDATE ||
@@ -296,6 +297,10 @@ static void poll_into(CPU *c, uint32_t guest, int *got) {
         return;
     }
     while ((*got = SDL_PollEvent(&event)) && !rt_sdl_event_is_sdl2(event.type)) {}
+    // F3 : compteur d'images hôte (fps_overlay.c). La touche reste transmise au
+    // jeu, qui ne l'associe à rien par défaut.
+    if (*got && event.type == SDL_KEYDOWN && !event.key.repeat && event.key.keysym.scancode == SDL_SCANCODE_F3)
+        fps_overlay_toggle();
     if (*got) event_to_guest(c, &event, guest, 1);
 }
 

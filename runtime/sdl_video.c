@@ -28,6 +28,7 @@
 #include <OpenGL/glext.h>
 #include <mach/mach_time.h>
 void rt_gl_timing_add(const char *label, uint64_t ticks);
+void fps_overlay_frame(int drawable_width, int drawable_height);
 #include "sdl_common.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -406,6 +407,7 @@ static int sdl_video(CPU *c, const char *name) {
     }
     else if (!strcmp(n, "GL_SwapWindow")) {
         SDL_Window *w = WINDOW(0);
+        if (w) { int dw = 0, dh = 0; SDL_GL_GetDrawableSize(w, &dw, &dh); fps_overlay_frame(dw, dh); }
         diagnose_frame(w);
         unsigned saved = rt_guest_suspend();   // la synchronisation verticale peut bloquer
         uint64_t start = mach_absolute_time();
