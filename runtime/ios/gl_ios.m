@@ -508,7 +508,10 @@ static void tex_parameterfv(GLenum target, GLenum name, const GLfloat *values) {
 // ---- textures 16 bits normalisées (UNSIGNED_SHORT) ----
 // OpenGL ES n'a pas de RGBA16 normalisé et gl4es le rend noir (mesuré) : c'est
 // le format des pages de lightmaps HDR de Source, d'où des murs noirs. Les
-// envois sont convertis en 8 bits (octet de poids fort) avant gl4es.
+// envois RGBA16/RGB16 deviennent des demi-flottants (RGBA16F/RGB16F, même
+// valeur v / 65535, filtrables en ES 3) ; en 8 bits, les lightmaps sombres
+// n'avaient que quelques niveaux par canal, d'où des aplats irisés sur les
+// murs. Autres formats 16 bits : réduits à 8 bits (octet de poids fort).
 static void (*g4_tex_image_2d_plain)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
 static void (*g4_tex_sub_image_2d_plain)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *);
 static void (*g4_pixel_storei)(GLenum, GLint);
@@ -534,6 +537,44 @@ static unsigned char *narrow_u16(const void *data, GLsizei w, GLsizei h, int n) 
         for (size_t i = 0; i < (size_t)w * n; ++i) dst[i] = (unsigned char)(src[i] >> 8);
     }
     return out;
+}
+// v / 65535 en demi-flottant, BGRA remis en RGBA (format à passer : *format).
+static unsigned short *half_u16(const void *data, GLsizei w, GLsizei h, int n, GLenum *format) {
+    if (!data || w <= 0 || h <= 0) return NULL;
+    GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
+    if (alignment < 1) alignment = 1;
+    size_t row = (size_t)w * n * 2, stride = (row + (size_t)alignment - 1) / (size_t)alignment * (size_t)alignment;
+    __fp16 *out = malloc((size_t)w * h * n * sizeof(*out));
+    if (!out) return NULL;
+    int swap = *format == 0x80E1 /* BGRA */ || *format == 0x80E0 /* BGR */;
+    if (swap) *format = *format == 0x80E1 ? GL_RGBA : GL_RGB;
+    for (GLsizei y = 0; y < h; ++y) {
+        const unsigned short *src = (const unsigned short *)((const unsigned char *)data + (size_t)y * stride);
+        __fp16 *dst = out + (size_t)y * w * n;
+        for (GLsizei x = 0; x < w; ++x)
+            for (int c = 0; c < n; ++c) {
+                int from = swap && c < 3 ? 2 - c : c;
+                dst[(size_t)x * n + c] = (__fp16)(src[(size_t)x * n + from] / 65535.0f);
+            }
+    }
+    return (unsigned short *)out;
+}
+static GLint half_internal(GLint internal) {
+    switch (internal) { case 0x805B /* RGBA16 */: return 0x881A; case 0x8054 /* RGB16 */: return 0x881B; default: return 0; }
+}
+// Format interne de chaque texture 2D convertie en demi-flottants : les mises à
+// jour partielles (glTexSubImage2D) doivent suivre la même conversion.
+static unsigned char *half_textures; static size_t half_size;
+static GLuint bound_2d(void) { GLint t = 0; gl4es_get_integerv(GL_TEXTURE_BINDING_2D, &t); return (GLuint)t; }
+static void mark_half(GLuint texture, int on) {
+    if (texture >= half_size) {
+        size_t size = half_size ? half_size : 1024;
+        while (size <= texture) size *= 2;
+        unsigned char *grown = realloc(half_textures, size);
+        if (!grown) return;
+        memset(grown + half_size, 0, size - half_size); half_textures = grown; half_size = size;
+    }
+    half_textures[texture] = (unsigned char)on;
 }
 static void *traced(const char *name);
 static void narrow_init(void) {
@@ -574,7 +615,18 @@ static void tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint
         size_t row = ((size_t)w * bytes + 7) & ~(size_t)7;   // marge pour tout alignement de lignes
         if (bytes && (zeros = calloc(row, (size_t)h))) d = zeros;
     }
+    GLint half = ty == GL_UNSIGNED_SHORT && n >= 3 ? half_internal(i) : 0;
+    if (t == GL_TEXTURE_2D) mark_half(bound_2d(), half != 0);
     if (ty != GL_UNSIGNED_SHORT || !n) { g4_tex_image_2d_plain(t, l, i, w, h, b, f, ty, d); free(zeros); return; }
+    if (half) {
+        unsigned short *data = half_u16(d, w, h, n, &f);
+        GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
+        g4_pixel_storei(GL_UNPACK_ALIGNMENT, 2);
+        g4_tex_image_2d_plain(t, l, half, w, h, b, f, GL_HALF_FLOAT, d ? data : NULL);
+        g4_pixel_storei(GL_UNPACK_ALIGNMENT, alignment);
+        free(data);
+        return;
+    }
     unsigned char *narrow = narrow_u16(d, w, h, n);
     GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
     g4_pixel_storei(GL_UNPACK_ALIGNMENT, 1);
@@ -586,6 +638,17 @@ static void tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLs
     narrow_init();
     int n = channels(f);
     if (ty != GL_UNSIGNED_SHORT || !n) { g4_tex_sub_image_2d_plain(t, l, x, y, w, h, f, ty, d); return; }
+    GLuint texture = t == GL_TEXTURE_2D ? bound_2d() : 0;
+    if (texture && texture < half_size && half_textures[texture]) {
+        unsigned short *data = half_u16(d, w, h, n, &f);
+        if (!data) return;
+        GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
+        g4_pixel_storei(GL_UNPACK_ALIGNMENT, 2);
+        g4_tex_sub_image_2d_plain(t, l, x, y, w, h, f, GL_HALF_FLOAT, data);
+        g4_pixel_storei(GL_UNPACK_ALIGNMENT, alignment);
+        free(data);
+        return;
+    }
     unsigned char *narrow = narrow_u16(d, w, h, n);
     if (!narrow) return;
     GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
