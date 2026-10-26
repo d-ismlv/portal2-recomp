@@ -109,7 +109,10 @@ raison du rejet`.
 Sans plafond d'écran (`tools/ios_bench.py`, `P2_IOS_NO_PRESENT=1`),
 sp_a2_laser_stairs au point d'arrivée : natif 2796×1290 90 i/s (MSAA 4×) ou
 94 (sans) ; échelle 2 (1864×860) 154 ; 1,5 178. Le GPU limite : échelle 2 par
-défaut sur appareil. L'écran ProMotion arrondit la cadence affichée (120, 60,
+défaut sur appareil. Vue lourde de la même salle (setpos -188.94 -396.92
+-31.97) : ~117 i/s soutenus à l'échelle 2 avec MSAA 4× (~150 avant que le
+téléphone chauffe). Pour jouer : 60 Hz par défaut, réguliers ;
+`P2_IOS_MAX_FPS=120` demande 120 Hz (cadence alors entre 60 et 120). L'écran ProMotion arrondit la cadence affichée (120, 60,
 40…) : une image de plus de 8,3 ms s'affiche à 60.
 
 Leçons : le code du jeu traduit pèse peu ; le coût est dans le pilote ES

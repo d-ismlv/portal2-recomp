@@ -761,7 +761,8 @@ void *rt_ios_gl_share_group(void *context) {
 // soient l'antialiasing, l'échelle et la synchro du jeu). Un CADisplayLink
 // qui demande jusqu'à 120 Hz fait monter la fréquence de l'écran ; il ne fait
 // rien d'autre. Avec CADisableMinimumFrameDurationOnPhone (Info.plist).
-// P2_IOS_MAX_FPS=60 garde l'ancien comportement.
+// Désactivé par défaut : pour jouer, 60 i/s réguliers (avec MSAA) valent mieux
+// que des sauts entre 60 et 120 ; P2_IOS_MAX_FPS=120 le réactive.
 @interface P2FrameRate : NSObject
 - (void)tick:(CADisplayLink *)link;
 @end
@@ -782,7 +783,7 @@ static void request_frame_rate(void) {
     static CADisplayLink *link;
     if (link) return;
     const char *e = getenv("P2_IOS_MAX_FPS");
-    float wanted = e && atof(e) > 0 ? (float)atof(e) : (float)UIScreen.mainScreen.maximumFramesPerSecond;
+    float wanted = e && atof(e) > 0 ? fminf((float)atof(e), (float)UIScreen.mainScreen.maximumFramesPerSecond) : 60;
     if (wanted <= 60) return;
     link = [CADisplayLink displayLinkWithTarget:[P2FrameRate new] selector:@selector(tick:)];
     link.preferredFrameRateRange = CAFrameRateRangeMake(wanted, wanted, wanted);   // avec un minimum de 60, iOS restait à 60
