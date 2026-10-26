@@ -273,6 +273,35 @@ static void diagnose_frame(SDL_Window *w) {
     fprintf(stderr, "[diag] frame %llu dumped to %s (%dx%d)\n", (unsigned long long)frames, dump, width, height);
 }
 
+// Diagnostic P2_GPU_TIMING=1 : temps GPU par image (GL_TIME_ELAPSED autour de
+// chaque image, résultats lus avec quelques images de retard), journalisé
+// toutes les 120 images avec le temps CPU entre deux échanges.
+static void gpu_timing_frame(void) {
+    static int enabled = -1, active;
+    static GLuint queries[8];
+    static unsigned issued, read;
+    static double gpu_ms, cpu_ms; static unsigned samples; static uint64_t last;
+    if (enabled < 0) enabled = getenv("P2_GPU_TIMING") != NULL;
+    if (!enabled) return;
+    static mach_timebase_info_data_t base;
+    if (!base.denom) { mach_timebase_info(&base); glGenQueries(8, queries); }
+    if (active) { glEndQuery(GL_TIME_ELAPSED_EXT); ++issued; active = 0; }
+    while (read < issued) {
+        GLint ready = 0; glGetQueryObjectiv(queries[read % 8], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (!ready && issued - read < 7) break;
+        GLuint64EXT ns = 0; glGetQueryObjectui64vEXT(queries[read % 8], GL_QUERY_RESULT, &ns);
+        gpu_ms += (double)ns / 1e6; ++samples; ++read;
+    }
+    uint64_t now = mach_absolute_time();
+    if (last) cpu_ms += (double)(now - last) * base.numer / base.denom / 1e6;
+    last = now;
+    if (samples >= 120) {
+        fprintf(stderr, "[gpu] %.2f ms GPU par image, %.2f ms entre deux échanges\n", gpu_ms / samples, cpu_ms / samples);
+        gpu_ms = cpu_ms = 0; samples = 0;
+    }
+    glBeginQuery(GL_TIME_ELAPSED_EXT, queries[issued % 8]); active = 1;
+}
+
 static int hidden_windows(void) {
     static int value = -1;
     if (value < 0) { const char *e = getenv("P2_HIDDEN_WINDOWS"); value = e && *e && strcmp(e, "0"); }
@@ -516,6 +545,7 @@ static int sdl_video(CPU *c, const char *name) {
         SDL_Window *w = WINDOW(0);
         if (w) { int dw = 0, dh = 0; drawable_size(w, &dw, &dh); fps_overlay_frame(dw, dh); }
         diagnose_frame(w);
+        gpu_timing_frame();
         unsigned saved = rt_guest_suspend();   // la synchronisation verticale peut bloquer
         uint64_t start = mach_absolute_time();
         SDL_GL_SwapWindow(w);

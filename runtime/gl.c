@@ -186,8 +186,56 @@ static int gl_call(CPU *c, const char *name, void *data) {
 }
 // Seul chemin d'exécution d'un thunk GL, premier appel compris (avant que
 // l'aiguillage ait mémorisé gl_call) : suivi des tampons et chronométrage.
+// Diagnostic P2_BLIT_TRACE=<n> : décrit 300 copies glBlitFramebuffer à partir
+// de la n-ième, avec le nombre de dessins faits dans la surface source (suivie
+// à travers les FBO par ses attachements) depuis la copie précédente.
+enum { TRACE_FBS = 4096 };
+static uint32_t trace_attach[TRACE_FBS];        // fb -> objet en COLOR_ATTACHMENT0
+static uint32_t trace_draw_fb, trace_read_fb;
+static long trace_writes[2][TRACE_FBS];         // [renderbuffer|texture][nom] -> dessins
+static long trace_seen_writes[2][TRACE_FBS];
+static long blit_trace_start = -2;
+static long *trace_counter(uint32_t object) {
+    uint32_t kind = object >> 31, name = object & 0x7fffffff;
+    return name < TRACE_FBS ? &trace_writes[kind][name] : NULL;
+}
+static void trace_gl(CPU *c, const char *name) {
+    if (blit_trace_start == -2) { const char *e = getenv("P2_BLIT_TRACE"); blit_trace_start = e ? atol(e) : -1; }
+    if (blit_trace_start < 0) return;
+    uint32_t a = c->esp + 4;
+    if (!strncmp(name, "glBindFramebuffer", 17)) {
+        uint32_t target = R32(a), fb = R32(a + 4);
+        if (target != GL_READ_FRAMEBUFFER) trace_draw_fb = fb;
+        if (target != GL_DRAW_FRAMEBUFFER) trace_read_fb = fb;
+    } else if (!strncmp(name, "glFramebufferRenderbuffer", 25) || !strncmp(name, "glFramebufferTexture", 20)) {
+        uint32_t target = R32(a), attachment = R32(a + 4);
+        int texture = name[13] == 'T';
+        uint32_t object = texture ? R32(a + 12) : R32(a + 12);   // (target, attachment, rbtarget|textarget, nom, ...)
+        if (!strcmp(name, "glFramebufferTexture") || !strcmp(name, "glFramebufferTextureEXT")) object = R32(a + 8);
+        uint32_t fb = target == GL_READ_FRAMEBUFFER ? trace_read_fb : trace_draw_fb;
+        if (attachment == GL_COLOR_ATTACHMENT0 && fb < TRACE_FBS) trace_attach[fb] = object | (texture ? 0x80000000u : 0);
+    } else if ((name[2] == 'D' && name[3] == 'r') || !strcmp(name, "glClear")) {
+        long *counter = trace_draw_fb < TRACE_FBS && trace_attach[trace_draw_fb] ? trace_counter(trace_attach[trace_draw_fb]) : NULL;
+        if (counter) ++*counter;
+    } else if (!strncmp(name, "glBlitFramebuffer", 17)) {
+        static long seen;
+        long index = seen++;
+        uint32_t source = trace_read_fb < TRACE_FBS ? trace_attach[trace_read_fb] : 0;
+        long *counter = source ? trace_counter(source) : NULL;
+        long writes = counter ? *counter - trace_seen_writes[source >> 31][source & 0x7fffffff] : -1;
+        if (counter) trace_seen_writes[source >> 31][source & 0x7fffffff] = *counter;
+        if (index < blit_trace_start || index >= blit_trace_start + 300) return;
+        uint32_t target = trace_draw_fb < TRACE_FBS ? trace_attach[trace_draw_fb] : 0;
+        fprintf(stderr, "[blit] #%ld %s%u (%ld dessins depuis) -> fb %u %s%u src %d,%d-%d,%d dst %d,%d-%d,%d mask %#x filter %#x\n",
+                index, source >> 31 ? "tex" : "rb", source & 0x7fffffff, writes, trace_draw_fb,
+                target >> 31 ? "tex" : "rb", target & 0x7fffffff, (int)R32(a), (int)R32(a + 4), (int)R32(a + 8),
+                (int)R32(a + 12), (int)R32(a + 16), (int)R32(a + 20), (int)R32(a + 24), (int)R32(a + 28), R32(a + 32), R32(a + 36));
+        if (target && trace_counter(target)) ++*trace_counter(target);
+    }
+}
 static int gl_execute(CPU *c, const char *name, const RtGlEntry *entry, void *fn) {
     if (stream_enabled() && stream_before(c, name)) return 1;
+    if (__builtin_expect(blit_trace_start != -1, 0)) trace_gl(c, name);
     int handled;
     if (__builtin_expect(!gl_timing(), 1)) handled = entry->thunk(c, fn);
     else {

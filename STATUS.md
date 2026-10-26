@@ -23,6 +23,15 @@ pour désactiver). Essais écartés, mesures à l'appui : annoncer 2 ou 4 CPU
 (plus lent), relâcher le verrou invité pendant les appels GL (plus lent),
 forcer l'usage des tampons, `gl_bufmode`.
 
+MSAA (26 oct., sp_a1_intro6, 2560×1440 Retina, machine chargée par le
+simulateur iOS) : togl fait 6 résolutions MSAA par image (3 réduites vers la
+texture de réfraction 1024², 2 pleine taille, 1 vers l'écran), chacune après
+de nouveaux dessins dans la surface MSAA : aucune n'est redondante. MSAA 4x :
+13,4 ms GPU par image ; sans MSAA : 7,0 ms (47 → 75 fps sous charge). En
+Retina, baisser l'antialiasing dans le menu Vidéo est le levier principal.
+Les lancements de diagnostic (sans `--show`) utilisent maintenant une copie
+des données utilisateur (`../work/portal2-userdata-diag`).
+
 Le thread principal attend surtout le pilote OpenGL d'Apple (soumissions
 Metal sur glBufferSubData de tampons en vol, compilation GLSL à la volée,
 mise en cache par togl dans `update/glshaders.cfg`). La carte graphique a de
@@ -53,7 +62,10 @@ de `wantsBestResolutionOpenGLSurface`. Plein écran non vérifié en Retina.
 F3 affiche/masque un compteur d'images hôte (`P2_FPS=1` : visible dès le
 départ).
 
-Diagnostics : `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
+Diagnostics : `P2_GPU_TIMING=1` (temps GPU par image, requêtes
+GL_TIME_ELAPSED), `P2_BLIT_TRACE=<n>` (300 copies glBlitFramebuffer à partir
+de la n-ième, avec les dessins faits dans la surface source depuis la copie
+précédente), `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
 (capture du tampon arrière), `P2_WATCH_CALL=0x<adresse>` (arguments d'un
 appel invité), fautes hôtes traduites en adresse invitée + pile invitée.
 Sans `--show`, la fenêtre est cachée et la synchro verticale désactivée.
