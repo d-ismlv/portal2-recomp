@@ -45,8 +45,15 @@ RT_CHECK(essl3_emulation_wraps_sampling_and_output) {
     assert(strstr(out, "p2_gl4es_shadow2D(3, sampler3, t.xyz)"));
     assert(strstr(out, "p2_texture(5, sampler5, t.xyz)"));
     assert(strstr(out, "void p2_main()"));
-    assert(strstr(out, "if (p2_srgb_write > 0.5) gl4es_FragColor.rgb = p2_srgb_encode(gl4es_FragColor.rgb);"));
+    assert(strstr(out, "if (((p2_srgb_write >> 0) & 1) != 0) gl4es_FragColor.rgb = p2_srgb_encode(gl4es_FragColor.rgb);"));
+    assert(!strstr(out, "p2_srgb_write >> 1"));   // gl_FragColor : une seule sortie
     free(out);
+    // gl_FragData : chaque sortie encodée selon son bit.
+    const char *mrt = "#version 100\nprecision highp float;\nvarying vec4 t;\n"
+                      "void main()\n{\ngl_FragData[0] = t;\ngl_FragData[1] = t.wzyx;\n}\n";
+    char *m = rt_essl1_to_essl3(mrt, 1, 1);
+    assert(m && strstr(m, "if (((p2_srgb_write >> 1) & 1) != 0) gl4es_FragData[1].rgb = p2_srgb_encode(gl4es_FragData[1].rgb);"));
+    free(m);
     out = rt_essl1_to_essl3(fs, 1, 0);   // sans émulation : appels directs
     assert(out && !strstr(out, "p2_") && strstr(out, "texture( sampler1, t.xy )"));
     free(out);

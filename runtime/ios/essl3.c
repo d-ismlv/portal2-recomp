@@ -13,7 +13,7 @@
 // que srgb.c règle avant chaque tracé. OpenGL ES 3.0 d'iOS n'a pas :
 // - EXT_texture_sRGB_decode : décodage sRGB par unité et par type
 //   d'échantillonneur (masques p2_srgb_2d, p2_srgb_cube, p2_srgb_3d) ;
-// - EXT_sRGB_write_control : encodage de la sortie (p2_srgb_write) ;
+// - EXT_sRGB_write_control : encodage des sorties (masque p2_srgb_write) ;
 // - CLAMP_TO_BORDER (gl4es le change en CLAMP_TO_EDGE) : hors de [0,1], la
 //   carte d'ombre et la texture projetée de la lumière étiraient leurs texels
 //   de bord sur les murs. Bordure noire (seule couleur que togl demande) par
@@ -126,7 +126,7 @@ static int wrapped(const char *name, int type) {
 }
 static const char emulation_helpers[] =
     "uniform int p2_srgb_2d;\nuniform int p2_srgb_cube;\nuniform int p2_srgb_3d;\n"
-    "uniform int p2_border_s;\nuniform int p2_border_t;\nuniform float p2_srgb_write;\n"
+    "uniform int p2_border_s;\nuniform int p2_border_t;\nuniform int p2_srgb_write;\n"
     "vec4 p2_decode(int mask, int u, vec4 c) {\n"
     "    if (((mask >> u) & 1) == 0) return c;\n"
     "    vec3 x = clamp(c.rgb, 0.0, 1.0);\n"
@@ -140,21 +140,21 @@ static const char emulation_helpers[] =
     "    return (((p2_border_s >> u) & 1) != 0 && (c.x < 0.0 || c.x > 1.0)) ||\n"
     "           (((p2_border_t >> u) & 1) != 0 && (c.y < 0.0 || c.y > 1.0));\n"
     "}\n"
-    "vec4 p2_texture(int u, sampler2D s, vec2 c) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, texture(s, c)); }\n"
-    "vec4 p2_texture(int u, sampler2D s, vec2 c, float b) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, texture(s, c, b)); }\n"
+    "vec4 p2_texture(int u, sampler2D s, vec2 c) { vec4 t = texture(s, c); return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
+    "vec4 p2_texture(int u, sampler2D s, vec2 c, float b) { vec4 t = texture(s, c, b); return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
     "vec4 p2_texture(int u, samplerCube s, vec3 c) { return p2_decode(p2_srgb_cube, u, texture(s, c)); }\n"
     "vec4 p2_texture(int u, samplerCube s, vec3 c, float b) { return p2_decode(p2_srgb_cube, u, texture(s, c, b)); }\n"
     "vec4 p2_texture(int u, sampler3D s, vec3 c) { return p2_decode(p2_srgb_3d, u, texture(s, c)); }\n"
     "vec4 p2_texture(int u, sampler3D s, vec3 c, float b) { return p2_decode(p2_srgb_3d, u, texture(s, c, b)); }\n"
-    "vec4 p2_textureLod(int u, sampler2D s, vec2 c, float l) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureLod(s, c, l)); }\n"
+    "vec4 p2_textureLod(int u, sampler2D s, vec2 c, float l) { vec4 t = textureLod(s, c, l); return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
     "vec4 p2_textureLod(int u, samplerCube s, vec3 c, float l) { return p2_decode(p2_srgb_cube, u, textureLod(s, c, l)); }\n"
     "vec4 p2_textureLod(int u, sampler3D s, vec3 c, float l) { return p2_decode(p2_srgb_3d, u, textureLod(s, c, l)); }\n"
-    "vec4 p2_textureProj(int u, sampler2D s, vec3 c) { return p2_outside(u, c.xy / c.z) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProj(s, c)); }\n"
-    "vec4 p2_textureProj(int u, sampler2D s, vec4 c) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProj(s, c)); }\n"
+    "vec4 p2_textureProj(int u, sampler2D s, vec3 c) { vec4 t = textureProj(s, c); return p2_outside(u, c.xy / c.z) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
+    "vec4 p2_textureProj(int u, sampler2D s, vec4 c) { vec4 t = textureProj(s, c); return p2_outside(u, c.xy / c.w) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
     "vec4 p2_textureProj(int u, sampler3D s, vec4 c) { return p2_decode(p2_srgb_3d, u, textureProj(s, c)); }\n"
-    "vec4 p2_textureProjLod(int u, sampler2D s, vec3 c, float l) { return p2_outside(u, c.xy / c.z) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProjLod(s, c, l)); }\n"
-    "vec4 p2_textureProjLod(int u, sampler2D s, vec4 c, float l) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProjLod(s, c, l)); }\n"
-    "vec4 p2_textureGrad(int u, sampler2D s, vec2 c, vec2 x, vec2 y) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureGrad(s, c, x, y)); }\n"
+    "vec4 p2_textureProjLod(int u, sampler2D s, vec3 c, float l) { vec4 t = textureProjLod(s, c, l); return p2_outside(u, c.xy / c.z) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
+    "vec4 p2_textureProjLod(int u, sampler2D s, vec4 c, float l) { vec4 t = textureProjLod(s, c, l); return p2_outside(u, c.xy / c.w) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
+    "vec4 p2_textureGrad(int u, sampler2D s, vec2 c, vec2 x, vec2 y) { vec4 t = textureGrad(s, c, x, y); return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, t); }\n"
     "vec4 p2_textureGrad(int u, samplerCube s, vec3 c, vec3 x, vec3 y) { return p2_decode(p2_srgb_cube, u, textureGrad(s, c, x, y)); }\n"
     "vec4 p2_textureGrad(int u, sampler3D s, vec3 c, vec3 x, vec3 y) { return p2_decode(p2_srgb_3d, u, textureGrad(s, c, x, y)); }\n";
 // Fonctions d'appoint pour les échantillonneurs d'ombre : vec4 de GLSL 1.20,
@@ -165,10 +165,10 @@ static const char shadow_helpers[] =
     "vec4 gl4es_shadow2DProj(sampler2DShadow s, vec4 c) { return vec4(textureProj(s, c)); }\n"
     "vec4 gl4es_shadow2DProjLod(sampler2DShadow s, vec4 c, float l) { return vec4(textureProjLod(s, c, l)); }\n";
 static const char shadow_emulation_helpers[] =
-    "vec4 p2_gl4es_shadow2D(int u, sampler2DShadow s, vec3 c) { return p2_outside(u, c.xy) ? vec4(0.0) : gl4es_shadow2D(s, c); }\n"
-    "vec4 p2_gl4es_shadow2DLod(int u, sampler2DShadow s, vec3 c, float l) { return p2_outside(u, c.xy) ? vec4(0.0) : gl4es_shadow2DLod(s, c, l); }\n"
-    "vec4 p2_gl4es_shadow2DProj(int u, sampler2DShadow s, vec4 c) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : gl4es_shadow2DProj(s, c); }\n"
-    "vec4 p2_gl4es_shadow2DProjLod(int u, sampler2DShadow s, vec4 c, float l) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : gl4es_shadow2DProjLod(s, c, l); }\n";
+    "vec4 p2_gl4es_shadow2D(int u, sampler2DShadow s, vec3 c) { vec4 t = gl4es_shadow2D(s, c); return p2_outside(u, c.xy) ? vec4(0.0) : t; }\n"
+    "vec4 p2_gl4es_shadow2DLod(int u, sampler2DShadow s, vec3 c, float l) { vec4 t = gl4es_shadow2DLod(s, c, l); return p2_outside(u, c.xy) ? vec4(0.0) : t; }\n"
+    "vec4 p2_gl4es_shadow2DProj(int u, sampler2DShadow s, vec4 c) { vec4 t = gl4es_shadow2DProj(s, c); return p2_outside(u, c.xy / c.w) ? vec4(0.0) : t; }\n"
+    "vec4 p2_gl4es_shadow2DProjLod(int u, sampler2DShadow s, vec4 c, float l) { vec4 t = gl4es_shadow2DProjLod(s, c, l); return p2_outside(u, c.xy / c.w) ? vec4(0.0) : t; }\n";
 
 // NULL si le source n'est pas du GLSL ES 1.00 (déjà 3.00, ou autre version).
 char *rt_essl1_to_essl3(const char *source, int is_fragment, int emulate) {
@@ -257,11 +257,15 @@ char *rt_essl1_to_essl3(const char *source, int is_fragment, int emulate) {
     }
     if (!inserted) goto fail;   // pas de main : laisser le source tel quel
     if (emulate) {
-        const char *output = frag_color ? "gl4es_FragColor" : "gl4es_FragData[0]";
-        char tail[256];
-        snprintf(tail, sizeof(tail), "\nvoid main() {\n    p2_main();\n    if (p2_srgb_write > 0.5) %s.rgb = p2_srgb_encode(%s.rgb);\n}\n",
-                 output, output);
-        if (puts_(&out, tail)) goto fail;
+        // Sorties encodées selon le masque p2_srgb_write (bit i : sortie i).
+        if (puts_(&out, "\nvoid main() {\n    p2_main();\n")) goto fail;
+        for (int i = 0; i < (frag_color ? 1 : 4); ++i) {
+            char line[200], name[32];
+            snprintf(name, sizeof(name), frag_color ? "%s" : "%s[%d]", frag_color ? "gl4es_FragColor" : "gl4es_FragData", i);
+            snprintf(line, sizeof(line), "    if (((p2_srgb_write >> %d) & 1) != 0) %s.rgb = p2_srgb_encode(%s.rgb);\n", i, name, name);
+            if (puts_(&out, line)) goto fail;
+        }
+        if (puts_(&out, "}\n")) goto fail;
     }
     return out.data;
 fail:

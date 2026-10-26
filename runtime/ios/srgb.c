@@ -8,8 +8,9 @@
 // iOS n'a aucun des deux interrupteurs, et gl4es stocke les textures sRGB
 // comme des textures ordinaires (octets non convertis). Ce module suit, entre
 // togl et gl4es, l'état qui décide des deux conversions et, avant chaque tracé,
-// le transmet aux uniformes ajoutés par essl3.c (p2_srgb_2d/cube/3d,
-// p2_srgb_write) au programme courant. Différences restantes avec un vrai
+// le transmet aux uniformes ajoutés par essl3.c (p2_srgb_2d/cube/3d, et
+// p2_srgb_write : sorties à encoder, selon attachements et glDrawBuffers) au
+// programme courant. Différences restantes avec un vrai
 // GPU : filtrage et mélange (blending) faits sur les valeurs encodées.
 //
 // Même mécanisme pour CLAMP_TO_BORDER, absent d'ES 3.0 : les axes S et T en
@@ -56,33 +57,52 @@ static unsigned char *byte_at(ByteMap *m, GLuint name) {
 }
 static unsigned char byte_get(const ByteMap *m, GLuint name) { return name < m->size ? m->flags[name] : 0; }
 
-typedef struct { GLuint *values; size_t size; } NameMap;
-static GLuint *name_at(NameMap *m, GLuint name) {
-    if (name >= m->size) {
-        size_t size = m->size ? m->size : 256;
-        while (size <= name) size *= 2;
-        GLuint *grown = realloc(m->values, size * sizeof(GLuint));
-        if (!grown) return NULL;
-        memset(grown + m->size, 0, (size - m->size) * sizeof(GLuint));
-        m->values = grown; m->size = size;
-    }
-    return &m->values[name];
-}
-static GLuint name_get(const NameMap *m, GLuint name) { return name < m->size ? m->values[name] : 0; }
 
 static ByteMap textures;          // TEX_* par texture
 static ByteMap renderbuffers;     // TEX_SRGB par renderbuffer
-static NameMap fbo_color0;        // couleur 0 par FBO : texture, ou renderbuffer | RENDERBUFFER_BIT
+// Par FBO : attachements couleur 0-3 (texture, ou renderbuffer | RENDERBUFFER_BIT)
+// et sortie de shader -> attachement (glDrawBuffers, état propre à chaque FBO).
+enum { OUTPUTS = 4 };
+typedef struct { GLuint attach[OUTPUTS]; signed char draw[OUTPUTS]; unsigned char used; } FboState;
+static FboState *fbos;
+static size_t fbo_count;
 #define RENDERBUFFER_BIT 0x80000000u
+static FboState *fbo_state(GLuint fbo) {
+    if (fbo >= fbo_count) {
+        size_t size = fbo_count ? fbo_count : 64;
+        while (size <= fbo) size *= 2;
+        FboState *grown = realloc(fbos, size * sizeof(*grown));
+        if (!grown) return NULL;
+        memset(grown + fbo_count, 0, (size - fbo_count) * sizeof(*grown));
+        fbos = grown; fbo_count = size;
+    }
+    FboState *f = &fbos[fbo];
+    if (!f->used) { memset(f, 0, sizeof(*f)); f->draw[0] = 0; f->draw[1] = f->draw[2] = f->draw[3] = -1; f->used = 1; }
+    return f;
+}
+// Un objet supprimé ne doit plus être vu attaché (son nom peut être réutilisé).
+static void detach_everywhere(GLuint object) {
+    for (size_t i = 0; i < fbo_count; ++i)
+        for (int a = 0; a < OUTPUTS; ++a) if (fbos[i].attach[a] == object) fbos[i].attach[a] = 0;
+}
 static GLuint bound_renderbuffer;
 static GLuint bound[UNITS][3];    // texture liée par unité : 2D, cube, 3D
 static GLuint active_unit;
 static GLuint draw_fbo, read_fbo;
 static int framebuffer_srgb;
 static GLuint current_program;
-static unsigned char color0_flags(GLuint fbo) {
-    GLuint object = name_get(&fbo_color0, fbo);
+static unsigned char object_flags(GLuint object) {
     return object & RENDERBUFFER_BIT ? byte_get(&renderbuffers, object & ~RENDERBUFFER_BIT) : byte_get(&textures, object);
+}
+// Sorties du shader à encoder en sRGB pour le FBO de tracé (bit i : sortie i).
+static GLint srgb_outputs(GLuint fbo) {
+    if (!fbo || fbo >= fbo_count || !fbos[fbo].used) return 0;
+    GLint mask = 0;
+    for (int o = 0; o < OUTPUTS; ++o) {
+        int a = fbos[fbo].draw[o];
+        if (a >= 0 && (object_flags(fbos[fbo].attach[a]) & TEX_SRGB)) mask |= 1 << o;
+    }
+    return mask;
 }
 
 // Uniformes par programme : emplacements (-2 = à chercher) et dernières valeurs.
@@ -146,6 +166,8 @@ static void (*next_enable)(GLenum), (*next_disable)(GLenum);
 static GLboolean (*next_is_enabled)(GLenum);
 static void (*next_bind_framebuffer)(GLenum, GLuint);
 static void (*next_framebuffer_texture_2d)(GLenum, GLenum, GLenum, GLuint, GLint);
+static void (*next_framebuffer_texture_3d)(GLenum, GLenum, GLenum, GLuint, GLint, GLint);
+static void (*next_draw_buffers)(GLsizei, const GLenum *);
 static void (*next_framebuffer_renderbuffer)(GLenum, GLenum, GLenum, GLuint);
 static void (*next_delete_framebuffers)(GLsizei, const GLuint *);
 static void (*next_bind_renderbuffer)(GLenum, GLuint);
@@ -162,12 +184,12 @@ static void (*next_draw_elements_base_vertex)(GLenum, GLsizei, GLenum, const voi
 static void (*next_draw_range_elements_base_vertex)(GLenum, GLuint, GLuint, GLsizei, GLenum, const void *, GLint);
 static GLint (*g4_get_uniform_location)(GLuint, const GLchar *);
 static void (*g4_uniform1i)(GLint, GLint);
-static void (*g4_uniform1f)(GLint, GLfloat);
 
 static void active_texture(GLenum unit) { active_unit = unit - GL_TEXTURE0; next_active_texture(unit); }
 static void delete_textures(GLsizei n, const GLuint *names) {
     for (GLsizei i = 0; i < n; ++i) {
         if (names[i] < textures.size) textures.flags[names[i]] = 0;
+        if (names[i]) detach_everywhere(names[i]);
         for (int u = 0; u < UNITS; ++u)
             for (int k = 0; k < 3; ++k) if (bound[u][k] == names[i]) bound[u][k] = 0;
     }
@@ -191,15 +213,30 @@ static void bind_framebuffer(GLenum target, GLuint fbo) {
     next_bind_framebuffer(target, fbo);
 }
 static GLuint target_fbo(GLenum target) { return target == GL_READ_FRAMEBUFFER ? read_fbo : draw_fbo; }
+static void attach(GLenum target, GLenum attachment, GLuint object) {
+    GLuint fbo = target_fbo(target);
+    FboState *f = fbo && attachment >= GL_COLOR_ATTACHMENT0 && attachment < GL_COLOR_ATTACHMENT0 + OUTPUTS ? fbo_state(fbo) : NULL;
+    if (f) f->attach[attachment - GL_COLOR_ATTACHMENT0] = object;
+}
 static void framebuffer_texture_2d(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level) {
-    GLuint fbo = target_fbo(target), *slot;
-    if (attachment == GL_COLOR_ATTACHMENT0 && fbo && (slot = name_at(&fbo_color0, fbo))) *slot = texture;
+    attach(target, attachment, texture);
     next_framebuffer_texture_2d(target, attachment, textarget, texture, level);
 }
+static void framebuffer_texture_3d(GLenum target, GLenum attachment, GLenum textarget, GLuint texture, GLint level, GLint z) {
+    attach(target, attachment, texture);
+    next_framebuffer_texture_3d(target, attachment, textarget, texture, level, z);
+}
 static void framebuffer_renderbuffer(GLenum target, GLenum attachment, GLenum rbtarget, GLuint rb) {
-    GLuint fbo = target_fbo(target), *slot;
-    if (attachment == GL_COLOR_ATTACHMENT0 && fbo && (slot = name_at(&fbo_color0, fbo))) *slot = rb ? rb | RENDERBUFFER_BIT : 0;
+    attach(target, attachment, rb ? rb | RENDERBUFFER_BIT : 0);
     next_framebuffer_renderbuffer(target, attachment, rbtarget, rb);
+}
+static void draw_buffers(GLsizei n, const GLenum *buffers) {
+    FboState *f = draw_fbo ? fbo_state(draw_fbo) : NULL;
+    for (int o = 0; f && o < OUTPUTS; ++o) {
+        GLenum b = o < n ? buffers[o] : GL_NONE;
+        f->draw[o] = b >= GL_COLOR_ATTACHMENT0 && b < GL_COLOR_ATTACHMENT0 + OUTPUTS ? (signed char)(b - GL_COLOR_ATTACHMENT0) : -1;
+    }
+    next_draw_buffers(n, buffers);
 }
 static void bind_renderbuffer(GLenum target, GLuint rb) { bound_renderbuffer = rb; next_bind_renderbuffer(target, rb); }
 static void renderbuffer_format(GLenum internal) {
@@ -220,13 +257,14 @@ static void renderbuffer_storage_multisample(GLenum target, GLsizei samples, GLe
 static void delete_renderbuffers(GLsizei n, const GLuint *names) {
     for (GLsizei i = 0; i < n; ++i) {
         if (names[i] < renderbuffers.size) renderbuffers.flags[names[i]] = 0;
+        if (names[i]) detach_everywhere(names[i] | RENDERBUFFER_BIT);
         if (bound_renderbuffer == names[i]) bound_renderbuffer = 0;
     }
     next_delete_renderbuffers(n, names);
 }
 static void delete_framebuffers(GLsizei n, const GLuint *names) {
     for (GLsizei i = 0; i < n; ++i) {
-        if (names[i] < fbo_color0.size) fbo_color0.values[names[i]] = 0;
+        if (names[i] < fbo_count) fbos[names[i]].used = 0;
         if (draw_fbo == names[i]) draw_fbo = 0;
         if (read_fbo == names[i]) read_fbo = 0;
     }
@@ -250,13 +288,13 @@ static void trace(const GLint *value, const ProgramState *s) {
     if (!enabled) return;
     static unsigned long draws, srgb_on, fbo_srgb, writes, reads, no_loc, borders, border_loc;
     ++draws; srgb_on += framebuffer_srgb != 0; reads += (value[0] | value[1] | value[2]) != 0;
-    fbo_srgb += draw_fbo && (color0_flags(draw_fbo) & TEX_SRGB);
+    fbo_srgb += srgb_outputs(draw_fbo) != 0;
     writes += value[3] != 0; no_loc += s->loc[3] < 0;
     borders += (value[4] | value[5]) != 0; border_loc += (value[4] | value[5]) && s->loc[4] >= 0;
     if (draws % 2000 == 0)
         fprintf(stderr, "[srgb] tracés %lu : FRAMEBUFFER_SRGB %lu, cible sRGB %lu, encodage %lu, décodage %lu, "
                         "sans uniforme %lu, bordure %lu (dont shader %lu) (fbo %u couleur0 %u)\n", draws, srgb_on, fbo_srgb, writes, reads, no_loc, borders, border_loc,
-                draw_fbo, name_get(&fbo_color0, draw_fbo));
+                draw_fbo, draw_fbo < fbo_count ? fbos[draw_fbo].attach[0] : 0);
 }
 
 static void sync_uniforms(void) {
@@ -277,11 +315,11 @@ static void sync_uniforms(void) {
         if (f & TEX_BORDER_S) value[4] |= 1 << u;
         if (f & TEX_BORDER_T) value[5] |= 1 << u;
     }
-    if (framebuffer_srgb && draw_fbo) value[3] = color0_flags(draw_fbo) & TEX_SRGB;
+    if (framebuffer_srgb) value[3] = srgb_outputs(draw_fbo);
     trace(value, s);
     for (int k = 0; k < UNIFORMS; ++k) {
         if (s->loc[k] < 0 || s->value[k] == value[k]) continue;
-        if (k == 3) g4_uniform1f(s->loc[k], value[k] ? 1.0f : 0.0f); else g4_uniform1i(s->loc[k], value[k]);
+        g4_uniform1i(s->loc[k], value[k]);
         s->value[k] = value[k];
     }
 }
@@ -398,6 +436,10 @@ void *rt_ios_srgb_wrap(const char *name, void *fn) {
         {"glBindFramebufferEXT", (void **)&next_bind_framebuffer, (void *)bind_framebuffer},
         {"glFramebufferTexture2D", (void **)&next_framebuffer_texture_2d, (void *)framebuffer_texture_2d},
         {"glFramebufferTexture2DEXT", (void **)&next_framebuffer_texture_2d, (void *)framebuffer_texture_2d},
+        {"glFramebufferTexture3D", (void **)&next_framebuffer_texture_3d, (void *)framebuffer_texture_3d},
+        {"glFramebufferTexture3DEXT", (void **)&next_framebuffer_texture_3d, (void *)framebuffer_texture_3d},
+        {"glDrawBuffers", (void **)&next_draw_buffers, (void *)draw_buffers},
+        {"glDrawBuffersARB", (void **)&next_draw_buffers, (void *)draw_buffers},
         {"glFramebufferRenderbuffer", (void **)&next_framebuffer_renderbuffer, (void *)framebuffer_renderbuffer},
         {"glFramebufferRenderbufferEXT", (void **)&next_framebuffer_renderbuffer, (void *)framebuffer_renderbuffer},
         {"glDeleteFramebuffers", (void **)&next_delete_framebuffers, (void *)delete_framebuffers},
@@ -431,9 +473,8 @@ void *rt_ios_srgb_wrap(const char *name, void *fn) {
         if (!g4_get_uniform_location) {
             g4_get_uniform_location = gl4es_GetProcAddress("glGetUniformLocation");
             g4_uniform1i = gl4es_GetProcAddress("glUniform1i");
-            g4_uniform1f = gl4es_GetProcAddress("glUniform1f");
         }
-        if (!g4_get_uniform_location || !g4_uniform1i || !g4_uniform1f) return fn;
+        if (!g4_get_uniform_location || !g4_uniform1i) return fn;
         *table[i].next = fn;
         return table[i].wrapper;
     }
