@@ -38,15 +38,20 @@ SteamAppId=620 python3 tools/run_game.py --show --timeout 3600
 
 Pour jouer sans terminal : `python3 tools/make_app.py` crée
 `~/Applications/Portal 2 Natif.app` (lien vers `build/portal2-native`, chemins
-de `config/local.json`, Steam démarré au besoin, Retina, 2560×1440 fenêtré ;
-autres arguments : `python3 tools/make_app.py -- -game portal2 …`). Journal :
-`~/Library/Logs/Portal2Natif.log`. À refaire seulement si les chemins ou
-arguments changent ; une recompilation suffit sinon.
+de `config/local.json`, Steam démarré au besoin, sans `-w/-h` : résolution et
+mode viennent du menu Vidéo, enregistrés dans `update/cfg/video.txt`).
+Journal : `~/Library/Logs/Portal2Natif.log`. À refaire seulement si les
+chemins ou arguments changent ; une recompilation suffit sinon.
 
-`P2_RETINA=1` : mode Retina (fenêtre en points, rendu en pixels natifs ;
-tailles, écrans et positions de souris convertis, déplacements relatifs
-inchangés). F3 affiche/masque un compteur d'images hôte (`P2_FPS=1` : visible
-dès le départ).
+Retina (actif par défaut, `P2_RETINA=0` pour revenir à l'ancien
+comportement) : l'écran est annoncé en pixels (3024×1964), donc le menu
+Vidéo propose aussi les grandes résolutions de la table du jeu (jusqu'à
+2560×1600). Une résolution qui tient à l'écran en points donne une fenêtre
+normale (rendu ×1) ; une plus grande donne une fenêtre Retina de moitié en
+points (2560×1440 → fenêtre de 1280×720 points, rendu natif). Bascule à chaud
+de `wantsBestResolutionOpenGLSurface`. Plein écran non vérifié en Retina.
+F3 affiche/masque un compteur d'images hôte (`P2_FPS=1` : visible dès le
+départ).
 
 Diagnostics : `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
 (capture du tampon arrière), `P2_WATCH_CALL=0x<adresse>` (arguments d'un

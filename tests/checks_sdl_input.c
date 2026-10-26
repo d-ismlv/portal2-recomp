@@ -267,11 +267,11 @@ RT_CHECK(sdl_input_hides_sdl3_only_events) {
     assert(!rt_sdl_event_is_sdl2(0x205) && !rt_sdl_event_is_sdl2(0x202));  // événements fenêtre SDL3
 }
 
-// Mode Retina : positions absolues et tailles de fenêtre en pixels (×2),
+// Retina : positions dans la fenêtre et tailles de fenêtre en pixels (×2),
 // déplacements relatifs inchangés (même sensibilité de visée).
 RT_CHECK(sdl_input_retina_scales_absolute_coordinates) {
     CPU cpu, *c = &cpu; rt_cpu_reset(c);
-    rt_sdl_force_display_scale(2);
+    rt_sdl_force_scales(2, 2);
     SDL_Event host = {0};
     host.motion.type = SDL_MOUSEMOTION; host.motion.x = 10; host.motion.y = 20; host.motion.xrel = 3; host.motion.yrel = -4;
     rt_sdl_event_to_guest(c, &host, EVENT, 0);
@@ -285,10 +285,14 @@ RT_CHECK(sdl_input_retina_scales_absolute_coordinates) {
     host.window.data1 = 1280; host.window.data2 = 720;
     rt_sdl_event_to_guest(c, &host, EVENT, 0);
     assert(R32(EVENT + 16) == 2560 && R32(EVENT + 20) == 1440);
+    host.window.event = SDL_WINDOWEVENT_MOVED; host.window.data1 = 100; host.window.data2 = 50;
+    rt_sdl_force_scales(2, 1);   // fenêtre à l'échelle 1 : position à l'écran toujours en pixels
+    rt_sdl_event_to_guest(c, &host, EVENT, 0);
+    assert(R32(EVENT + 16) == 200 && R32(EVENT + 20) == 100);
     host.window.event = SDL_WINDOWEVENT_FOCUS_GAINED; host.window.data1 = 5;
     rt_sdl_event_to_guest(c, &host, EVENT, 0);
     assert(R32(EVENT + 16) == 5);
-    rt_sdl_force_display_scale(0);
+    rt_sdl_force_scales(0, 0);
     memset(&host, 0, sizeof(host));
     host.motion.type = SDL_MOUSEMOTION; host.motion.x = 10;
     rt_sdl_event_to_guest(c, &host, EVENT, 0);

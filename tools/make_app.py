@@ -4,12 +4,11 @@
 L'application ne recopie pas le jeu : Contents/MacOS/portal2-native est un
 lien vers build/portal2-native de ce dépôt (une recompilation est donc prise en
 compte sans refaire l'app), et le lanceur reprend les chemins de
-config/local.json. Il démarre Steam s'il ne tourne pas, active le mode Retina
-et écrit le journal dans ~/Library/Logs/Portal2Natif.log.
+config/local.json. Il démarre Steam s'il ne tourne pas et écrit le journal dans ~/Library/Logs/Portal2Natif.log.
 
     python3 tools/make_app.py                      # ~/Applications
     python3 tools/make_app.py --dest /Applications
-    python3 tools/make_app.py -- -game portal2 -novid -windowed -w 2880 -h 1800
+    python3 tools/make_app.py -- -game portal2 -novid -windowed -w 2560 -h 1440
 """
 import argparse
 import json
@@ -21,7 +20,9 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parent.parent
 NAME = 'Portal 2 Natif'
-DEFAULT_ARGS = ['-game', 'portal2', '-novid', '-windowed', '-w', '2560', '-h', '1440']
+# Sans -w/-h/-windowed : résolution et mode choisis dans le menu Vidéo du jeu
+# (enregistrés dans update/cfg/video.txt) ; Retina selon la résolution.
+DEFAULT_ARGS = ['-game', 'portal2', '-novid']
 
 LAUNCHER = '''#!/bin/bash
 # Lanceur généré par tools/make_app.py : le modifier là-bas.
@@ -37,7 +38,6 @@ if ! /usr/bin/pgrep -qx steam_osx; then
     sleep 5
 fi
 export SteamAppId=620 SteamGameId=620
-export P2_RETINA="${{P2_RETINA:-1}}"
 mkdir -p "$(dirname "$LOG")" {user_dir}
 exec "$HERE/portal2-native" --images {images} --game-dir {game_dir} --linux-root {linux_root} \\
     --user-dir {user_dir} -- {game_args} "$@" >"$LOG" 2>&1

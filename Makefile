@@ -6,7 +6,7 @@ CC = clang
 CFLAGS ?= -O2 -g -Wall -Wextra -Werror
 # Bibliothèques hôtes ARM64 des ponts natifs ; partagées avec tools/build_game.py.
 HOST_CFLAGS = -I/opt/homebrew/include -I/opt/homebrew/include/freetype2 -DGL_SILENCE_DEPRECATION -DOPENAL_DEPRECATED= -DAL_SILENCE_DEPRECATION
-HOST_LIBS = -L/opt/homebrew/lib -lSDL2 -lfreetype -lfontconfig -liconv -framework OpenGL -framework OpenAL
+HOST_LIBS = -L/opt/homebrew/lib -lSDL2 -lfreetype -lfontconfig -liconv -framework OpenGL -framework OpenAL -lobjc
 CFLAGS += $(HOST_CFLAGS)
 LIFT_FLAGS ?= --allow-unimplemented-imports
 INPUT_DIR ?= ../work/portal2-linux/bin

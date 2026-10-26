@@ -18,6 +18,8 @@
 #include <stdint.h>
 struct CPU; struct SDL_Surface;
 struct SDL_Surface *rt_sdl_surface_sync(struct CPU *c, uint32_t guest);
-// Mode Retina (P2_RETINA=1) : pixels par point de l'écran, 1 sinon.
+// Retina (P2_RETINA=0 pour désactiver) : pixels par point de l'écran, et de
+// la fenêtre du jeu (1 si la résolution choisie tient à l'écran en points).
 int rt_sdl_display_scale(void);
-void rt_sdl_force_display_scale(int scale);
+int rt_sdl_window_scale(void);
+void rt_sdl_force_scales(int display, int window);

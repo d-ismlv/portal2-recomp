@@ -27,7 +27,7 @@ import peprep
 HOST_CFLAGS = ['-I/opt/homebrew/include', '-I/opt/homebrew/include/freetype2', '-DGL_SILENCE_DEPRECATION',
                '-DOPENAL_DEPRECATED=', '-DAL_SILENCE_DEPRECATION']
 HOST_LIBS = ['-L/opt/homebrew/lib', '-lSDL2', '-lfreetype', '-lfontconfig', '-liconv',
-             '-framework', 'OpenGL', '-framework', 'OpenAL']
+             '-framework', 'OpenGL', '-framework', 'OpenAL', '-lobjc']
 WARNINGS = ['-Wall', '-Wextra', '-Werror']
 DEBUG = {'full': '-g', 'lines': '-gline-tables-only', 'none': '-g0'}
 TOOLS = ['tools/lift.py', 'tools/float_lift.py', 'tools/registry.py', 'tools/build_game.py', 'tools/peprep.py']
