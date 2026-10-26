@@ -52,8 +52,18 @@ c'était la situation de l'utilisateur (30 fps). Les mesures n'ont de sens que
 machine calme (vérifier `uptime`). Essai écarté : regrouper les fonctions
 chaudes (`P2_PROFILE_WALL=1 P2_PROFILE_ORDER=…`, `tools/hot_order.py`,
 `build_game.py --order-file`) : pas de gain visible (78,7 → 78,9 fps).
-Préparé, pas encore exécuté : PGO (`build_game.py --pgo-generate` puis
-`--pgo-use`, profil écrit toutes les 20 s ; demande ~5 Go de disque).
+PGO (26 oct. nuit) : profil collecté sur laser_over_goo, column_blocker et
+intro3 (version instrumentée, ~1,5 Go de profil brut par partie), fusionné
+dans `build/game/pgo.profdata` (173 Mo, hors git). A/B machine calme : 720p
+156,8 → 167,3 fps (+7 %) ; 1440p ≈ +2 % seulement, car le GPU y est saturé
+(9,9 ms GPU pour 10 ms par image, ~100 fps dans les grandes salles). Le
+binaire de l'app est la version PGO ; l'ancien reste en
+`build/portal2-native-nopgo`. Reconstruire avec le profil :
+`python3 tools/build_game.py --release --pgo-use build/game/pgo.profdata`
+(sans l'option, on revient à la version sans PGO). Refaire le profil :
+`--pgo-generate --out build/portal2-native-pgogen`, parties avec
+`LLVM_PROFILE_FILE=…-%p.profraw`, `xcrun llvm-profdata merge`.
+Prochain plafond en 1440p : le GPU (120 fps demandera d'alléger le rendu).
 Comparer deux binaires : `bench_game.py --binary build/<copie>` (la copie doit
 rester dans `build/`, le chemin de libsteam_api est relatif à l'exécutable).
 
