@@ -93,7 +93,12 @@ static void es_link(GLuint program) {
 }
 // Contexte ES 3 : le GLSL ES 1.00 produit par gl4es est réécrit en 3.00
 // (textures 3D, échantillonneurs d'ombre ; voir essl3.c).
-char *rt_essl1_to_essl3(const char *source, int is_fragment);
+char *rt_essl1_to_essl3(const char *source, int is_fragment, int srgb);
+int rt_ios_srgb_enabled(void);
+void rt_ios_srgb_bind_texture(GLenum target, GLuint name);
+void rt_ios_srgb_tex_image(GLenum target, GLint level, GLint internal);
+void rt_ios_srgb_decode(GLenum target, GLint value);
+void *rt_ios_srgb_wrap(const char *name, void *fn);
 static void (*es_shader_source)(GLuint, GLsizei, const GLchar *const *, const GLint *);
 static void shader_source(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
     const char *version = (const char *)real_get_string(GL_VERSION);
@@ -108,7 +113,7 @@ static void shader_source(GLuint shader, GLsizei count, const GLchar *const *str
     }
     *at = 0;
     GLint type = 0; glGetShaderiv(shader, GL_SHADER_TYPE, &type);
-    char *converted = rt_essl1_to_essl3(joined, type == GL_FRAGMENT_SHADER);
+    char *converted = rt_essl1_to_essl3(joined, type == GL_FRAGMENT_SHADER, rt_ios_srgb_enabled());
     // P2_IOS_DEBUG_UV=1 : chaque shader de fragments qui reçoit oT0 affiche
     // fract(oT0.xy) (diagnostic des coordonnées de texture).
     if (converted && type == GL_FRAGMENT_SHADER && getenv("P2_IOS_DEBUG_UV") && strstr(converted, "in vec4 oT0;")) {
@@ -137,7 +142,35 @@ static void shader_source(GLuint shader, GLsizei count, const GLchar *const *str
     es_shader_source(shader, 1, &one, NULL);
     free(converted); free(joined);
 }
+// gl4es (pensé pour ES 2) envoie des formats internes non dimensionnés, valides
+// avec les extensions d'ES 2 (OES_depth_texture, OES_packed_depth_stencil,
+// OES_texture_half_float) mais refusés par un contexte ES 3 (INVALID_OPERATION) :
+// tampons de profondeur/stencil des cibles de rendu, cubemaps HDR RGBA16F.
+// Formats dimensionnés équivalents d'ES 3.
+#define HALF_FLOAT_OES 0x8D61
+static GLenum es3_type(GLenum type) { return type == HALF_FLOAT_OES ? GL_HALF_FLOAT : type; }
+static GLint es3_internal(GLint internal, GLenum format, GLenum type) {
+    switch (internal) {
+    case GL_DEPTH_COMPONENT:
+        return type == GL_UNSIGNED_INT ? GL_DEPTH_COMPONENT24 : type == GL_FLOAT ? GL_DEPTH_COMPONENT32F : GL_DEPTH_COMPONENT16;
+    case GL_DEPTH_STENCIL: return type == GL_FLOAT_32_UNSIGNED_INT_24_8_REV ? GL_DEPTH32F_STENCIL8 : GL_DEPTH24_STENCIL8;
+    case GL_RGBA: case GL_RGB: case GL_RG: case GL_RED:
+        if (type != HALF_FLOAT_OES && type != GL_HALF_FLOAT && type != GL_FLOAT) return internal;
+        return internal == GL_RGBA ? GL_RGBA16F : internal == GL_RGB ? GL_RGB16F : internal == GL_RG ? GL_RG16F : GL_R16F;
+    default: (void)format; return internal;
+    }
+}
+static void (*es_tex_image_2d)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+static void (*es_tex_sub_image_2d)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *);
+static void es3_tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *d) {
+    es_tex_image_2d(t, l, es3_internal(i, f, ty), w, h, b, f, es3_type(ty), d);
+}
+static void es3_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *d) {
+    es_tex_sub_image_2d(t, l, x, y, w, h, f, es3_type(ty), d);
+}
 static void *gles_function(const char *name) {
+    if (!strcmp(name, "glTexImage2D")) { es_tex_image_2d = dlsym(gles, name); return (void *)es3_tex_image_2d; }
+    if (!strcmp(name, "glTexSubImage2D")) { es_tex_sub_image_2d = dlsym(gles, name); return (void *)es3_tex_sub_image_2d; }
     if (!strcmp(name, "glGetString")) return (void *)es_get_string;
     if (!strcmp(name, "glShaderSource")) { es_shader_source = dlsym(gles, name); return (void *)shader_source; }
     if (getenv("P2_IOS_GL_TRACE")) {
@@ -302,13 +335,13 @@ static void es_level_parameter(GLenum target, GLenum name, GLfloat value) {
     if (real_unit != unit) glActiveTexture((GLenum)real_unit);
 }
 static void tex_parameteri(GLenum target, GLenum name, GLint value) {
-    if (name == TEXTURE_SRGB_DECODE) return;
+    if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, value); return; }
     if (target == 0x806F) { tex_parameter_3d_i(target, name, value); return; }
     gl4es_tex_parameteri(target, name, value);
     if (level_parameter(name)) es_level_parameter(target, name, (GLfloat)value);
 }
 static void tex_parameteriv(GLenum target, GLenum name, const GLint *values) {
-    if (name == TEXTURE_SRGB_DECODE) return;
+    if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, values[0]); return; }
     if (target == 0x806F) { tex_parameter_3d_i(target, name, values[0]); return; }
     gl4es_tex_parameteriv(target, name, values);
     if (level_parameter(name)) es_level_parameter(target, name, (GLfloat)values[0]);
@@ -394,6 +427,7 @@ static void with_unit_end(GLint previous) {
     if (current != previous) glActiveTexture((GLenum)previous);
 }
 static void bind_texture(GLenum target, GLuint name) {
+    rt_ios_srgb_bind_texture(target, name);
     if (target != TARGET_3D) { gl4es_bind_texture(target, name); return; }
     GLint previous = with_unit_begin();
     glBindTexture(TARGET_3D, name);
@@ -421,6 +455,7 @@ static GLint sized_rgba(GLint internal) {
 }
 static void tex_image_3d(GLenum target, GLint level, GLint internal, GLsizei w, GLsizei h, GLsizei d, GLint border,
                          GLenum format, GLenum type, const void *data) {
+    rt_ios_srgb_tex_image(target, level, internal);
     void *owned; const void *pixels = rgba_copy(&format, &type, data, (size_t)w * h * d, &owned);
     GLint previous = with_unit_begin();
     glTexImage3D(target, level, sized_rgba(internal), w, h, d, border, format, type, pixels);
@@ -439,6 +474,7 @@ static void tex_parameter_3d_i(GLenum target, GLenum name, GLint value) {
     GLint previous = with_unit_begin(); glTexParameteri(target, name, value); with_unit_end(previous);
 }
 static void tex_parameterf(GLenum target, GLenum name, GLfloat value) {
+    if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, (GLint)value); return; }
     if (target != TARGET_3D) {
         gl4es_tex_parameterf(target, name, value);
         if (level_parameter(name)) es_level_parameter(target, name, value);
@@ -447,6 +483,7 @@ static void tex_parameterf(GLenum target, GLenum name, GLfloat value) {
     GLint previous = with_unit_begin(); glTexParameterf(target, name, value); with_unit_end(previous);
 }
 static void tex_parameterfv(GLenum target, GLenum name, const GLfloat *values) {
+    if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, (GLint)values[0]); return; }
     if (target != TARGET_3D) { gl4es_tex_parameterfv(target, name, values); return; }
     GLint previous = with_unit_begin(); glTexParameterfv(target, name, values); with_unit_end(previous);
 }
@@ -492,10 +529,35 @@ static void narrow_init(void) {
 static GLint narrow_internal(GLint internal) {
     switch (internal) { case 0x805B /* RGBA16 */: return 0x8058; case 0x8054 /* RGB16 */: return 0x8051; default: return internal; }
 }
+// Taille d'un texel pour les formats couleur courants ; 0 si inconnue.
+static size_t texel_bytes(GLenum format, GLenum type) {
+    int n = channels(format);
+    if (!n) return 0;
+    switch (type) {
+    case GL_UNSIGNED_BYTE: return (size_t)n;
+    case 0x8367 /* 8_8_8_8_REV */: case 0x8035 /* 8_8_8_8 */: return 4;
+    case GL_UNSIGNED_SHORT_5_6_5: case GL_UNSIGNED_SHORT_4_4_4_4: case GL_UNSIGNED_SHORT_5_5_5_1: return 2;
+    case 0x140B /* HALF_FLOAT */: case 0x8D61 /* HALF_FLOAT_OES */: return (size_t)n * 2;
+    case GL_FLOAT: return (size_t)n * 4;
+    default: return 0;
+    }
+}
 static void tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *d) {
     narrow_init();
+    rt_ios_srgb_tex_image(t, l, i);
     int n = channels(f);
-    if (ty != GL_UNSIGNED_SHORT || !n) { g4_tex_image_2d_plain(t, l, i, w, h, b, f, ty, d); return; }
+    // Cible de rendu créée sans données : OpenGL de bureau (Mac) la donne à
+    // zéro, OpenGL ES/gl4es laissent son contenu indéfini, que les passes
+    // plein écran (bloom, HDR) relisaient : voile de bruit. Remise à zéro.
+    void *zeros = NULL;
+    GLint unpack_buffer = 0;
+    if (!d) gl4es_get_integerv(0x88EF /* PIXEL_UNPACK_BUFFER_BINDING */, &unpack_buffer);
+    if (!d && !unpack_buffer && w > 0 && h > 0 && ty != GL_UNSIGNED_SHORT) {
+        size_t bytes = texel_bytes(f, ty);
+        size_t row = ((size_t)w * bytes + 7) & ~(size_t)7;   // marge pour tout alignement de lignes
+        if (bytes && (zeros = calloc(row, (size_t)h))) d = zeros;
+    }
+    if (ty != GL_UNSIGNED_SHORT || !n) { g4_tex_image_2d_plain(t, l, i, w, h, b, f, ty, d); free(zeros); return; }
     unsigned char *narrow = narrow_u16(d, w, h, n);
     GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
     g4_pixel_storei(GL_UNPACK_ALIGNMENT, 1);
@@ -541,11 +603,11 @@ void *rt_host_gl_symbol(void *library, const char *name) {
         if (strcmp(name, extras[i].name)) continue;
         if (!gl4es_get_string) return NULL;   // avant le premier contexte : rien
         int sync = strstr(name, "Sync") != NULL;
-        return sync && !es_fence_sync ? NULL : extras[i].fn;
+        return sync && !es_fence_sync ? NULL : rt_ios_srgb_wrap(name, extras[i].fn);
     }
     void *wrapper = gl4es_get_string ? traced(name) : NULL;
-    if (wrapper) return wrapper;
-    return gl4es_GetProcAddress(name);
+    if (wrapper) return rt_ios_srgb_wrap(name, wrapper);
+    return gl4es_get_string ? rt_ios_srgb_wrap(name, gl4es_GetProcAddress(name)) : gl4es_GetProcAddress(name);
 }
 
 void *rt_ios_gl_current_context(void) { return (__bridge void *)[EAGLContext currentContext]; }

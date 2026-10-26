@@ -55,6 +55,11 @@ int main(int argc, char **argv) {
     gles = dlopen("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW | RTLD_LOCAL);
     set_getprocaddress(gles_proc);
     set_getmainfbsize(fb_size);
+    {   // extensions réelles d'OpenGL ES (avant gl4es)
+        const unsigned char *(*es_string)(unsigned) = dlsym(gles, "glGetString");
+        const char *e = (const char *)es_string(0x1F03);
+        printf("probe: ES %s\nprobe: ES extensions %s\n", es_string(0x1F02), e ? e : "(null)");
+    }
     initialize_gl4es();
     get_string_fn get_string = gl4es_GetProcAddress("glGetString");
     printf("probe: GL_VERSION %s | GL_RENDERER %s\n", get_string(0x1F02), get_string(0x1F01));
