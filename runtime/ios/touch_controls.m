@@ -9,13 +9,16 @@
 // - stick droit : caméra, mouvements de souris relatifs à vitesse
 //   proportionnelle à l'inclinaison (courbe quadratique pour viser finement) ;
 //   chaque stick se centre là où le doigt se pose, dans sa moitié d'écran ;
+//   un bouton bascule la moitié droite en trackpad : le glissement du doigt
+//   devient directement le mouvement de souris (choix retenu entre parties,
+//   P2TouchTrackpad dans les réglages de l'app) ;
 // - portails : une paire bleu (clic gauche) / orange (clic droit) dans chaque
 //   coin du haut, pour la main libre ;
 // - icônes : sauter (espace), s'accroupir (Ctrl gauche), utiliser (E),
 //   pause (Échap).
 // Avec une manette ou un clavier connecté, elle se cache jusqu'au premier
 // toucher. P2_TOUCH_CONTROLS=0 la désactive, =1 l'affiche toujours ; P2_TOUCH_LOOK règle la vitesse
-// de la caméra (1 par défaut).
+// de la caméra (1 par défaut, stick et trackpad).
 //
 // Disposition et dessin inspirés de la manette tactile de TOTK de
 // MacNativeGames (games/totk/ios/Sources/touch_pad.m, licence MIT).
@@ -33,11 +36,14 @@
 int rt_ios_game_ui_visible(void);   // game_state.c
 
 typedef enum { ROLE_MOVE, ROLE_LOOK, ROLE_BUTTON } Role;
-typedef enum { KEY_SPACE, KEY_CTRL, KEY_E, KEY_ESCAPE, MOUSE_LEFT, MOUSE_RIGHT, ACTION_COUNT } Action;
+typedef enum { KEY_SPACE, KEY_CTRL, KEY_E, KEY_ESCAPE, MOUSE_LEFT, MOUSE_RIGHT, LOOK_MODE, ACTION_COUNT } Action;
 typedef struct { Action action; NSString *symbol; UIColor *color; CGPoint at; CGFloat size; } Button;
 enum { MAX_BUTTONS = 10 };
 
 static const CGFloat kButtonSize = 54, kPortalSize = 60;
+static const float kStickLook = 90;      // comptes de souris par image, stick à fond (≈ 360°/s à la sensibilité 3 du jeu)
+static const float kTrackpadLook = 3.5f; // comptes de souris par point de glissement
+static NSString *const kTrackpadKey = @"P2TouchTrackpad";
 static float look_speed(void) {
     static float speed;
     if (!speed) { const char *e = getenv("P2_TOUCH_LOOK"); speed = e && atof(e) > 0 ? (float)atof(e) : 1.0f; }
@@ -72,6 +78,7 @@ static void redraw(UIView *view) {
     BOOL menu;                // interface du jeu affichée : surcouche effacée
     NSTimer *tick;            // caméra : un pas par image tant que le stick est incliné
     float lookCarry[2];       // fractions de comptes de souris reportées
+    BOOL trackpad;            // moitié droite en trackpad plutôt qu'en stick
 }
 
 - (instancetype)initWithWindow:(SDL_Window *)sdlWindow {
@@ -80,6 +87,7 @@ static void redraw(UIView *view) {
         self.multipleTouchEnabled = YES; self.backgroundColor = UIColor.clearColor; self.opaque = NO;
         self.contentMode = UIViewContentModeRedraw;
         fingers = [NSMapTable strongToStrongObjectsMapTable];
+        trackpad = [NSUserDefaults.standardUserDefaults boolForKey:kTrackpadKey];
         NSNotificationCenter *center = NSNotificationCenter.defaultCenter;
         for (NSNotificationName name in @[GCControllerDidConnectNotification, GCControllerDidDisconnectNotification,
                                           GCKeyboardDidConnectNotification, GCKeyboardDidDisconnectNotification])
@@ -113,21 +121,29 @@ static void redraw(UIView *view) {
     }
     if (host.subviews.lastObject != self) [host bringSubviewToFront:self];
     if (!CGRectEqualToRect(self.frame, host.bounds)) { self.frame = host.bounds; redraw(self); }
+    if (trackpad) return;   // trackpad : mouvements envoyés au glissement (touchesMoved)
     for (P2Finger *f in fingers.objectEnumerator) {
         if (f.role != ROLE_LOOK) continue;
         CGFloat x, y; [self deflectionOf:f x:&x y:&y];
-        // ~ 2 500 comptes/s à fond (≈ 165°/s à la sensibilité 3 du jeu), quadratique.
-        float scale = 42.0f * look_speed();
-        lookCarry[0] += (float)(x * fabs(x)) * scale; lookCarry[1] += (float)(-y * fabs(y)) * scale;
-        int dx = (int)lookCarry[0], dy = (int)lookCarry[1];
-        lookCarry[0] -= (float)dx; lookCarry[1] -= (float)dy;
-        if (dx || dy) {
-            SDL_Event e = {0};
-            e.type = SDL_MOUSEMOTION; e.motion.windowID = SDL_GetWindowID(window);
-            e.motion.xrel = dx; e.motion.yrel = dy;
-            SDL_PushEvent(&e);
-        }
+        float scale = kStickLook * look_speed();   // quadratique : lent près du centre pour viser
+        [self lookBy:(float)(x * fabs(x)) * scale y:(float)(-y * fabs(y)) * scale];
     }
+}
+// Mouvement de souris relatif, fractions de comptes reportées.
+- (void)lookBy:(float)x y:(float)y {
+    lookCarry[0] += x; lookCarry[1] += y;
+    int dx = (int)lookCarry[0], dy = (int)lookCarry[1];
+    lookCarry[0] -= (float)dx; lookCarry[1] -= (float)dy;
+    if (!dx && !dy) return;
+    SDL_Event e = {0};
+    e.type = SDL_MOUSEMOTION; e.motion.windowID = SDL_GetWindowID(window);
+    e.motion.xrel = dx; e.motion.yrel = dy;
+    SDL_PushEvent(&e);
+}
+- (void)toggleLookMode {
+    trackpad = !trackpad;
+    [NSUserDefaults.standardUserDefaults setBool:trackpad forKey:kTrackpadKey];
+    lookCarry[0] = lookCarry[1] = 0;
 }
 
 // Hors partie, les doigts passent à la vue de SDL (clics dans les menus).
@@ -169,6 +185,7 @@ static void redraw(UIView *view) {
     case KEY_ESCAPE: [self key:SDL_SCANCODE_ESCAPE down:down]; break;
     case MOUSE_LEFT: [self mouseButton:SDL_BUTTON_LEFT down:down at:centre]; break;
     case MOUSE_RIGHT: [self mouseButton:SDL_BUTTON_RIGHT down:down at:centre]; break;
+    case LOOK_MODE: if (down) [self toggleLookMode]; break;
     default: break;
     }
 }
@@ -198,6 +215,8 @@ static void redraw(UIView *view) {
         {KEY_CTRL, @"arrow.down", ink, {x + w * .80, y + h * .40}, kButtonSize},
         {KEY_E, @"hand.point.up.left.fill", ink, {x + w * .94, y + h * .80}, kButtonSize},
         {KEY_ESCAPE, @"pause.fill", ink, {x + w * .5, y + h * .08}, kButtonSize * .75},
+        // Mode de la caméra : l'icône montre le mode actuel.
+        {LOOK_MODE, trackpad ? @"hand.draw.fill" : @"r.joystick.fill", ink, {x + w * .67, y + h * .40}, kButtonSize * .75},
     };
     int n = (int)(sizeof(all) / sizeof(*all));
     for (int i = 0; i < n && i < MAX_BUTTONS; ++i) b[i] = all[i];
@@ -256,7 +275,13 @@ static void redraw(UIView *view) {
 }
 - (void)touchesMoved:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
-    for (UITouch *t in touches) [fingers objectForKey:t].at = [t locationInView:self];
+    for (UITouch *t in touches) {
+        P2Finger *f = [fingers objectForKey:t];
+        CGPoint p = [t locationInView:self];
+        if (f && f.role == ROLE_LOOK && trackpad)
+            [self lookBy:(float)(p.x - f.at.x) * kTrackpadLook * look_speed() y:(float)(p.y - f.at.y) * kTrackpadLook * look_speed()];
+        f.at = p;
+    }
     [self updateMove]; redraw(self);
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
@@ -290,7 +315,7 @@ static void redraw(UIView *view) {
     UIColor *ink = [UIColor colorWithWhite:1 alpha:.3], *line = [UIColor colorWithWhite:1 alpha:.45];
     CGContextSetLineWidth(c, 2);
     [self drawStick:c right:NO ink:ink];
-    [self drawStick:c right:YES ink:ink];
+    if (!trackpad) [self drawStick:c right:YES ink:ink];
     Button b[MAX_BUTTONS]; int n = [self buttons:b];
     for (int i = 0; i < n; ++i) {
         CGFloat s = b[i].size;
