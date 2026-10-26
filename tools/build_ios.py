@@ -98,6 +98,7 @@ def main():
     (app / 'Info.plist').write_text(plist)
     # Page du jeu dans l'app Réglages d'iOS (lue par runtime/ios/settings.c).
     shutil.copytree(ROOT / 'ios/Settings.bundle', app / 'Settings.bundle', dirs_exist_ok=True)
+    app_icon(app)
     # Lancement depuis l'écran d'accueil : arguments du jeu par défaut (les
     # dossiers de données sont ajoutés par ios/main_ios.c).
     (app / 'launch.args').write_text('--\n-game\nportal2\n-novid\n-fullscreen\n')
@@ -107,6 +108,26 @@ def main():
         subprocess.run([sys.executable, str(ROOT / 'ios/signing/sign.py'), str(app)], check=True)
     size = (app / 'portal2').stat().st_size
     print(f'{app} : exécutable {size / 1e6:.0f} Mo, {time.time() - started:.0f} s au total')
+
+
+def app_icon(app):
+    """Icône de l'app tirée de l'icône macOS du jeu (portal2/resource/game.icns) :
+    une image de Valve, prise dans la copie du joueur au lieu d'être versionnée.
+    Fichiers à l'ancienne (CFBundleIconFiles d'ios/Info.plist.in), sans
+    catalogue d'images. Sans le fichier : icône par défaut d'iOS."""
+    config = json.loads(Path('config/local.json').read_text()) if Path('config/local.json').exists() else {}
+    icns = Path(config.get('game_root', '')) / 'portal2/resource/game.icns'
+    if not icns.is_file():
+        print(f'icône : {icns} absent, icône par défaut')
+        return
+    work = app.parent / 'icon'
+    shutil.rmtree(work, ignore_errors=True)
+    subprocess.run(['iconutil', '-c', 'iconset', '-o', str(work / 'game.iconset'), str(icns)], check=True)
+    largest = max((work / 'game.iconset').glob('icon_*.png'), key=lambda p: p.stat().st_size)
+    for name, size in (('AppIcon60x60@2x.png', 120), ('AppIcon60x60@3x.png', 180), ('AppIcon76x76@2x~ipad.png', 152),
+                       ('AppIcon83.5x83.5@2x~ipad.png', 167)):
+        subprocess.run(['sips', '-z', str(size), str(size), str(largest), '--out', str(app / name)],
+                       check=True, capture_output=True)
 
 
 if __name__ == '__main__':

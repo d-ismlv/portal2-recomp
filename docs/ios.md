@@ -52,7 +52,7 @@ prochain lancement.
 |---|---|---|
 | Résolution | `P2_IOS_RENDER_SCALE` (+ `-w`/`-h` du jeu) | native, ×2 (défaut), ×1,5, ×1 |
 | Images par seconde | `P2_IOS_MAX_FPS` | 60 (défaut), 120 |
-| Compteur d'images | `P2_SHOW_FPS` | affiché par défaut ; toucher le compteur écrit `getpos` dans la console |
+| Compteur d'images | `P2_SHOW_FPS` | affiché par défaut ; toucher le coin haut gauche l'affiche ou le masque (choix gardé) |
 | Commandes à l'écran | `P2_TOUCH_CONTROLS` | automatique (cachées avec une manette), toujours, jamais |
 | Caméra en trackpad | clé `P2TouchTrackpad` | aussi basculée par le bouton en bas à gauche |
 | Vitesse de la caméra | `P2_TOUCH_LOOK` | ×0,5 à ×3 |

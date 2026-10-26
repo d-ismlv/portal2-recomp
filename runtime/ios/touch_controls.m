@@ -298,7 +298,8 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     float lookCarry[2];       // fractions de comptes de souris reportées
     BOOL trackpad;            // moitié droite en trackpad plutôt qu'en stick
     BOOL physicalPad;         // vraie manette connectée
-    int fps;                  // compteur d'images affiché (-1 : masqué, P2_SHOW_FPS=0)
+    int fps;                  // compteur d'images affiché (0 : rien à afficher)
+    int fpsHidden;            // masqué : P2_SHOW_FPS=0 (Réglages) ou toucher du coin haut gauche
     unsigned long fpsFrames;  // images au dernier relevé
     CFTimeInterval fpsAt;     // instant du dernier relevé
     SDL_Joystick *pad;        // manette virtuelle du stick gauche (NULL : W/A/S/D)
@@ -326,6 +327,8 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
             [center addObserver:self selector:@selector(devicesChanged) name:name object:nil];
         [self devicesChanged];
         backtapHeld = -1;
+        const char *show = getenv("P2_SHOW_FPS");   // posée par les Réglages (runtime/ios/settings.c)
+        fpsHidden = show && !strcmp(show, "0");
         backtap_start();
         __weak P2TouchControls *weakSelf = self;
         tick = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
@@ -488,7 +491,7 @@ static BOOL portal_buttons(void) {
         {KEY_SPACE, @"arrow.up", ink, {x + w * .94, y + h * .50}, kButtonSize},
         {KEY_CTRL, @"arrow.down", ink, {x + w * .80, y + h * .40}, kButtonSize},
         {KEY_E, @"hand.point.up.left.fill", ink, {x + w * .94, y + h * .80}, kButtonSize},
-        {KEY_ESCAPE, @"pause.fill", ink, {x + w * .5, y + h * .08}, kButtonSize * .75},
+        {KEY_ESCAPE, @"pause.fill", ink, {x + w - kButtonSize * .45, y + kButtonSize * .45}, kButtonSize * .75},
         // Mode de la caméra, dans le coin en bas à gauche : l'icône montre le mode actuel.
         {LOOK_MODE, trackpad ? @"hand.draw.fill" : @"r.joystick.fill", ink,
          {x + kButtonSize * .45, y + h - kButtonSize * .45}, kButtonSize * .75},
@@ -656,10 +659,13 @@ static Sint16 axis_value(CGFloat speed, int response) {
     for (UITouch *t in touches) {
         P2Finger *f = [P2Finger new];
         f.start = f.at = [t locationInView:self];
-        // Toucher du compteur d'images : position du joueur au journal (getpos),
-        // pour rejouer la même vue dans le banc (tools/ios_bench.py).
-        if (fps > 0 && CGRectContainsPoint(CGRectInset([self fpsBox:[NSString stringWithFormat:@"%d FPS", fps]], -12, -12), f.start)) {
-            rt_ios_console_command("getpos");
+        // Coin haut gauche : affiche ou masque le compteur d'images, choix gardé
+        // dans les réglages (clé P2ShowFPS de la page Réglages).
+        if (CGRectContainsPoint([self fpsCorner], f.start)) {
+            fpsHidden = !fpsHidden;
+            [NSUserDefaults.standardUserDefaults setBool:!fpsHidden forKey:@"P2ShowFPS"];
+            fps = 0; fpsAt = 0;
+            redraw(self);
             continue;
         }
         int button = [self buttonAt:f.start];
@@ -719,9 +725,7 @@ static Sint16 axis_value(CGFloat speed, int response) {
 // Compteur d'images, relevé deux fois par seconde (redessiner l'incrustation
 // coûte : seulement quand la valeur change). P2_SHOW_FPS=0 (Réglages) le masque.
 - (void)updateFPS {
-    if (fps < 0) return;
-    static int hidden = -1;
-    if (hidden < 0) { const char *e = getenv("P2_SHOW_FPS"); hidden = e && !strcmp(e, "0"); if (hidden) { fps = -1; return; } }
+    if (fpsHidden) return;
     CFTimeInterval now = CACurrentMediaTime();
     if (!fpsAt) { fpsAt = now; fpsFrames = rt_ios_frames; return; }
     if (now - fpsAt < .5) return;
@@ -741,7 +745,7 @@ static const uint8_t kPixelGlyphs[][7] = {
     {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}, {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10},
     {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E},
 };
-static const CGFloat kPixel = 3;   // points par pixel de la police (9 pixels d'écran sur un iPhone ×3)
+static const CGFloat kPixel = 2;   // points par pixel de la police (6 pixels d'écran sur un iPhone ×3)
 static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
     for (int i = 0; text[i]; ++i) {
         const char *glyph = strchr(kPixelChars, text[i]);
@@ -758,6 +762,12 @@ static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
     CGFloat margin = 2 * kPixel;
     return CGRectMake(round(CGRectGetMinX(a) + 8), round(CGRectGetMinY(a) + 8),
                       (text.length * 6 - 1) * kPixel + 2 * margin, 7 * kPixel + 2 * margin);
+}
+// Zone qui bascule le compteur : le coin jusqu'au compteur le plus large, et
+// un peu plus (le doigt couvre mal un si petit carré).
+- (CGRect)fpsCorner {
+    CGRect box = [self fpsBox:@"000 FPS"];
+    return CGRectMake(0, 0, CGRectGetMaxX(box) + 20, CGRectGetMaxY(box) + 20);
 }
 - (void)drawFPS {
     if (fps <= 0) return;
