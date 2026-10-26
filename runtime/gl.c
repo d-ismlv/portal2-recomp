@@ -653,7 +653,9 @@ int rt_gl_manual_glGetTexParameterPointervAPPLE(CPU *c, void *fn) {
 typedef struct { CGLShareGroupObj share; uint32_t name; uint32_t size, written_end; int known, serialized, used; } Stream;
 static Stream *streams; static uint32_t stream_capacity, stream_used;
 static uint64_t stream_unsync_writes;
-uint64_t rt_gl_stream_unsync_writes(void) { return stream_unsync_writes; }   // tests   // used : occupés + supprimés
+uint64_t rt_gl_stream_unsync_writes(void) { return stream_unsync_writes; }   // tests
+static Stream *stream_state(uint32_t name, int create);
+int rt_gl_stream_tracked(uint32_t name) { Stream *st = stream_state(name, 0); return st != NULL; }   // tests   // used : occupés + supprimés
 static uint32_t stream_hash(CGLShareGroupObj share, uint32_t name) {
     return (uint32_t)(((uintptr_t)share >> 4) * 0x9e3779b1u) ^ (name * 2654435761u);
 }
@@ -729,6 +731,32 @@ static int stream_subdata(CPU *c, uint32_t target, uint32_t offset, uint32_t siz
     ++stream_unsync_writes;
     return 1;
 }
+// Erreurs GL lues par le pont (pour savoir si glBufferData a réussi), rendues
+// au jeu dans l'ordre à ses prochains glGetError : rien ne lui est volé.
+static uint32_t pending_errors[8]; static unsigned pending_count;
+static void stash_errors(void) {
+    for (GLenum e; (e = glGetError()) != GL_NO_ERROR;)
+        if (pending_count < 8) pending_errors[pending_count++] = e;
+}
+static int valid_usage(uint32_t usage) {
+    switch (usage) {
+    case GL_STREAM_DRAW: case GL_STREAM_READ: case GL_STREAM_COPY:
+    case GL_STATIC_DRAW: case GL_STATIC_READ: case GL_STATIC_COPY:
+    case GL_DYNAMIC_DRAW: case GL_DYNAMIC_READ: case GL_DYNAMIC_COPY: return 1;
+    }
+    return 0;
+}
+// Avant glBufferData : erreurs déterministes connues d'avance, et purge des
+// erreurs en attente (rendues plus tard au jeu) pour isoler celles de l'appel.
+static int buffer_data_ok_before;
+static void stream_buffer_data_before(uint32_t target, uint32_t size, uint32_t usage) {
+    uint32_t name = bound_buffer(target);
+    Mirror *m = name ? find_mirror(current_share(), name, 0) : NULL;
+    GLint mapped = GL_FALSE;
+    if (name) glGetBufferParameteriv(target, GL_BUFFER_MAPPED, &mapped);
+    buffer_data_ok_before = name && (int32_t)size >= 0 && valid_usage(usage) && !mapped && !(m && m->mapped);
+    stash_errors();
+}
 // Avant le thunk : détourne les ajouts, marque les écritures possibles.
 static int stream_before(CPU *c, const char *name) {
     uint32_t a = c->esp + 4;
@@ -737,6 +765,12 @@ static int stream_before(CPU *c, const char *name) {
         if (stream_subdata(c, target, offset, size, data)) return 1;
         Stream *st = stream_state(bound_buffer(target), 0);
         if (st) { uint64_t end = (uint64_t)offset + size; if (end > st->written_end) st->written_end = end > st->size ? st->size : (uint32_t)end; }
+    } else if (!strcmp(name, "glBufferData") || !strcmp(name, "glBufferDataARB")) {
+        stream_buffer_data_before(R32(a), R32(a + 4), R32(a + 12));
+    } else if (!strcmp(name, "glGetError") && pending_count) {
+        c->eax = pending_errors[0];                            // erreur lue par le pont, rendue au jeu
+        memmove(pending_errors, pending_errors + 1, --pending_count * sizeof(*pending_errors));
+        return 1;
     } else if (!strncmp(name, "glMapBuffer", 11)) {
         stream_unknown(R32(a));
     } else if (!strcmp(name, "glCopyBufferSubData")) {
@@ -751,9 +785,11 @@ static int stream_before(CPU *c, const char *name) {
 static void stream_after(CPU *c, const char *name) {
     if (strcmp(name, "glBufferData") && strcmp(name, "glBufferDataARB")) return;
     uint32_t a = c->esp + 4, target = R32(a), size = R32(a + 4), data = R32(a + 8);
+    GLenum error = glGetError();
+    if (error != GL_NO_ERROR && pending_count < 8) pending_errors[pending_count++] = error;
     Stream *st = stream_state(bound_buffer(target), 1);
     if (!st) return;
     GLint actual = -1; glGetBufferParameteriv(target, GL_BUFFER_SIZE, &actual);
-    if ((int32_t)size < 0 || actual < 0 || (uint32_t)actual != size) { st->known = 0; return; }
+    if (!buffer_data_ok_before || error != GL_NO_ERROR || actual < 0 || (uint32_t)actual != size) { st->known = 0; return; }
     st->size = size; st->written_end = data ? size : 0; st->known = 1;
 }

@@ -3,6 +3,7 @@
 #include "checks.h"
 #include <stdlib.h>
 uint64_t rt_gl_stream_unsync_writes(void);
+int rt_gl_stream_tracked(uint32_t name);
 __attribute__((constructor)) static void enable_stream_unsync(void) { setenv("P2_GL_STREAM_UNSYNC", "1", 0); }
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
@@ -297,7 +298,9 @@ RT_CHECK(gl_stream_subdata_keeps_buffer_contents) {
     gl("glBindBufferARB", 2, GL_ARRAY_BUFFER, buffer);
     gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);          // stockage neuf
     for (uint32_t i = 0; i < 64; ++i) W8(DATA + 0x100 + i, (uint8_t)(i * 3 + 1));
-    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);            // ajout
+    uint64_t first = rt_gl_stream_unsync_writes();
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);            // ajout (premier appel de l'import)
+    assert(rt_gl_stream_unsync_writes() == first + 1);                         // suivi dès le premier appel
     gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 16, 16, DATA + 0x110);           // ajout
     W8(DATA + 0x108, 0xee);
     gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 8, 1, DATA + 0x108);             // chevauchement : synchronisé
@@ -333,7 +336,8 @@ RT_CHECK(gl_stream_unsync_only_beyond_written_data) {
     assert(rt_gl_stream_unsync_writes() == before + 2);
     // Échec de glBufferData (taille négative) : état inconnu, chemin synchronisé.
     gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);
-    assert(glGetError() == GL_INVALID_VALUE);
+    assert(gl("glGetError", 0) == GL_INVALID_VALUE);              // erreur rendue au jeu par le pont
+    assert(gl("glGetError", 0) == GL_NO_ERROR);
     gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 40, 8, DATA + 0x128);
     assert(rt_gl_stream_unsync_writes() == before + 2);
     // Lecture de texture vers ce tampon lié en PACK : le GPU peut y écrire.
@@ -355,5 +359,63 @@ RT_CHECK(gl_stream_unsync_only_beyond_written_data) {
     for (int i = 0; i < 8; ++i) assert(back[i] == (uint8_t)(i + 7));
     assert(glGetError() == GL_NO_ERROR);
     W32(DATA, again); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(saved);
+}
+
+RT_CHECK(gl_stream_conservative_cases) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    for (uint32_t i = 0; i < 64; ++i) W8(DATA + 0x100 + i, (uint8_t)i);
+    // Même taille mais usage invalide : échec, l'ancien stockage reste « inconnu ».
+    uint32_t buffer = new_buffer(GL_ARRAY_BUFFER, 64);
+    uint64_t base = rt_gl_stream_unsync_writes();
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, 0x1234);
+    assert(gl("glGetError", 0) == GL_INVALID_ENUM);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base);
+    // Projection par le jeu : stockage considéré écrit.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);
+    uint32_t mapped = gl("glMapBufferARB", 2, GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+    assert(mapped); gl("glUnmapBuffer", 1, GL_ARRAY_BUFFER);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base);
+    // Copie vers ce tampon (cible COPY_WRITE) : idem, même si l'appel échoue en legacy.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);
+    gl("glBindBufferARB", 2, 0x8F37, buffer);
+    GLint copy_write = 0; glGetIntegerv(0x8F37, &copy_write);
+    while (glGetError() != GL_NO_ERROR) {}
+    gl("glCopyBufferSubData", 5, 0x8F36, 0x8F37, 0, 0, 8);
+    while (gl("glGetError", 0) != GL_NO_ERROR) {}
+    gl("glBindBufferARB", 2, 0x8F37, 0);
+    while (gl("glGetError", 0) != GL_NO_ERROR) {}
+    if ((uint32_t)copy_write == buffer) {                       // cible COPY_WRITE disponible (GL 3.1)
+        gl("glBindBufferARB", 2, GL_ARRAY_BUFFER, buffer);
+        gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+        assert(rt_gl_stream_unsync_writes() == base);
+    }   // sinon (legacy 2.1) la copie ne peut rien écrire
+    // Suppression : l'état du nom est oublié.
+    assert(rt_gl_stream_tracked(buffer));
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
+    assert(!rt_gl_stream_tracked(buffer));
+    // Deux contextes non partagés, même nom de tampon : états séparés.
+    CGLPixelFormatAttribute attributes[] = {kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_Legacy, 0};
+    CGLPixelFormatObj format = NULL; GLint count = 0; CGLContextObj other = NULL;
+    assert(CGLChoosePixelFormat(attributes, &format, &count) == kCGLNoError);
+    assert(CGLCreateContext(format, NULL, &other) == kCGLNoError); CGLDestroyPixelFormat(format);
+    current_context();
+    uint32_t mine = new_buffer(GL_ARRAY_BUFFER, 64);
+    CGLSetCurrentContext(other);
+    uint32_t theirs = new_buffer(GL_ARRAY_BUFFER, 64);
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, DATA + 0x100, GL_STREAM_DRAW);   // initialisé : entièrement écrit
+    base = rt_gl_stream_unsync_writes();
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base);                                   // synchronisé dans l'autre contexte
+    current_context();
+    gl("glBindBufferARB", 2, GL_ARRAY_BUFFER, mine);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base + 1 || mine != theirs);             // état propre au share group
+    W32(DATA, mine); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(other); W32(DATA, theirs); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(NULL); CGLDestroyContext(other);
     CGLSetCurrentContext(saved);
 }
