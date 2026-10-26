@@ -269,3 +269,29 @@ RT_CHECK(sdl_video_traps_instead_of_lying) {
     call("SDL_free", 1, block);
     assert(rt_free(block) == -1);
 }
+
+// Mode Retina (échelle imposée à 2) : fenêtre hôte en points, tailles,
+// écrans et modes vus par le jeu en pixels.
+RT_CHECK(sdl_video_retina_window_in_points) {
+    start_dummy_video();
+    rt_sdl_force_display_scale(2);
+    uint32_t window = call("SDL_CreateWindow", 6, put_string(DATA, "Retina"), SDL_WINDOWPOS_CENTERED,
+                           SDL_WINDOWPOS_CENTERED, 2560, 1440, SDL_WINDOW_HIDDEN);
+    SDL_Window *host = rt_handle_get(window, RT_SDL_WINDOW);
+    int w = 0, h = 0; SDL_GetWindowSize(host, &w, &h);
+    assert(w == 1280 && h == 720);
+    call("SDL_GetWindowSize", 3, window, DATA, DATA + 4);
+    assert(R32(DATA) == 2560 && R32(DATA + 4) == 1440);
+    call("SDL_SetWindowSize", 3, window, 1600, 900);
+    SDL_GetWindowSize(host, &w, &h);
+    assert(w == 800 && h == 450);
+    SDL_Rect bounds; assert(!SDL_GetDisplayBounds(0, &bounds));
+    assert(call("SDL_GetDisplayBounds", 2, 0, DATA) == 0);
+    assert((int)R32(DATA + 8) == 2 * bounds.w && (int)R32(DATA + 12) == 2 * bounds.h);
+    SDL_DisplayMode desktop; assert(!SDL_GetDesktopDisplayMode(0, &desktop));
+    assert(call("SDL_GetDesktopDisplayMode", 2, 0, DATA) == 0);
+    assert((int)R32(DATA + 4) == 2 * desktop.w && (int)R32(DATA + 8) == 2 * desktop.h);
+    call("SDL_DestroyWindow", 1, window);
+    rt_sdl_force_display_scale(0);
+    stop_video();
+}

@@ -278,6 +278,67 @@ static int hidden_windows(void) {
     return value;
 }
 
+// --- Mode Retina (P2_RETINA=1) ------------------------------------------------
+// Le jeu raisonne en pixels : taille de fenêtre = taille du tampon arrière.
+// Sur un écran Retina, la fenêtre est créée en points (taille / échelle) avec
+// SDL_WINDOW_ALLOW_HIGHDPI, et toutes les tailles, positions et coordonnées
+// de souris vues par le jeu sont converties : il rend à la résolution native
+// dans une fenêtre de taille normale. Échelle 1 sans P2_RETINA ou sans Retina.
+static int display_scale_value, display_scale_forced;
+
+static int retina_requested(void) {
+    const char *e = getenv("P2_RETINA");
+    return e && *e && strcmp(e, "0");
+}
+
+// Échelle de l'écran principal, mesurée une fois sur une petite fenêtre cachée.
+int rt_sdl_display_scale(void) {
+    if (display_scale_value) return display_scale_value;
+    if (!retina_requested() || !SDL_WasInit(SDL_INIT_VIDEO) || !pthread_main_np()) return 1;
+    int scale = 1;
+    SDL_Window *probe = SDL_CreateWindow("", 0, 0, 64, 64, SDL_WINDOW_HIDDEN | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (probe) {
+        int pixels = 0;
+        SDL_GetWindowSizeInPixels(probe, &pixels, NULL);
+        if (pixels >= 96) scale = (pixels + 32) / 64;
+        SDL_DestroyWindow(probe);
+    }
+    display_scale_value = scale;
+    fprintf(stderr, "[sdl] Retina mode: display scale %d\n", scale);
+    return scale;
+}
+// Tests : impose une échelle sans fenêtre de mesure (0 = recalculer).
+void rt_sdl_force_display_scale(int scale) { display_scale_value = scale; display_scale_forced = scale != 0; }
+
+static int to_points(int pixels) { return pixels / rt_sdl_display_scale(); }
+static int to_pixels(int points) { return points * rt_sdl_display_scale(); }
+static int position_to_points(int value) {
+    return SDL_WINDOWPOS_ISUNDEFINED(value) || SDL_WINDOWPOS_ISCENTERED(value) ? value : to_points(value);
+}
+static void scale_mode(SDL_DisplayMode *mode, int pixels) {
+    mode->w = pixels ? to_pixels(mode->w) : to_points(mode->w);
+    mode->h = pixels ? to_pixels(mode->h) : to_points(mode->h);
+}
+
+// Crée la fenêtre en points ; si l'échelle réelle diffère de celle mesurée
+// (écran non Retina), revient à une fenêtre en pixels avec une échelle 1.
+static SDL_Window *create_window(const char *title, int x, int y, int w, int h, uint32_t flags) {
+    int scale = rt_sdl_display_scale();
+    if (scale == 1) return SDL_CreateWindow(title, x, y, w, h, flags);
+    SDL_Window *window = SDL_CreateWindow(title, position_to_points(x), position_to_points(y), w / scale, h / scale,
+                                          flags | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window || display_scale_forced) return window;
+    int points = 0, pixels = 0;
+    SDL_GetWindowSize(window, &points, NULL);
+    SDL_GetWindowSizeInPixels(window, &pixels, NULL);
+    if (points <= 0 || pixels != points * scale) {
+        fprintf(stderr, "[sdl] Retina mode: window is %d points for %d pixels, scale 1\n", points, pixels);
+        display_scale_value = 1;
+        SDL_SetWindowSize(window, w, h);
+    }
+    return window;
+}
+
 static int sdl_video(CPU *c, const char *name) {
     if (strncmp(name, "SDL_", 4)) return 0;
     const char *n = name + 4;
@@ -301,8 +362,8 @@ static int sdl_video(CPU *c, const char *name) {
         // Mode diagnostic P2_HIDDEN_WINDOWS=1 : la fenêtre existe (contexte GL
         // réel) mais n'est jamais montrée ; le jeu n'en voit aucune différence.
         uint32_t flags = arg(c, 5) | (hidden_windows() ? SDL_WINDOW_HIDDEN : 0);
-        SDL_Window *w = SDL_CreateWindow(guest_string(c, arg(c, 0)), (int)arg(c, 1), (int)arg(c, 2),
-                                         (int)arg(c, 3), (int)arg(c, 4), flags);
+        SDL_Window *w = create_window(guest_string(c, arg(c, 0)), (int)arg(c, 1), (int)arg(c, 2),
+                                      (int)arg(c, 3), (int)arg(c, 4), flags);
         if (w && !(r = rt_handle_new(w, RT_SDL_WINDOW))) { SDL_DestroyWindow(w); rt_trap(c, c->eip, "SDL: handle table full"); }
     } else if (!strcmp(n, "DestroyWindow")) {
         SDL_Window *w = WINDOW(0);
@@ -317,28 +378,31 @@ static int sdl_video(CPU *c, const char *name) {
         SDL_Window *w = WINDOW(0);
         SDL_SetWindowIcon(w, rt_sdl_surface_sync(c, arg(c, 1)));
     }
-    else if (!strcmp(n, "SetWindowPosition")) SDL_SetWindowPosition(WINDOW(0), (int)arg(c, 1), (int)arg(c, 2));
-    else if (!strcmp(n, "SetWindowSize")) SDL_SetWindowSize(WINDOW(0), (int)arg(c, 1), (int)arg(c, 2));
+    else if (!strcmp(n, "SetWindowPosition"))
+        SDL_SetWindowPosition(WINDOW(0), position_to_points((int)arg(c, 1)), position_to_points((int)arg(c, 2)));
+    else if (!strcmp(n, "SetWindowSize")) SDL_SetWindowSize(WINDOW(0), to_points((int)arg(c, 1)), to_points((int)arg(c, 2)));
     else if (!strcmp(n, "GetWindowSize")) {
         int w = 0, h = 0; uint32_t pw = arg(c, 1), ph = arg(c, 2);
         if (pw) rt_write_span(c, pw, 4);
         if (ph) rt_write_span(c, ph, 4);
         SDL_GetWindowSize(WINDOW(0), pw ? &w : NULL, ph ? &h : NULL);
-        if (pw) W32(pw, (uint32_t)w);
-        if (ph) W32(ph, (uint32_t)h);
+        if (pw) W32(pw, (uint32_t)to_pixels(w));
+        if (ph) W32(ph, (uint32_t)to_pixels(h));
     }
     else if (!strcmp(n, "SetWindowBordered")) SDL_SetWindowBordered(WINDOW(0), arg(c, 1) ? SDL_TRUE : SDL_FALSE);
     else if (!strcmp(n, "SetWindowFullscreen")) r = (uint32_t)SDL_SetWindowFullscreen(WINDOW(0), arg(c, 1));
     else if (!strcmp(n, "SetWindowDisplayMode")) {
         SDL_Window *w = WINDOW(0); uint32_t address = arg(c, 1);
         SDL_DisplayMode mode;
-        if (address) mode = get_mode(c, address);
+        if (address) { mode = get_mode(c, address); scale_mode(&mode, 0); }
         r = (uint32_t)SDL_SetWindowDisplayMode(w, address ? &mode : NULL);
     } else if (!strcmp(n, "GetWindowDisplayMode")) {
         SDL_Window *w = WINDOW(0); uint32_t address = arg(c, 1);
         SDL_DisplayMode mode = {0};
         if (address) rt_write_span(c, address, RT_SDL_DISPLAYMODE_SIZE);
-        r = (uint32_t)mode_result(c, SDL_GetWindowDisplayMode(w, address ? &mode : NULL), address, &mode);
+        int result = SDL_GetWindowDisplayMode(w, address ? &mode : NULL);
+        scale_mode(&mode, 1);
+        r = (uint32_t)mode_result(c, result, address, &mode);
     }
     else if (!strcmp(n, "GetWindowDisplayIndex")) r = (uint32_t)SDL_GetWindowDisplayIndex(WINDOW(0));
     else if (!strcmp(n, "GetWindowID")) r = SDL_GetWindowID(WINDOW(0));
@@ -349,7 +413,7 @@ static int sdl_video(CPU *c, const char *name) {
         const Uint16 *ramp[3];
         for (unsigned i = 0; i < 3; ++i) ramp[i] = arg(c, 1 + i) ? rt_span(c, arg(c, 1 + i), 512) : NULL;
         r = (uint32_t)SDL_SetWindowGammaRamp(w, ramp[0], ramp[1], ramp[2]);
-    } else if (!strcmp(n, "WarpMouseInWindow")) SDL_WarpMouseInWindow(WINDOW(0), (int)arg(c, 1), (int)arg(c, 2));
+    } else if (!strcmp(n, "WarpMouseInWindow")) SDL_WarpMouseInWindow(WINDOW(0), to_points((int)arg(c, 1)), to_points((int)arg(c, 2)));
     // Écrans
     else if (!strcmp(n, "GetNumVideoDisplays")) r = (uint32_t)SDL_GetNumVideoDisplays();
     else if (!strcmp(n, "GetDisplayBounds")) {
@@ -359,8 +423,8 @@ static int sdl_video(CPU *c, const char *name) {
         else {
             rt_write_span(c, address, RT_SDL_RECT_SIZE);
             if (!(r = (uint32_t)SDL_GetDisplayBounds((int)arg(c, 0), &rect))) {
-                W32(address, (uint32_t)rect.x); W32(address + 4, (uint32_t)rect.y);
-                W32(address + 8, (uint32_t)rect.w); W32(address + 12, (uint32_t)rect.h);
+                W32(address, (uint32_t)to_pixels(rect.x)); W32(address + 4, (uint32_t)to_pixels(rect.y));
+                W32(address + 8, (uint32_t)to_pixels(rect.w)); W32(address + 12, (uint32_t)to_pixels(rect.h));
             }
         }
     } else if (!strcmp(n, "GetCurrentDisplayMode") || !strcmp(n, "GetDesktopDisplayMode")) {
@@ -370,6 +434,7 @@ static int sdl_video(CPU *c, const char *name) {
         int index = (int)arg(c, 0);
         int result = n[3] == 'C' ? SDL_GetCurrentDisplayMode(index, address ? &mode : NULL)
                                  : SDL_GetDesktopDisplayMode(index, address ? &mode : NULL);
+        scale_mode(&mode, 1);
         r = (uint32_t)mode_result(c, result, address, &mode);
     }
     else if (!strcmp(n, "GetCurrentVideoDriver")) r = const_string(c, SDL_GetCurrentVideoDriver());

@@ -10,6 +10,7 @@
 // SHIMS: SDL_JoystickNameForIndex SDL_JoystickGetDeviceGUID SDL_JoystickGetGUIDString
 // SHIMS: SDL_HapticOpenFromJoystick SDL_HapticClose SDL_HapticRumbleInit SDL_HapticRumblePlay
 #include "modules.h"
+#include "sdl_common.h"
 #include <SDL2/SDL.h>
 #include <stddef.h>
 #include <stdio.h>
@@ -97,10 +98,29 @@ static uint32_t get32(const uint8_t *in, unsigned offset) { uint32_t v; memcpy(&
 // (propriété de l'application après SDL_PollEvent) est libérée ici.
 void rt_sdl_event_to_guest(CPU *c, const SDL_Event *host, uint32_t guest, int release_host);
 #define event_to_guest rt_sdl_event_to_guest
+// Mode Retina (sdl_video.c) : positions absolues de la souris et tailles de
+// fenêtre converties de points en pixels. Les déplacements relatifs (visée)
+// restent en points pour garder la même sensibilité.
+static void scale_to_pixels(SDL_Event *e, int scale) {
+    switch (e->type) {
+    case SDL_MOUSEMOTION: e->motion.x *= scale; e->motion.y *= scale; break;
+    case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: e->button.x *= scale; e->button.y *= scale; break;
+    case SDL_WINDOWEVENT:
+        if (e->window.event == SDL_WINDOWEVENT_RESIZED || e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED ||
+            e->window.event == SDL_WINDOWEVENT_MOVED) { e->window.data1 *= scale; e->window.data2 *= scale; }
+        break;
+    }
+}
+
 void rt_sdl_event_to_guest(CPU *c, const SDL_Event *host, uint32_t guest, int release_host) {
     uint8_t out[GUEST_EVENT_SIZE] = {0};
     uint32_t type = host->type;
-    if (plain_event(type)) memcpy(out, host, GUEST_EVENT_SIZE);
+    int scale = rt_sdl_display_scale();
+    if (plain_event(type) && scale != 1) {
+        SDL_Event scaled = *host;
+        scale_to_pixels(&scaled, scale);
+        memcpy(out, &scaled, GUEST_EVENT_SIZE);
+    } else if (plain_event(type)) memcpy(out, host, GUEST_EVENT_SIZE);
     else if (type >= SDL_USEREVENT && type <= SDL_LASTEVENT) {
         uintptr_t d1 = (uintptr_t)host->user.data1, d2 = (uintptr_t)host->user.data2;
         if (d1 > UINT32_MAX || d2 > UINT32_MAX)
@@ -360,8 +380,8 @@ static int sdl_input_shim(CPU *c, const char *name) {
         uint32_t px = argument(c, 0), py = argument(c, 1);
         int x, y;
         c->eax = SDL_GetMouseState(&x, &y);
-        if (px) W32(px, (uint32_t)x);
-        if (py) W32(py, (uint32_t)y);
+        if (px) W32(px, (uint32_t)(x * rt_sdl_display_scale()));
+        if (py) W32(py, (uint32_t)(y * rt_sdl_display_scale()));
     } else if (!strcmp(n, "SetRelativeMouseMode")) {
         c->eax = (uint32_t)SDL_SetRelativeMouseMode(argument(c, 0) ? SDL_TRUE : SDL_FALSE);
     } else if (!strcmp(n, "SetModState")) {
