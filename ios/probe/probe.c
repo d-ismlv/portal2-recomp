@@ -203,6 +203,67 @@ int main(int argc, char **argv) {
                pixel[0], pixel[1], pixel[2]);
         ((uint_fn)gl4es_GetProcAddress("glUseProgram"))(0);
     }
+    // 4e. Texture SRGB8 + BGR 128x128 (forme des lightmaps de togl) : pixel
+    // (x, y) = B=x*2, G=y*2, R=64 ; relu au centre de texels connus.
+    {
+        typedef void (*gen_fn)(int, unsigned *);
+        typedef void (*bind_fn)(unsigned, unsigned);
+        typedef void (*tex_fn)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+        typedef void (*param_fn)(unsigned, unsigned, int);
+        typedef void (*enable_fn)(unsigned);
+        typedef void (*texcoord_fn)(float, float);
+        typedef void (*uint_fn)(unsigned);
+        static unsigned char img[128 * 128 * 3];
+        for (int y = 0; y < 128; ++y) for (int x = 0; x < 128; ++x) {
+            unsigned char *p = img + 3 * (y * 128 + x); p[0] = (unsigned char)(x * 2); p[1] = (unsigned char)(y * 2); p[2] = 64;
+        }
+        unsigned tex = 0;
+        ((uint_fn)gl4es_GetProcAddress("glActiveTexture"))(0x84C0);
+        ((gen_fn)gl4es_GetProcAddress("glGenTextures"))(1, &tex);
+        ((bind_fn)gl4es_GetProcAddress("glBindTexture"))(0x0DE1, tex);
+        const char *ifmt = getenv("P2_PROBE_LM_INTERNAL");
+        ((uint_fn)gl4es_GetProcAddress("glPixelStorei") ? (void)0 : (void)0);
+        typedef void (*store_fn)(unsigned, int);
+        ((store_fn)gl4es_GetProcAddress("glPixelStorei"))(0x0CF5, 1);   // UNPACK_ALIGNMENT 1
+        ((tex_fn)gl4es_GetProcAddress("glTexImage2D"))(0x0DE1, 0, ifmt ? (int)strtol(ifmt, NULL, 0) : 0x8C41, 128, 128, 0, 0x80E0, 0x1401, img);
+        if (getenv("P2_PROBE_LM_RGBA16")) {   // page de lightmaps HDR : RGBA16, UNSIGNED_SHORT
+            static unsigned short wide[128 * 128 * 4];
+            for (int y = 0; y < 128; ++y) for (int x = 0; x < 128; ++x) {
+                unsigned short *p = wide + 4 * (y * 128 + x);
+                p[0] = 64 * 257; p[1] = (unsigned short)(y * 2 * 257); p[2] = (unsigned short)(x * 2 * 257); p[3] = 65535;
+            }
+            ((tex_fn)gl4es_GetProcAddress("glTexImage2D"))(0x0DE1, 0, 0x805B, 128, 128, 0, 0x1908, 0x1403, wide);
+            if (getenv("P2_PROBE_LM_RGBA16_SUB")) {
+                typedef void (*sub_fn)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+                ((sub_fn)gl4es_GetProcAddress("glTexSubImage2D"))(0x0DE1, 0, 0, 0, 128, 128, 0x1908, 0x1403, wide);
+            }
+        }
+        if (getenv("P2_PROBE_LM_SUB")) {   // mise à jour en BGRA 8_8_8_8_REV, comme togl
+            static unsigned char sub[128 * 128 * 4];
+            for (int y = 0; y < 128; ++y) for (int x = 0; x < 128; ++x) {
+                unsigned char *p = sub + 4 * (y * 128 + x); p[0] = (unsigned char)(x * 2); p[1] = (unsigned char)(y * 2); p[2] = 64; p[3] = 255;
+            }
+            typedef void (*sub_fn)(unsigned, int, int, int, int, int, unsigned, unsigned, const void *);
+            memset(img, 0, sizeof(img));
+            ((tex_fn)gl4es_GetProcAddress("glTexImage2D"))(0x0DE1, 0, 0x8C41, 128, 128, 0, 0x80E0, 0x1401, img);
+            ((sub_fn)gl4es_GetProcAddress("glTexSubImage2D"))(0x0DE1, 0, 0, 0, 128, 128, 0x80E1, 0x8367, sub);
+        }
+        ((param_fn)gl4es_GetProcAddress("glTexParameteri"))(0x0DE1, 0x2801, 0x2600);
+        ((param_fn)gl4es_GetProcAddress("glTexParameteri"))(0x0DE1, 0x2800, 0x2600);
+        ((enable_fn)gl4es_GetProcAddress("glEnable"))(0x0DE1);
+        ((clear_fn)gl4es_GetProcAddress("glClear"))(0x4000);
+        texcoord_fn tc = gl4es_GetProcAddress("glTexCoord2f");
+        begin(0x0004); color(1, 1, 1); tc(0, 0); vertex(-1, -1); tc(2, 0); vertex(3, -1); tc(0, 2); vertex(-1, 3);
+        ((end_fn)gl4es_GetProcAddress("glEnd"))();
+        for (int k = 0; k < 3; ++k) {
+            int px = fb_w * (1 + 2 * k) / 8, py = fb_h * (1 + 2 * k) / 8;
+            ((read_pixels_fn)gl4es_GetProcAddress("glReadPixels"))(px, py, 1, 1, 0x1908, 0x1401, pixel);
+            int tx = px * 128 / fb_w, ty = py * 128 / fb_h;
+            printf("probe: lightmap texel (%d,%d) pixel %u %u %u (attendu linéaire ~ R=64 G=%d B=%d, avant décodage sRGB)\n",
+                   tx, ty, pixel[0], pixel[1], pixel[2], ty * 2, tx * 2);
+        }
+        ((enable_fn)gl4es_GetProcAddress("glDisable"))(0x0DE1);
+    }
     // 5. Fonctions GL demandées par togl (liste du pont, un nom par ligne).
     const char *names = getenv("P2_PROBE_GL_NAMES");
     FILE *list = names ? fopen(names, "r") : NULL;

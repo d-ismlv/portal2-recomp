@@ -109,7 +109,31 @@ static void shader_source(GLuint shader, GLsizei count, const GLchar *const *str
     *at = 0;
     GLint type = 0; glGetShaderiv(shader, GL_SHADER_TYPE, &type);
     char *converted = rt_essl1_to_essl3(joined, type == GL_FRAGMENT_SHADER);
+    // P2_IOS_DEBUG_UV=1 : chaque shader de fragments qui reçoit oT0 affiche
+    // fract(oT0.xy) (diagnostic des coordonnées de texture).
+    if (converted && type == GL_FRAGMENT_SHADER && getenv("P2_IOS_DEBUG_UV") && strstr(converted, "in vec4 oT0;")) {
+        const char *output = strstr(converted, "out vec4 gl4es_FragColor;") ? "gl4es_FragColor" :
+                             strstr(converted, "gl4es_FragData[4];") ? "gl4es_FragData[0]" : NULL;
+        char *last = output ? strrchr(converted, '}') : NULL;
+        if (last) {
+            size_t head = (size_t)(last - converted);
+            char *debug = malloc(strlen(converted) + 160);
+            if (debug) {
+                memcpy(debug, converted, head);
+                sprintf(debug + head, "%s = vec4(fract(oT0.xy), 0.0, 1.0) + 0.0001 * %s;\n}\n", output, output);
+                free(converted); converted = debug;
+            }
+        }
+    }
     const GLchar *one = converted ? converted : joined;
+    const char *dump = getenv("P2_IOS_SHADER_DUMP");   // dossier : un fichier par source
+    if (dump && *dump) {
+        static int counter;
+        char path[1024];
+        snprintf(path, sizeof(path), "%s/%05d_%s.glsl", dump, counter++, type == GL_FRAGMENT_SHADER ? "fs" : "vs");
+        FILE *f = fopen(path, "w");
+        if (f) { fputs(one, f); fclose(f); }
+    }
     es_shader_source(shader, 1, &one, NULL);
     free(converted); free(joined);
 }
@@ -137,6 +161,10 @@ static void start_gl4es(void) {
     // GLSL ES 1.00 : interdites en 3.00 (surcharge d'une fonction intégrée) et
     // inutiles pour togl, qui écrit ses littéraux en flottants.
     setenv("LIBGL_NOINTOVLHACK", "1", 0);
+    // La réduction de moitié des textures DXT décompressées (défaut de gl4es)
+    // produit des données corrompues sur les textures du jeu (bruit de blocs).
+    // Coût : textures décompressées en pleine taille (mémoire sur l'appareil).
+    setenv("LIBGL_NODOWNSAMPLING", "1", 0);
     set_getprocaddress(gles_function);
     set_getmainfbsize(main_framebuffer_size);
     initialize_gl4es();
@@ -254,15 +282,36 @@ static GLenum check_framebuffer_status(GLenum target) {
 // absorbé ici au lieu d'atteindre gl4es/OpenGL ES (GL_INVALID_ENUM).
 #define TEXTURE_SRGB_DECODE 0x8A48
 static void tex_parameter_3d_i(GLenum target, GLenum name, GLint value);
+// Niveaux et LOD de mipmaps : gl4es (pensé pour ES 2) les garde pour lui sans
+// les transmettre ; en ES 3 ils existent. Sans eux, une chaîne de mipmaps
+// partielle (MAX_LEVEL réglé par togl) rend la texture incomplète : noire.
+static int level_parameter(GLenum name) { return name >= 0x813A && name <= 0x813D; }
+static void es_level_parameter(GLenum target, GLenum name, GLfloat value) {
+    if (target != GL_TEXTURE_2D && target != GL_TEXTURE_CUBE_MAP) return;
+    GLint unit = GL_TEXTURE0, name_bound = 0, real_unit = GL_TEXTURE0, real_bound = 0;
+    gl4es_get_integerv(GL_ACTIVE_TEXTURE, &unit);
+    gl4es_get_integerv(target == GL_TEXTURE_2D ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_CUBE_MAP, &name_bound);
+    if (!name_bound) return;
+    real_get_integerv(GL_ACTIVE_TEXTURE, &real_unit);
+    if (real_unit != unit) glActiveTexture((GLenum)unit);
+    real_get_integerv(target == GL_TEXTURE_2D ? GL_TEXTURE_BINDING_2D : GL_TEXTURE_BINDING_CUBE_MAP, &real_bound);
+    if (real_bound != name_bound) glBindTexture(target, (GLuint)name_bound);
+    if (name == 0x813C || name == 0x813D) glTexParameteri(target, name, (GLint)value);
+    else glTexParameterf(target, name, value);
+    if (real_bound != name_bound) glBindTexture(target, (GLuint)real_bound);
+    if (real_unit != unit) glActiveTexture((GLenum)real_unit);
+}
 static void tex_parameteri(GLenum target, GLenum name, GLint value) {
     if (name == TEXTURE_SRGB_DECODE) return;
-    if (target == 0x806F) tex_parameter_3d_i(target, name, value);
-    else gl4es_tex_parameteri(target, name, value);
+    if (target == 0x806F) { tex_parameter_3d_i(target, name, value); return; }
+    gl4es_tex_parameteri(target, name, value);
+    if (level_parameter(name)) es_level_parameter(target, name, (GLfloat)value);
 }
 static void tex_parameteriv(GLenum target, GLenum name, const GLint *values) {
     if (name == TEXTURE_SRGB_DECODE) return;
-    if (target == 0x806F) tex_parameter_3d_i(target, name, values[0]);
-    else gl4es_tex_parameteriv(target, name, values);
+    if (target == 0x806F) { tex_parameter_3d_i(target, name, values[0]); return; }
+    gl4es_tex_parameteriv(target, name, values);
+    if (level_parameter(name)) es_level_parameter(target, name, (GLfloat)values[0]);
 }
 
 // P2_IOS_GL_TRACE=1 : chaque combinaison distincte d'envoi de texture
@@ -286,20 +335,24 @@ static void trace_upload(const char *fn, GLenum target, GLint level, GLenum inte
     fprintf(stderr, "[gl-trace] %s cible %#x niveau %d interne %#x %dx%d format %#x type %#x données %p PBO %d -> erreur %#x\n",
             fn, target, level, internal, w, h, format, type, data, unpack, e);
 }
+static void clear_errors(void) {
+    GLenum (*error)(void) = gl4es_GetProcAddress("glGetError");
+    for (int i = 0; i < 8 && error(); ++i) {}
+}
 static void (*g4_tex_image_2d)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
 static void (*g4_tex_sub_image_2d)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *);
 static void (*g4_compressed_tex_image_2d)(GLenum, GLint, GLenum, GLsizei, GLsizei, GLint, GLsizei, const void *);
 static void (*g4_compressed_tex_sub_image_2d)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLsizei, const void *);
-static void tr_tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *d) {
+static void tr_tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *d) { clear_errors();
     g4_tex_image_2d(t, l, i, w, h, b, f, ty, d); trace_upload("glTexImage2D", t, l, (GLenum)i, w, h, f, ty, d);
 }
-static void tr_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *d) {
+static void tr_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *d) { clear_errors();
     g4_tex_sub_image_2d(t, l, x, y, w, h, f, ty, d); trace_upload("glTexSubImage2D", t, l, 0, w, h, f, ty, d);
 }
-static void tr_compressed_tex_image_2d(GLenum t, GLint l, GLenum i, GLsizei w, GLsizei h, GLint b, GLsizei n, const void *d) {
+static void tr_compressed_tex_image_2d(GLenum t, GLint l, GLenum i, GLsizei w, GLsizei h, GLint b, GLsizei n, const void *d) { clear_errors();
     g4_compressed_tex_image_2d(t, l, i, w, h, b, n, d); trace_upload("glCompressedTexImage2D", t, l, i, w, h, 0, (GLenum)n, d);
 }
-static void tr_compressed_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLsizei n, const void *d) {
+static void tr_compressed_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLsizei n, const void *d) { clear_errors();
     g4_compressed_tex_sub_image_2d(t, l, x, y, w, h, f, n, d); trace_upload("glCompressedTexSubImage2D", t, l, 0, w, h, f, (GLenum)n, d);
 }
 static void *traced(const char *name) {
@@ -386,12 +439,81 @@ static void tex_parameter_3d_i(GLenum target, GLenum name, GLint value) {
     GLint previous = with_unit_begin(); glTexParameteri(target, name, value); with_unit_end(previous);
 }
 static void tex_parameterf(GLenum target, GLenum name, GLfloat value) {
-    if (target != TARGET_3D) { gl4es_tex_parameterf(target, name, value); return; }
+    if (target != TARGET_3D) {
+        gl4es_tex_parameterf(target, name, value);
+        if (level_parameter(name)) es_level_parameter(target, name, value);
+        return;
+    }
     GLint previous = with_unit_begin(); glTexParameterf(target, name, value); with_unit_end(previous);
 }
 static void tex_parameterfv(GLenum target, GLenum name, const GLfloat *values) {
     if (target != TARGET_3D) { gl4es_tex_parameterfv(target, name, values); return; }
     GLint previous = with_unit_begin(); glTexParameterfv(target, name, values); with_unit_end(previous);
+}
+
+// ---- textures 16 bits normalisées (UNSIGNED_SHORT) ----
+// OpenGL ES n'a pas de RGBA16 normalisé et gl4es le rend noir (mesuré) : c'est
+// le format des pages de lightmaps HDR de Source, d'où des murs noirs. Les
+// envois sont convertis en 8 bits (octet de poids fort) avant gl4es.
+static void (*g4_tex_image_2d_plain)(GLenum, GLint, GLint, GLsizei, GLsizei, GLint, GLenum, GLenum, const void *);
+static void (*g4_tex_sub_image_2d_plain)(GLenum, GLint, GLint, GLint, GLsizei, GLsizei, GLenum, GLenum, const void *);
+static void (*g4_pixel_storei)(GLenum, GLint);
+static int channels(GLenum format) {
+    switch (format) {
+    case GL_RGBA: case 0x80E1 /* BGRA */: return 4;
+    case GL_RGB: case 0x80E0 /* BGR */: return 3;
+    case GL_LUMINANCE_ALPHA: return 2;
+    case GL_LUMINANCE: case GL_ALPHA: case 0x1903 /* RED */: return 1;
+    default: return 0;
+    }
+}
+static unsigned char *narrow_u16(const void *data, GLsizei w, GLsizei h, int n) {
+    if (!data || w <= 0 || h <= 0) return NULL;
+    GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
+    if (alignment < 1) alignment = 1;
+    size_t row = (size_t)w * n * 2, stride = (row + (size_t)alignment - 1) / (size_t)alignment * (size_t)alignment;
+    unsigned char *out = malloc((size_t)w * h * n);
+    if (!out) return NULL;
+    for (GLsizei y = 0; y < h; ++y) {
+        const unsigned short *src = (const unsigned short *)((const unsigned char *)data + (size_t)y * stride);
+        unsigned char *dst = out + (size_t)y * w * n;
+        for (size_t i = 0; i < (size_t)w * n; ++i) dst[i] = (unsigned char)(src[i] >> 8);
+    }
+    return out;
+}
+static void *traced(const char *name);
+static void narrow_init(void) {
+    if (g4_tex_image_2d_plain) return;
+    void *t = traced("glTexImage2D"), *u = traced("glTexSubImage2D");   // traces si P2_IOS_GL_TRACE
+    g4_tex_image_2d_plain = t ? t : gl4es_GetProcAddress("glTexImage2D");
+    g4_tex_sub_image_2d_plain = u ? u : gl4es_GetProcAddress("glTexSubImage2D");
+    g4_pixel_storei = gl4es_GetProcAddress("glPixelStorei");
+}
+static GLint narrow_internal(GLint internal) {
+    switch (internal) { case 0x805B /* RGBA16 */: return 0x8058; case 0x8054 /* RGB16 */: return 0x8051; default: return internal; }
+}
+static void tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, GLint b, GLenum f, GLenum ty, const void *d) {
+    narrow_init();
+    int n = channels(f);
+    if (ty != GL_UNSIGNED_SHORT || !n) { g4_tex_image_2d_plain(t, l, i, w, h, b, f, ty, d); return; }
+    unsigned char *narrow = narrow_u16(d, w, h, n);
+    GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
+    g4_pixel_storei(GL_UNPACK_ALIGNMENT, 1);
+    g4_tex_image_2d_plain(t, l, narrow_internal(i), w, h, b, f, GL_UNSIGNED_BYTE, d ? narrow : NULL);
+    g4_pixel_storei(GL_UNPACK_ALIGNMENT, alignment);
+    free(narrow);
+}
+static void tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *d) {
+    narrow_init();
+    int n = channels(f);
+    if (ty != GL_UNSIGNED_SHORT || !n) { g4_tex_sub_image_2d_plain(t, l, x, y, w, h, f, ty, d); return; }
+    unsigned char *narrow = narrow_u16(d, w, h, n);
+    if (!narrow) return;
+    GLint alignment = 4; gl4es_get_integerv(GL_UNPACK_ALIGNMENT, &alignment);
+    g4_pixel_storei(GL_UNPACK_ALIGNMENT, 1);
+    g4_tex_sub_image_2d_plain(t, l, x, y, w, h, f, GL_UNSIGNED_BYTE, narrow);
+    g4_pixel_storei(GL_UNPACK_ALIGNMENT, alignment);
+    free(narrow);
 }
 
 // Références directes de gl.c, que gl4es n'exporte pas sous ces noms.
@@ -411,6 +533,7 @@ void *rt_host_gl_symbol(void *library, const char *name) {
         {"glTexParameterf", (void *)tex_parameterf}, {"glTexParameterfv", (void *)tex_parameterfv},
         {"glBindTexture", (void *)bind_texture}, {"glBindTextureEXT", (void *)bind_texture},
         {"glTexImage3D", (void *)tex_image_3d}, {"glTexImage3DEXT", (void *)tex_image_3d},
+        {"glTexImage2D", (void *)tex_image_2d}, {"glTexSubImage2D", (void *)tex_sub_image_2d},
         {"glTexSubImage3D", (void *)tex_sub_image_3d}, {"glTexSubImage3DEXT", (void *)tex_sub_image_3d},
         {"glCheckFramebufferStatusEXT", (void *)check_framebuffer_status},
     };

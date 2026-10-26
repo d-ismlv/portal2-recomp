@@ -10,6 +10,7 @@ GAME_ARGS=("$@"); [ ${#GAME_ARGS[@]} -eq 0 ] && GAME_ARGS=(-game portal2 -novid 
 GAME_ROOT=$(python3 -c "import json;print(json.load(open('config/local.json'))['game_root'])")
 LINUX_ROOT=$(python3 -c "import json;print(json.load(open('config/local.json'))['linux_root'])")
 xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || xcrun simctl boot "$DEVICE"
+xcrun simctl terminate "$DEVICE" fr.kanapitsas.portal2 >/dev/null 2>&1 && sleep 2
 xcrun simctl install "$DEVICE" build/ios/sim/Portal2.app
 export SIMCTL_CHILD_P2_LOG_FILE="$PWD/build/ios/sim/game.log"
 # Le simulateur joue le son sur les haut-parleurs du Mac : muet sauf P2_SIM_AUDIO=1.
