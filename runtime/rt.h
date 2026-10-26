@@ -251,7 +251,9 @@ uint32_t rt_atomic32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t value, int o
 uint32_t rt_exchange32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t value);
 uint32_t rt_compare_exchange32(RT_NOESCAPE CPU *c, uint32_t address, uint32_t expected, uint32_t value);
 uint64_t rt_compare_exchange64(RT_NOESCAPE CPU *c, uint32_t address, uint64_t expected, uint64_t value);
-void rt_return(RT_NOESCAPE CPU *c);
+// Retour d'une fonction traduite : macro (pas d'appel par retour, base
+// mémoire locale du code généré).
+#define rt_return(cpu) ((void)((cpu)->eip = POP(cpu)))
 void rt_call(RT_NOESCAPE CPU *c, uint32_t target, uint32_t expected_return);
 void rt_guest_poll(void);
 // Threads bloqués sur le verrou invité (scheduler.c). Le code généré ne cède
@@ -279,20 +281,38 @@ static inline void rt_call_fn(CPU *c, gfn fn, uint32_t target, uint32_t expected
 // Appels et sauts indirects (fonctions virtuelles, pointeurs de fonction) :
 // une cible traduite est appelée directement ; toute autre (import, adresse
 // dynamique, cible inconnue) prend le chemin complet de rt_call/rt_dispatch.
-static inline void rt_call_any(CPU *c, uint32_t target, uint32_t expected_return) {
-#ifndef RT_TRACED_CALLS
+// Chaque site d'appel garde sa dernière cible traduite (les appels virtuels
+// sont presque toujours monomorphes), ce qui évite la recherche de rt_lookup.
+// Sans atomique : le code généré s'exécute sous le verrou invité.
+typedef struct { uint32_t target; gfn fn; } RtSiteCache;
+static inline gfn rt_site_lookup(RtSiteCache *site, uint32_t target) {
+    if (__builtin_expect(site->target == target && site->fn != NULL, 1)) return site->fn;
     gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
+    if (fn) { site->target = target; site->fn = fn; }
+    return fn;
+}
+static inline void rt_call_any_site(CPU *c, uint32_t target, uint32_t expected_return, RtSiteCache *site) {
+#ifndef RT_TRACED_CALLS
+    gfn fn = rt_site_lookup(site, target);
     if (fn) { rt_poll(); PUSH(c, expected_return); c->eip = target; fn(c); return; }
+#else
+    (void)site;
 #endif
     rt_call(c, target, expected_return);
 }
-static inline void rt_jump_any(CPU *c, uint32_t target) {
+static inline void rt_jump_any_site(CPU *c, uint32_t target, RtSiteCache *site) {
 #ifndef RT_TRACED_CALLS
-    gfn fn = target < RT_IMPORT_BASE ? rt_lookup(target) : NULL;
+    gfn fn = rt_site_lookup(site, target);
     if (fn) { rt_poll(); c->eip = target; fn(c); return; }
+#else
+    (void)site;
 #endif
     rt_dispatch(c, target);
 }
+#define rt_call_any(c, target, expected_return) \
+    do { static RtSiteCache rt_site_; rt_call_any_site((c), (target), (expected_return), &rt_site_); } while (0)
+#define rt_jump_any(c, target) \
+    do { static RtSiteCache rt_site_; rt_jump_any_site((c), (target), &rt_site_); } while (0)
 // Appel direct d'un import (shim) depuis le code généré, qui tient déjà le
 // verrou invité : route mémorisée appelée directement, sinon rt_call.
 void rt_call_import(RT_NOESCAPE CPU *c, uint32_t target, uint32_t expected_return);
