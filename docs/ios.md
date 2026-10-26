@@ -49,6 +49,9 @@ l'iPhone est verrouillé.
 | `P2_PROFILE=Documents/profile.txt` (+ `P2_PROFILE_DELAY=60`, `P2_PROFILE_RAW=1`) | profileur intégré ; avec `RAW`, `tools/ios_symbolize.py` résout les fonctions du pilote par les symboles de l'appareil (Xcode, iOS DeviceSupport) |
 | `P2_TRACE_FILES=<texte>` | fopen/open/unlink/rename dont le chemin contient le texte |
 | `P2_TOUCH_CONTROLS=0/1` | manette tactile désactivée / toujours affichée |
+| `P2_TOUCH_TEST_CLICK=s,x,y` | clic gauche en (x, y) points, s secondes après le premier menu |
+| `P2_TOUCH_TEST_MOVE=0.5,1` (+ `_SECONDS`, `_DELAY`, `_ANGLE`, `P2_TOUCH_TEST_WASD`) | inclinaisons imposées au stick de déplacement |
+| `P2_IOS_RENDER_SCALE=1/2/native` | échelle de rendu (points → pixels) ; `tools/ios_bench.py` compare antialiasing × échelle |
 | `P2_GL_STREAM_UNSYNC=0`, `P2_IOS_BGRA=0`, `P2_IOS_SRGB=0` | désactivent les chemins rapides ou l'émulation |
 | `P2_IOS_SHADER_DUMP=<dossier>`, `P2_IOS_GL_TRACE=1`, `P2_IOS_DRAW_LOG=<image>` | nuanceurs convertis, compilation, dessins d'une image |
 
