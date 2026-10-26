@@ -9,7 +9,8 @@ moyenne de la seconde moitié des mesures P2_FRAME_LOG. Le video.txt
 d'origine est remis à la fin.
 
     python3 tools/ios_bench.py --seconds 120 msaa4:4:3 msaa0:0:3 msaa0-x2:0:2
-    (nom:antialias:échelle ; échelle « native » ou un nombre)
+    (nom:antialias:échelle[:VAR=val,VAR=val] ; échelle « native » ou un nombre ;
+    variables d'environnement en plus, par exemple P2_IOS_SRGB=0)
 """
 import argparse
 import json
@@ -70,7 +71,7 @@ def with_settings(text, values):
 
 def main():
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
-    ap.add_argument('configs', nargs='+', help='nom:antialias:échelle')
+    ap.add_argument('configs', nargs='+', help='nom:antialias:échelle[:VAR=val,…]')
     ap.add_argument('--seconds', type=int, default=120)
     ap.add_argument('--points', default='932x430', help="taille de l'écran en points (paysage)")
     ap.add_argument('--vsync', default='0', help='setting.mat_vsync (0 : sans synchro verticale)')
@@ -85,7 +86,7 @@ def main():
     results = []
     try:
         for spec in args.configs:
-            name, aa, scale = spec.split(':')
+            name, aa, scale, *extra = spec.split(':')
             factor = 3.0 if scale == 'native' else float(scale)
             video = OUT / f'video.{name}.txt'
             video.write_text(with_settings(base, {'mat_antialias': aa, 'mat_aaquality': '0', 'mat_vsync': args.vsync,
@@ -94,6 +95,7 @@ def main():
             push(udid, video, VIDEO)
             env = {'P2_LOG_FILE': 'Documents/game.log', 'P2_FRAME_LOG': '1', 'P2_IOS_RENDER_SCALE': scale,
                    'P2_IOS_NO_PRESENT': '1'}   # sans plafond de l'écran (image figée)
+            env.update(dict(item.split('=', 1) for item in ','.join(extra).split(',') if item))
             launched = devicectl(udid, 'device', 'process', 'launch', '--terminate-existing', '--environment-variables',
                                  json.dumps(env), APP, check=False)
             if launched.returncode:
