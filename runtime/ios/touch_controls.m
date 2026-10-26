@@ -80,6 +80,32 @@ static float look_speed(void) {
     return speed;
 }
 
+// Accélération du trackpad : gain 1 sous P2_TOUCH_ACCEL_LOW pt/s (visée fine
+// inchangée), puis montée en douceur (smoothstep) jusqu'à P2_TOUCH_ACCEL
+// (multiplicateur maximal) à P2_TOUCH_ACCEL_HIGH pt/s. P2_TOUCH_ACCEL=1 la coupe.
+// La vitesse du doigt est lissée par moyenne exponentielle (P2_TOUCH_ACCEL_SMOOTH,
+// poids du nouvel échantillon) pour qu'un échantillon isolé ne fasse pas sauter le gain.
+static float env_float(const char *name, float def, float min) {
+    const char *e = getenv(name); return e && atof(e) >= min ? (float)atof(e) : def;
+}
+static struct { float max, low, high, smooth; int log; } accel;
+static float trackpad_gain(double speed);
+static void accel_init(void) {
+    if (accel.max) return;
+    accel.max = env_float("P2_TOUCH_ACCEL", 2.5f, 1);
+    accel.low = env_float("P2_TOUCH_ACCEL_LOW", 300, 0);
+    accel.high = env_float("P2_TOUCH_ACCEL_HIGH", 1500, accel.low + 1);
+    if (accel.high <= accel.low) accel.high = accel.low + 1;
+    accel.smooth = fminf(1, env_float("P2_TOUCH_ACCEL_SMOOTH", 0.5f, 0.01f));
+    accel.log = getenv("P2_TOUCH_ACCEL_LOG") != NULL;
+    fprintf(stderr, "[ios] trackpad : gain %.2f à %g pt/s, %.2f à %g, %.2f à %g, %.2f à 3000 pt/s\n",
+        trackpad_gain(100), 100.0, trackpad_gain(600), 600.0, trackpad_gain(1000), 1000.0, trackpad_gain(3000));
+}
+static float trackpad_gain(double speed) {
+    double t = fmin(1, fmax(0, (speed - accel.low) / (accel.high - accel.low)));
+    return 1 + (accel.max - 1) * (float)(t * t * (3 - 2 * t));
+}
+
 // La boucle de SDL (CFRunLoopRunInMode à délai nul) ne laisse jamais UIKit
 // valider ses transactions : un dessin demandé n'apparaîtrait pas. Forcé ici.
 static void redraw(UIView *view) {
@@ -91,6 +117,7 @@ static void redraw(UIView *view) {
 // Doigt suivi : rôle, action (bouton), point de départ, dernier point.
 @interface P2Finger : NSObject
 @property Role role; @property Action action; @property CGPoint start, at;
+@property NSTimeInterval stamp; @property double speed;   // trackpad : horodatage, vitesse lissée (pt/s)
 @end
 @implementation P2Finger
 @end
@@ -435,8 +462,16 @@ static Sint16 axis_value(CGFloat speed, int response) {
     for (UITouch *t in touches) {
         P2Finger *f = [fingers objectForKey:t];
         CGPoint p = [t locationInView:self];
-        if (f && f.role == ROLE_LOOK && trackpad)
-            [self lookBy:(float)(p.x - f.at.x) * kTrackpadLook * look_speed() y:(float)(p.y - f.at.y) * kTrackpadLook * look_speed()];
+        if (f && f.role == ROLE_LOOK && trackpad) {
+            accel_init();
+            double dx = p.x - f.at.x, dy = p.y - f.at.y, dt = t.timestamp - f.stamp;
+            // dt borné : premier mouvement (stamp nul) ou doigt resté immobile longtemps
+            if (f.stamp > 0 && dt > 1e-4) f.speed += accel.smooth * (fmin(hypot(dx, dy) / fmin(dt, 0.1), 1e4) - f.speed);
+            f.stamp = t.timestamp;
+            float k = kTrackpadLook * look_speed() * trackpad_gain(f.speed);
+            if (accel.log) fprintf(stderr, "[ios] trackpad %.0f pt/s gain %.2f\n", f.speed, k / (kTrackpadLook * look_speed()));
+            [self lookBy:(float)dx * k y:(float)dy * k];
+        }
         f.at = p;
     }
     [self updateMove]; redraw(self);

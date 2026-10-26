@@ -49,6 +49,7 @@ l'iPhone est verrouillé.
 | `P2_PROFILE=Documents/profile.txt` (+ `P2_PROFILE_DELAY=60`, `P2_PROFILE_RAW=1`) | profileur intégré ; avec `RAW`, `tools/ios_symbolize.py` résout les fonctions du pilote par les symboles de l'appareil (Xcode, iOS DeviceSupport) |
 | `P2_TRACE_FILES=<texte>` | fopen/open/unlink/rename dont le chemin contient le texte |
 | `P2_TOUCH_CONTROLS=0/1` | manette tactile désactivée / toujours affichée |
+| `P2_TOUCH_ACCEL=2.5` (+ `_LOW=300`, `_HIGH=1500`, `_SMOOTH=0.5`, `_LOG=1`) | accélération du trackpad : gain 1 sous `_LOW` pt/s, montée progressive jusqu'au multiplicateur `P2_TOUCH_ACCEL` à `_HIGH` pt/s ; vitesse lissée (poids `_SMOOTH`) ; `=1` la coupe, `_LOG` journalise vitesse et gain |
 | `P2_TOUCH_TEST_CLICK=s,x,y` | clic gauche en (x, y) points, s secondes après le premier menu |
 | `P2_TOUCH_TEST_MOVE=0.5,1` (+ `_SECONDS`, `_DELAY`, `_ANGLE`, `P2_TOUCH_TEST_WASD`) | inclinaisons imposées au stick de déplacement |
 | `P2_IOS_RENDER_SCALE=1/2/native` | échelle de rendu (points → pixels) ; `tools/ios_bench.py` compare antialiasing × échelle |
