@@ -1,4 +1,5 @@
 #include "modules.h"
+#include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <unistd.h>
@@ -11,6 +12,10 @@ static uint32_t guest_string(const char *value) {
     return address;
 }
 int main(int argc, char **argv) {
+    // Qualité de service d'un jeu au premier plan : sans elle (lancé depuis un
+    // terminal), macOS place souvent le thread principal sur un cœur économie
+    // (cadence bimodale mesurée : ~200 ou ~240 images/s selon les lancements).
+    pthread_set_qos_class_self_np(QOS_CLASS_USER_INTERACTIVE, 0);
     setvbuf(stdout, NULL, _IOLBF, 0);   // journal lisible même si le processus meurt
     const char *images = NULL, *game = NULL, *linux = NULL, *user = NULL;
     int first = 1;

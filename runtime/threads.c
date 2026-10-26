@@ -110,6 +110,8 @@ int rt_thread_shim(CPU *c,const char *name) {
         pthread_attr_t native_attr;error=pthread_attr_init(&native_attr);
         if(!error){
             error=pthread_attr_setstacksize(&native_attr,16*1024*1024);
+            // Threads du jeu (mixage audio, travaux) : même qualité de service que le thread principal.
+            if(!error)error=pthread_attr_set_qos_class_np(&native_attr,QOS_CLASS_USER_INTERACTIVE,0);
             if(!error)error=pthread_create(&t->native,&native_attr,thread_entry,t);
             pthread_attr_destroy(&native_attr);
         }
