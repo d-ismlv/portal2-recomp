@@ -336,7 +336,7 @@ RT_CHECK(gl_stream_unsync_only_beyond_written_data) {
     assert(rt_gl_stream_unsync_writes() == before + 2);
     // Échec de glBufferData (taille négative) : état inconnu, chemin synchronisé.
     gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);
-    assert(gl("glGetError", 0) == GL_INVALID_VALUE);              // erreur rendue au jeu par le pont
+    assert(gl("glGetError", 0) == GL_INVALID_VALUE);              // erreur native, jamais lue par le pont
     assert(gl("glGetError", 0) == GL_NO_ERROR);
     gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 40, 8, DATA + 0x128);
     assert(rt_gl_stream_unsync_writes() == before + 2);
@@ -417,5 +417,29 @@ RT_CHECK(gl_stream_conservative_cases) {
     W32(DATA, mine); gl("glDeleteBuffersARB", 2, 1, DATA);
     CGLSetCurrentContext(other); W32(DATA, theirs); gl("glDeleteBuffersARB", 2, 1, DATA);
     CGLSetCurrentContext(NULL); CGLDestroyContext(other);
+    CGLSetCurrentContext(saved);
+}
+
+// Le pont ne lit jamais glGetError : erreurs répétées et changement de contexte
+// gardent exactement la sémantique du GL natif.
+RT_CHECK(gl_stream_keeps_native_error_semantics) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    uint32_t buffer = new_buffer(GL_ARRAY_BUFFER, 64);
+    while (glGetError() != GL_NO_ERROR) {}
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);   // INVALID_VALUE
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);   // même erreur
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, 0x1234);                    // INVALID_ENUM
+    GLenum bridged[4]; int n = 0;
+    for (GLenum e; n < 4 && (e = (GLenum)gl("glGetError", 0)) != GL_NO_ERROR;) bridged[n++] = e;
+    // Même séquence appliquée directement au GL natif pour comparaison.
+    glBufferData(GL_ARRAY_BUFFER, -1, NULL, GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, -1, NULL, GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, 64, NULL, 0x1234);
+    GLenum native[4]; int m = 0;
+    for (GLenum e; m < 4 && (e = glGetError()) != GL_NO_ERROR;) native[m++] = e;
+    assert(n == m);
+    for (int i = 0; i < n; ++i) assert(bridged[i] == native[i]);
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
     CGLSetCurrentContext(saved);
 }
