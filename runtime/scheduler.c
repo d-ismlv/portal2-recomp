@@ -4,6 +4,8 @@
 #include "rt.h"
 #include <pthread.h>
 #include <sched.h>
+#include <mach/mach_time.h>
+#include <stdio.h>
 #include <stdatomic.h>
 #include <stdlib.h>
 
@@ -13,11 +15,29 @@ static _Thread_local unsigned depth, ticks;
 // code généré puisse tester sans appel (déclaration dans rt.h, branche fast-path).
 _Atomic unsigned rt_guest_waiting;
 #define waiting rt_guest_waiting
+// Diagnostic P2_GATE_TIMING=1 : temps d'attente du verrou par le thread principal.
+static uint64_t main_wait_ticks, main_waits, report_last, report_start;
+static void gate_report(uint64_t now) {
+    static mach_timebase_info_data_t base;
+    if(!base.denom)mach_timebase_info(&base);
+    if(!report_start){report_start=report_last=now;return;}
+    if((now-report_last)*base.numer/base.denom<5000000000ull)return;
+    report_last=now;
+    double wall=(double)(now-report_start)*base.numer/base.denom/1e9;
+    double waited=(double)main_wait_ticks*base.numer/base.denom/1e9;
+    fprintf(stderr,"[gate] thread principal : %.1f%% du temps à attendre le verrou (%llu attentes sur %.0f s)\n",
+            100.0*waited/wall,(unsigned long long)main_waits,wall);
+}
 static void acquire(void) {
     if(!pthread_mutex_trylock(&gate))return;
+    static int timing=-1;
+    if(timing<0)timing=getenv("P2_GATE_TIMING")!=NULL;
+    int measure=timing && pthread_main_np();
+    uint64_t start=measure?mach_absolute_time():0;
     ++waiting;
     if(pthread_mutex_lock(&gate))abort();
     --waiting;
+    if(measure){uint64_t now=mach_absolute_time();main_wait_ticks+=now-start;++main_waits;gate_report(now);}
 }
 void rt_guest_enter(void) {
     if(!depth)acquire();

@@ -26,6 +26,8 @@
 #include "rt.h"
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
+#include <mach/mach_time.h>
+void rt_gl_timing_add(const char *label, uint64_t ticks);
 #include "sdl_common.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -406,7 +408,9 @@ static int sdl_video(CPU *c, const char *name) {
         SDL_Window *w = WINDOW(0);
         diagnose_frame(w);
         unsigned saved = rt_guest_suspend();   // la synchronisation verticale peut bloquer
+        uint64_t start = mach_absolute_time();
         SDL_GL_SwapWindow(w);
+        rt_gl_timing_add("SwapWindow", mach_absolute_time() - start);
         rt_guest_resume(saved);
     } else if (!strcmp(n, "GL_GetProcAddress")) {
         const char *proc = guest_string(c, arg(c, 0));

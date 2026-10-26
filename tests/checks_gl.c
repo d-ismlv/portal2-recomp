@@ -283,3 +283,28 @@ RT_CHECK(gl_call_without_context_is_a_noop_like_linux) {
     assert(R32(DATA) == 0x12345678);
     CGLSetCurrentContext(saved);
 }
+
+// Ajouts dans un stockage neuf : chemin non synchronisé ; chevauchement : chemin
+// normal. Le contenu relu doit être exactement celui d'appels glBufferSubData.
+RT_CHECK(gl_stream_subdata_keeps_buffer_contents) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    W32(DATA, 0); gl("glGenBuffersARB", 2, 1, DATA);
+    uint32_t buffer = R32(DATA);
+    gl("glBindBufferARB", 2, GL_ARRAY_BUFFER, buffer);
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);          // stockage neuf
+    for (uint32_t i = 0; i < 64; ++i) W8(DATA + 0x100 + i, (uint8_t)(i * 3 + 1));
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);            // ajout
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 16, 16, DATA + 0x110);           // ajout
+    W8(DATA + 0x108, 0xee);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 8, 1, DATA + 0x108);             // chevauchement : synchronisé
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 40, 8, DATA + 0x128);            // ajout après un trou
+    uint8_t back[64]; glGetBufferSubData(GL_ARRAY_BUFFER, 0, 48, back);
+    for (uint32_t i = 0; i < 32; ++i) assert(back[i] == (i == 8 ? 0xee : (uint8_t)(i * 3 + 1)));
+    for (uint32_t i = 40; i < 48; ++i) assert(back[i] == (uint8_t)(i * 3 + 1));
+    GLint serialized = 0; glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SERIALIZED_MODIFY_APPLE, &serialized);
+    assert(serialized == GL_TRUE);                                             // paramètres restaurés
+    assert(glGetError() == GL_NO_ERROR);
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(saved);
+}
