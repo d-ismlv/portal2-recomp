@@ -19,6 +19,7 @@ void *rt_ios_gl_share_group(void *context);
 #define CGLGetCurrentContext rt_ios_gl_current_context
 #define CGLGetShareGroup rt_ios_gl_share_group
 
+extern _Thread_local int rt_ios_gl_unsync_next;   // gl.c -> gl_ios.m : prochain glBufferSubData d'ES sans synchronisation
 void *rt_host_gl_open(void);
 void *rt_host_gl_symbol(void *library, const char *name);
 

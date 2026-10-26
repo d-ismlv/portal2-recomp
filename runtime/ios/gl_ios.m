@@ -169,7 +169,34 @@ static void es3_tex_image_2d(GLenum t, GLint l, GLint i, GLsizei w, GLsizei h, G
 static void es3_tex_sub_image_2d(GLenum t, GLint l, GLint x, GLint y, GLsizei w, GLsizei h, GLenum f, GLenum ty, const void *d) {
     es_tex_sub_image_2d(t, l, x, y, w, h, f, es3_type(ty), d);
 }
+// Écriture sans synchronisation (runtime/gl.c, stream_subdata) : le pilote ES
+// d'Apple attend que le GPU ait fini avec le tampon avant un glBufferSubData
+// (gldFinishObject, ~30 % du thread principal en jeu). gl.c ne la demande que
+// pour un ajout au-delà de tout ce qui a été écrit dans le stockage courant :
+// aucune commande en attente ne peut lire cette plage.
+_Thread_local int rt_ios_gl_unsync_next;
+static void (*es_buffer_sub_data)(GLenum, GLintptr, GLsizeiptr, const void *);
+static void *(*es_map_buffer_range)(GLenum, GLintptr, GLsizeiptr, GLbitfield);
+static GLboolean (*es_unmap_buffer)(GLenum);
+static void es3_buffer_sub_data(GLenum t, GLintptr offset, GLsizeiptr size, const void *data) {
+    if (rt_ios_gl_unsync_next && size > 0) {
+        rt_ios_gl_unsync_next = 0;
+        void *p = es_map_buffer_range(t, offset, size, GL_MAP_WRITE_BIT | GL_MAP_UNSYNCHRONIZED_BIT | GL_MAP_INVALIDATE_RANGE_BIT);
+        if (p) {
+            memcpy(p, data, (size_t)size);
+            if (es_unmap_buffer(t)) return;
+        }
+        // Projection refusée ou contenu perdu : chemin synchronisé (réécrit la plage).
+    }
+    es_buffer_sub_data(t, offset, size, data);
+}
 static void *gles_function(const char *name) {
+    if (!strcmp(name, "glBufferSubData")) {
+        es_buffer_sub_data = dlsym(gles, name);
+        es_map_buffer_range = dlsym(gles, "glMapBufferRange");
+        es_unmap_buffer = dlsym(gles, "glUnmapBuffer");
+        return (void *)es3_buffer_sub_data;
+    }
     if (!strcmp(name, "glTexImage2D")) { es_tex_image_2d = dlsym(gles, name); return (void *)es3_tex_image_2d; }
     if (!strcmp(name, "glTexSubImage2D")) { es_tex_sub_image_2d = dlsym(gles, name); return (void *)es3_tex_sub_image_2d; }
     if (!strcmp(name, "glGetString")) return (void *)es_get_string;

@@ -769,11 +769,24 @@ static void stream_unknown(uint32_t target) {   // stockage considéré entière
 }
 // Renvoie 1 si l'écriture a été faite sans synchronisation.
 static int stream_subdata(CPU *c, uint32_t target, uint32_t offset, uint32_t size, uint32_t data) {
-#if TARGET_OS_IPHONE
-    (void)c; (void)target; (void)offset; (void)size; (void)data;
-    return 0;   // gl4es : ni APPLE_flush_buffer_range ni synchronisation à éviter (copie en mémoire, envoi à l'image)
-#else
     if (target != GL_ARRAY_BUFFER && target != GL_ELEMENT_ARRAY_BUFFER) return 0;
+#if TARGET_OS_IPHONE
+    // gl4es copie dans son double en mémoire puis appelle glBufferSubData d'ES,
+    // que ios/gl_ios.m fait passer par une projection non synchronisée.
+    {
+        uint32_t name = bound_buffer(target);
+        Stream *st = stream_state(name, 0);
+        if (!st || !st->known || !size || !data || offset < st->written_end || (uint64_t)offset + size > st->size) return 0;
+        Mirror *m = find_mirror(current_share(), name, 0);
+        if (m && m->mapped) return 0;
+        rt_ios_gl_unsync_next = 1;
+        glBufferSubData(target, (GLintptr)offset, (GLsizeiptr)size, rt_span(c, data, size));
+        rt_ios_gl_unsync_next = 0;
+        st->written_end = offset + size;
+        ++stream_unsync_writes;
+        return 1;
+    }
+#else
     uint32_t name = bound_buffer(target);
     Stream *st = stream_state(name, 0);
     if (!st || !st->known || !size || !data || offset < st->written_end || (uint64_t)offset + size > st->size) return 0;
