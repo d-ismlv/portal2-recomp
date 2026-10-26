@@ -18,7 +18,11 @@
 // - portails : une paire bleu (clic gauche) / orange (clic droit) dans chaque
 //   coin du haut, pour la main libre ;
 // - icônes : sauter (espace), s'accroupir (Ctrl gauche), utiliser (E),
-//   pause (Échap).
+//   pause (Échap) ;
+// - tapes au dos ou sur les côtés du téléphone (index derrière, en paysage) :
+//   à gauche portail bleu, à droite orange ; détection dans back_tap.c,
+//   nourrie ici par CoreMotion (P2_BACKTAP=0 la coupe, réglages dans
+//   docs/ios.md).
 // Avec une manette ou un clavier connecté, elle se cache jusqu'au premier
 // toucher ; avec une vraie manette, la manette virtuelle est retirée pour que
 // le jeu ne lise qu'elle. P2_TOUCH_CONTROLS=0 la désactive, =1 l'affiche toujours ; P2_TOUCH_LOOK règle la vitesse
@@ -28,15 +32,19 @@
 // MacNativeGames (games/totk/ios/Sources/touch_pad.m, licence MIT).
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
+#import <CoreMotion/CoreMotion.h>
 #import <GameController/GameController.h>
 #import <QuartzCore/QuartzCore.h>
 #import <UIKit/UIKit.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
 #include <math.h>
+#include <os/lock.h>
+#include <stdatomic.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "back_tap.h"
 
 int rt_ios_game_ui_visible(void);   // game_state.c
 extern unsigned long rt_ios_frames;  // gl_ios.m : images présentées
@@ -115,6 +123,126 @@ static void redraw(UIView *view) {
     [CATransaction flush];
 }
 
+// ---- tapes au dos (CoreMotion) ----
+// Échantillons de mouvement (accélération utilisateur, rotation, gravité) sur
+// une file dédiée, jugés par back_tap.c ; une tape acceptée est déposée dans
+// backtap_pending et cliquée par la minuterie de la surcouche (step), qui
+// connaît l'état menu/jeu. Les débuts et fins de toucher arrivent du thread
+// principal : verrou autour du détecteur. Pas d'autorisation à demander pour
+// ces capteurs (seule l'activité physique, CMMotionActivityManager, en exige une).
+static CMMotionManager *backtap_motion;
+static NSOperationQueue *backtap_queue;
+static os_unfair_lock backtap_lock = OS_UNFAIR_LOCK_INIT;
+static rt_backtap backtap_detector;
+static _Atomic int backtap_orient;    // +1 : axe y de l'appareil vers la droite de l'écran
+static _Atomic int backtap_active;    // en partie, surcouche affichée
+static _Atomic int backtap_pending;   // tape à cliquer : -1 gauche, +1 droite
+static int backtap_log;               // P2_BACKTAP_LOG=1 : chaque candidat, et le bruit toutes les 5 s
+static float backtap_hold;            // s : durée de l'appui
+// Journal, sur la file des capteurs seulement : origine des temps, bruit de fond.
+static struct { double origin, window, last_t, sq; float last_a[3], max_a, max_jerk, max_rot; long samples; } backtap_noise;
+
+static int env_sign(const char *name, int def) {
+    const char *e = getenv(name);
+    return !e || !*e ? def : atoi(e) > 0 ? 1 : atoi(e) < 0 ? -1 : 0;
+}
+
+static void backtap_log_report(const rt_backtap_report *r, double origin) {
+    char touch[32], verdict[80];
+    if (fabs(r->touch_dt) < 10) snprintf(touch, sizeof(touch), "%+.0f ms", r->touch_dt * 1000);
+    else snprintf(touch, sizeof(touch), "aucun");
+    if (r->reject) snprintf(verdict, sizeof(verdict), "rejet : %s", r->reject);
+    else snprintf(verdict, sizeof(verdict), "%s (%s)", r->side < 0 ? "GAUCHE, portail bleu" : "DROITE, portail orange",
+                  r->method);
+    fprintf(stderr, "[ios] tape %.3f s : pic %.2f g (x %+.2f y %+.2f z %+.2f), secousse %.0f g/s, "
+            "rotation x %+.2f y %+.2f z %+.2f rad/s, durée %.0f ms, avant %.3f g, gravité %.2f g, "
+            "toucher %s, orientation %+d -> %s\n",
+            r->t - origin, r->peak, r->acc[0], r->acc[1], r->acc[2], r->jerk, r->rot[0], r->rot[1], r->rot[2],
+            r->width * 1000, r->pre_rms, r->gravity, touch, r->orient, verdict);
+}
+
+// Mode journal : chaque candidat jugé, et toutes les 5 s le bruit de fond
+// (maxima et moyenne quadratique) pour placer les seuils au-dessus du jeu normal.
+static void backtap_log_sample(const rt_backtap_sample *s, const rt_backtap_report *r) {
+    typeof(backtap_noise) *n = &backtap_noise;
+    if (!n->origin) { n->origin = n->window = s->t; fprintf(stderr, "[ios] tapes au dos : origine des temps %.3f s\n", s->t); }
+    if (r) backtap_log_report(r, n->origin);
+    float mag = sqrtf(s->a[0] * s->a[0] + s->a[1] * s->a[1] + s->a[2] * s->a[2]);
+    if (n->samples && s->t > n->last_t) {
+        float da[3] = {s->a[0] - n->last_a[0], s->a[1] - n->last_a[1], s->a[2] - n->last_a[2]};
+        n->max_jerk = fmaxf(n->max_jerk, sqrtf(da[0] * da[0] + da[1] * da[1] + da[2] * da[2]) / (float)(s->t - n->last_t));
+    }
+    n->max_a = fmaxf(n->max_a, mag); n->max_rot = fmaxf(n->max_rot, fabsf(s->w[0])); n->sq += (double)mag * mag;
+    memcpy(n->last_a, s->a, sizeof(n->last_a)); n->last_t = s->t; ++n->samples;
+    if (s->t - n->window < 5) return;
+    fprintf(stderr, "[ios] tapes au dos, bruit %.0f-%.0f s : %.0f Hz, acc max %.3f g (moy. quadr. %.3f), "
+            "secousse max %.1f g/s, rotation x max %.2f rad/s, %s\n",
+            n->window - n->origin, s->t - n->origin, n->samples / (s->t - n->window), n->max_a, sqrt(n->sq / n->samples),
+            n->max_jerk, n->max_rot, atomic_load(&backtap_active) ? "en partie" : "menu");
+    n->window = s->t; n->sq = 0; n->max_a = n->max_jerk = n->max_rot = 0; n->samples = 0;
+}
+
+// Démarre les capteurs (thread principal). Sans capteur (simulateur) : rien.
+static void backtap_start(void) {
+    const char *off = getenv("P2_BACKTAP");
+    if (backtap_motion || (off && *off == '0')) return;
+    CMMotionManager *motion = [CMMotionManager new];
+    if (!motion.deviceMotionAvailable) {
+        fprintf(stderr, "[ios] tapes au dos : pas de capteur de mouvement (simulateur ?)\n");
+        return;
+    }
+    rt_backtap_params p;
+    rt_backtap_defaults(&p);
+    p.accel_min = env_float("P2_BACKTAP_ACCEL", p.accel_min, 0.001f);
+    p.jerk_min = env_float("P2_BACKTAP_JERK", p.jerk_min, 0);
+    p.rot_min = env_float("P2_BACKTAP_ROT", p.rot_min, 0.001f);
+    p.refractory = env_float("P2_BACKTAP_REFRACTORY", p.refractory, 0);
+    p.touch_guard = env_float("P2_BACKTAP_TOUCH_GUARD", p.touch_guard, 0);
+    p.max_width = env_float("P2_BACKTAP_WIDTH", p.max_width, 0.001f);
+    p.pre_rms_max = env_float("P2_BACKTAP_AGITATION", p.pre_rms_max, 0.001f);
+    p.gravity_max = env_float("P2_BACKTAP_GRAVITY", p.gravity_max, 0.001f);
+    p.lateral_sign = env_sign("P2_BACKTAP_LATERAL", p.lateral_sign);
+    p.z_sign = env_sign("P2_BACKTAP_ZSIGN", p.z_sign);
+    p.invert = env_sign("P2_BACKTAP_INVERT", 0) > 0;
+    backtap_log = getenv("P2_BACKTAP_LOG") && *getenv("P2_BACKTAP_LOG") != '0';
+    if (backtap_log) p.log_factor = 0.5f;   // candidats jusqu'à la moitié des seuils, marqués « sous les seuils »
+    backtap_hold = env_float("P2_BACKTAP_HOLD", 0.05f, 0);
+    float hz = env_float("P2_BACKTAP_HZ", 200, 10);
+    rt_backtap_init(&backtap_detector, &p);
+
+    backtap_queue = [NSOperationQueue new];
+    backtap_queue.name = @"p2.backtap";
+    backtap_queue.maxConcurrentOperationCount = 1;
+    backtap_queue.qualityOfService = NSQualityOfServiceUserInteractive;
+    motion.deviceMotionUpdateInterval = 1.0 / hz;
+    fprintf(stderr, "[ios] tapes au dos : %g Hz demandés ; seuils %.3g g, %.3g g/s, rotation %.3g rad/s ; "
+            "réfractaire %.0f ms, toucher ±%.0f ms, durée %.0f ms, agitation %.3g g, gravité %.3g g ; "
+            "latéral %+d, z %+d, inversé %d, appui %.0f ms%s\n",
+            hz, p.accel_min, p.jerk_min, p.rot_min, p.refractory * 1e3, p.touch_guard * 1e3, p.max_width * 1e3,
+            p.pre_rms_max, p.gravity_max, p.lateral_sign, p.z_sign, p.invert, backtap_hold * 1e3,
+            backtap_log ? ", journal" : "");
+    [motion startDeviceMotionUpdatesToQueue:backtap_queue withHandler:^(CMDeviceMotion *m, NSError *error) {
+        if (!m) { if (error) fprintf(stderr, "[ios] tapes au dos : %s\n", error.localizedDescription.UTF8String); return; }
+        CMAcceleration a = m.userAcceleration, g = m.gravity;
+        CMRotationRate w = m.rotationRate;
+        rt_backtap_sample s = {m.timestamp, {(float)a.x, (float)a.y, (float)a.z},
+                               {(float)w.x, (float)w.y, (float)w.z}, {(float)g.x, (float)g.y, (float)g.z}};
+        rt_backtap_report r;
+        os_unfair_lock_lock(&backtap_lock);
+        int judged = rt_backtap_feed(&backtap_detector, &s, atomic_load(&backtap_orient), atomic_load(&backtap_active), &r);
+        os_unfair_lock_unlock(&backtap_lock);
+        if (judged && !r.reject) atomic_store(&backtap_pending, r.side);
+        if (backtap_log) backtap_log_sample(&s, judged ? &r : NULL);
+    }];
+    backtap_motion = motion;
+}
+static void backtap_touch(NSSet<UITouch *> *touches) {
+    if (!backtap_motion) return;
+    os_unfair_lock_lock(&backtap_lock);
+    for (UITouch *t in touches) rt_backtap_touch(&backtap_detector, t.timestamp);
+    os_unfair_lock_unlock(&backtap_lock);
+}
+
 // Doigt suivi : rôle, action (bouton), point de départ, dernier point.
 @interface P2Finger : NSObject
 @property Role role; @property Action action; @property CGPoint start, at;
@@ -148,6 +276,9 @@ static void redraw(UIView *view) {
     CGFloat testMove;         // essai : inclinaison avant imposée (P2_TOUCH_TEST_MOVE)
     Uint64 testNext;          // essai : prochaine étape (ms de SDL)
     int testPhase;            // essai : étape en cours
+    int backtapHeld;          // tape au dos : bouton enfoncé (Action), -1 aucun
+    CFTimeInterval backtapAt; // tape au dos : instant de l'appui
+    unsigned long backtapFrames; // tape au dos : images présentées à l'appui
 }
 
 - (instancetype)initWithWindow:(SDL_Window *)sdlWindow {
@@ -162,6 +293,8 @@ static void redraw(UIView *view) {
                                           GCKeyboardDidConnectNotification, GCKeyboardDidDisconnectNotification])
             [center addObserver:self selector:@selector(devicesChanged) name:name object:nil];
         [self devicesChanged];
+        backtapHeld = -1;
+        backtap_start();
         __weak P2TouchControls *weakSelf = self;
         tick = [NSTimer scheduledTimerWithTimeInterval:1.0 / 60 repeats:YES block:^(NSTimer *timer) {
             (void)timer; [weakSelf step];
@@ -195,6 +328,7 @@ static void redraw(UIView *view) {
     [self syncPad];
     if (pad && rt_ios_move_response() != padResponse) { padResponse = rt_ios_move_response(); [self updateMove]; }
     [self testStep];
+    [self backTapStep];
     if (host.subviews.lastObject != self) [host bringSubviewToFront:self];
     if (!CGRectEqualToRect(self.frame, host.bounds)) { self.frame = host.bounds; redraw(self); }
     if (trackpad) return;   // trackpad : mouvements envoyés au glissement (touchesMoved)
@@ -216,6 +350,31 @@ static void redraw(UIView *view) {
     e.motion.xrel = dx; e.motion.yrel = dy;
     SDL_PushEvent(&e);
 }
+// Tape au dos acceptée : appui, puis relâchement après P2_BACKTAP_HOLD et au
+// moins deux images (vgui ignore un clic dont l'appui et le relâchement
+// tombent dans la même image). Passe par action: comme un bouton tenu : si un
+// doigt tient déjà ce portail, rien n'est renvoyé au jeu.
+- (void)backTapStep {
+    if (!backtap_motion) return;
+    UIInterfaceOrientation o = self.window.windowScene.interfaceOrientation;
+    atomic_store(&backtap_orient, o == UIInterfaceOrientationLandscapeLeft ? 1 : o == UIInterfaceOrientationLandscapeRight ? -1 : 0);
+    atomic_store(&backtap_active, !menu && !concealed);
+    int side = atomic_exchange(&backtap_pending, 0);
+    if (side && !menu && !concealed && backtapHeld < 0) {
+        backtapHeld = side < 0 ? MOUSE_LEFT : MOUSE_RIGHT;
+        backtapAt = CACurrentMediaTime(); backtapFrames = rt_ios_frames;
+        [self action:(Action)backtapHeld down:YES];
+        redraw(self);   // le bouton du portail s'allume
+    }
+    [self backTapRelease:NO];
+}
+- (void)backTapRelease:(BOOL)now {
+    if (backtapHeld < 0) return;
+    if (!now && (CACurrentMediaTime() - backtapAt < backtap_hold || rt_ios_frames < backtapFrames + 2)) return;
+    [self action:(Action)backtapHeld down:NO];
+    backtapHeld = -1;
+    redraw(self);
+}
 - (void)toggleLookMode {
     trackpad = !trackpad;
     [NSUserDefaults.standardUserDefaults setBool:trackpad forKey:kTrackpadKey];
@@ -228,6 +387,7 @@ static void redraw(UIView *view) {
 }
 - (void)releaseAll {
     for (P2Finger *f in fingers.objectEnumerator) if (f.role == ROLE_BUTTON) [self action:f.action down:NO];
+    [self backTapRelease:YES];
     [fingers removeAllObjects];
     [self updateMove];
 }
@@ -449,6 +609,7 @@ static Sint16 axis_value(CGFloat speed, int response) {
 - (void)touchesBegan:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
     concealed = NO;   // un toucher ramène la surcouche cachée pour une manette
+    backtap_touch(touches);   // un toucher secoue le téléphone : pas de tape au dos autour
     for (UITouch *t in touches) {
         P2Finger *f = [P2Finger new];
         f.start = f.at = [t locationInView:self];
@@ -483,6 +644,7 @@ static Sint16 axis_value(CGFloat speed, int response) {
 }
 - (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
     (void)event;
+    backtap_touch(touches);
     for (UITouch *t in touches) {
         P2Finger *f = [fingers objectForKey:t];
         if (f.role == ROLE_BUTTON) [self action:f.action down:NO];
