@@ -3,6 +3,8 @@
 #if TARGET_OS_IPHONE
 #define GLES_SILENCE_DEPRECATION 1
 #import <OpenGLES/EAGL.h>
+#import <UIKit/UIKit.h>
+#include <math.h>
 #include <OpenGLES/ES3/gl.h>
 #include <SDL.h>
 #include <SDL_syswm.h>
@@ -754,6 +756,7 @@ void *rt_ios_gl_share_group(void *context) {
     return context ? (__bridge void *)((__bridge EAGLContext *)context).sharegroup : NULL;
 }
 
+float rt_ios_render_scale(void);   // sdl_ios.m
 SDL_GLContext rt_ios_gl_create_context(SDL_Window *window) {
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_PROFILE_MASK, SDL_GL_CONTEXT_PROFILE_ES);
     SDL_GL_SetAttribute(SDL_GL_CONTEXT_MAJOR_VERSION, 3);   // ES 3 : 16 unités de texture (togl en utilise 16)
@@ -763,8 +766,19 @@ SDL_GLContext rt_ios_gl_create_context(SDL_Window *window) {
     if (!context) return NULL;
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
-    if (SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_UIKIT)
+    if (SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_UIKIT) {
         system_framebuffer = info.info.uikit.framebuffer, system_colorbuffer = info.info.uikit.colorbuffer;
+        // Échelle de rendu inférieure à celle de l'écran (P2_IOS_RENDER_SCALE=2…) :
+        // SDL crée sa vue GL à l'échelle native ; la vue reprend la nôtre et
+        // SDL recrée ses renderbuffers à la taille voulue (layoutSubviews).
+        UIView *view = info.info.uikit.window.rootViewController.view;
+        CGFloat wanted = rt_ios_render_scale();
+        if (view && wanted > 1 && fabs(view.contentScaleFactor - wanted) > 0.01) {
+            view.contentScaleFactor = wanted;
+            [view setNeedsLayout];
+            [view layoutIfNeeded];
+        }
+    }
     SDL_GL_GetDrawableSize(window, &drawable_width, &drawable_height);
     pthread_once(&once, start_gl4es);
     fprintf(stderr, "[gl-ios] contexte ES 3, FBO système %u, %dx%d\n", system_framebuffer,
