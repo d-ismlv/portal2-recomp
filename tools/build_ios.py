@@ -14,6 +14,7 @@ obtenu par Xcode pour un appareil (ios/signing).
 import argparse
 import json
 import os
+import shutil
 import subprocess
 import sys
 import time
@@ -95,6 +96,8 @@ def main():
                            PLATFORM=target['plist']).items():
         plist = plist.replace(f'@{key}@', value)
     (app / 'Info.plist').write_text(plist)
+    # Page du jeu dans l'app Réglages d'iOS (lue par runtime/ios/settings.c).
+    shutil.copytree(ROOT / 'ios/Settings.bundle', app / 'Settings.bundle', dirs_exist_ok=True)
     # Lancement depuis l'écran d'accueil : arguments du jeu par défaut (les
     # dossiers de données sont ajoutés par ios/main_ios.c).
     (app / 'launch.args').write_text('--\n-game\nportal2\n-novid\n-fullscreen\n')

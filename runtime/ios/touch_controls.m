@@ -200,6 +200,10 @@ static void backtap_start(void) {
     }
     rt_backtap_params p;
     rt_backtap_defaults(&p);
+    // Sensibilité (Réglages : 0,75 / 1 / 1,33) : seuils de détection divisés
+    // d'autant ; les variables par seuil, ci-dessous, priment.
+    float k = env_float("P2_BACKTAP_SENSITIVITY", 1, 0.1f);
+    p.accel_min /= k; p.jerk_min /= k; p.gyro_accel_min /= k; p.gyro_rot_min /= k;
     p.accel_min = env_float("P2_BACKTAP_ACCEL", p.accel_min, 0.001f);
     p.jerk_min = env_float("P2_BACKTAP_JERK", p.jerk_min, 0);
     p.rot_min = env_float("P2_BACKTAP_ROT", p.rot_min, 0.001f);
@@ -466,11 +470,17 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     CGRect a = self.area;
     return CGPointMake(CGRectGetMinX(a) + a.size.width * (right ? .80 : .16), CGRectGetMinY(a) + a.size.height * .72);
 }
+static BOOL portal_buttons(void) {
+    const char *e = getenv("P2_PORTAL_BUTTONS");
+    if (e && *e == '1') return YES;
+    if (e && *e == '0') return NO;
+    return backtap_motion == nil;
+}
 - (int)buttons:(Button *)b {
     CGRect a = self.area; CGFloat x = CGRectGetMinX(a), y = CGRectGetMinY(a), w = a.size.width, h = a.size.height;
     UIColor *blue = [UIColor colorWithRed:.16 green:.55 blue:1 alpha:.6], *orange = [UIColor colorWithRed:1 green:.55 blue:.05 alpha:.6];
     UIColor *ink = [UIColor colorWithWhite:0 alpha:.35];   // fond sombre : icônes lisibles sur un mur clair
-    CGFloat top = y + h * .14, gap = kPortalSize * 1.15;
+    CGFloat top = y + h * .19, gap = kPortalSize * 1.15;   // sous le compteur d'images
     Button all[] = {
         // Portails, en miroir : bleu à l'extérieur, orange à l'intérieur, des deux côtés.
         {MOUSE_LEFT, nil, blue, {x + w * .06, top}, kPortalSize}, {MOUSE_RIGHT, nil, orange, {x + w * .06 + gap, top}, kPortalSize},
@@ -485,8 +495,9 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
     };
     int n = 0;
     for (int i = 0; i < (int)(sizeof(all) / sizeof(*all)) && n < MAX_BUTTONS; ++i) {
-        // Les tapes au dos tirent les portails : leurs boutons ne servent que sans elles.
-        if (backtap_motion && (all[i].action == MOUSE_LEFT || all[i].action == MOUSE_RIGHT)) continue;
+        // Les tapes au dos tirent les portails : leurs boutons ne servent que sans
+        // elles, sauf choix contraire (P2_PORTAL_BUTTONS=1 toujours, =0 jamais).
+        if ((all[i].action == MOUSE_LEFT || all[i].action == MOUSE_RIGHT) && !portal_buttons()) continue;
         b[n++] = all[i];
     }
     return n;
@@ -647,7 +658,7 @@ static Sint16 axis_value(CGFloat speed, int response) {
         f.start = f.at = [t locationInView:self];
         // Toucher du compteur d'images : position du joueur au journal (getpos),
         // pour rejouer la même vue dans le banc (tools/ios_bench.py).
-        if (fps > 0 && CGRectContainsPoint(CGRectInset([self fpsBox:[NSString stringWithFormat:@"%d i/s", fps]], -12, -12), f.start)) {
+        if (fps > 0 && CGRectContainsPoint(CGRectInset([self fpsBox:[NSString stringWithFormat:@"%d FPS", fps]], -12, -12), f.start)) {
             rt_ios_console_command("getpos");
             continue;
         }
@@ -706,7 +717,7 @@ static Sint16 axis_value(CGFloat speed, int response) {
     CGContextFillEllipseInRect(c, CGRectMake(knob.x - kButtonSize / 2, knob.y - kButtonSize / 2, kButtonSize, kButtonSize));
 }
 // Compteur d'images, relevé deux fois par seconde (redessiner l'incrustation
-// coûte : seulement quand la valeur change). P2_SHOW_FPS=0 le masque.
+// coûte : seulement quand la valeur change). P2_SHOW_FPS=0 (Réglages) le masque.
 - (void)updateFPS {
     if (fps < 0) return;
     static int hidden = -1;
@@ -718,25 +729,55 @@ static Sint16 axis_value(CGFloat speed, int response) {
     fpsAt = now; fpsFrames = rt_ios_frames;
     if (value != fps) { fps = value; redraw(self); }
 }
-static NSDictionary *fps_style(void) {
-    return @{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold],
-             NSForegroundColorAttributeName: UIColor.whiteColor};
+// Police pixel 5×7 du compteur : chiffres et « FPS », une ligne par octet
+// (bit 4 : colonne de gauche), dessinée carré par carré sans lissage.
+static const char kPixelChars[] = "0123456789FPS";
+static const uint8_t kPixelGlyphs[][7] = {
+    {0x0E, 0x11, 0x13, 0x15, 0x19, 0x11, 0x0E}, {0x04, 0x0C, 0x04, 0x04, 0x04, 0x04, 0x0E},
+    {0x0E, 0x11, 0x01, 0x02, 0x04, 0x08, 0x1F}, {0x1F, 0x02, 0x04, 0x02, 0x01, 0x11, 0x0E},
+    {0x02, 0x06, 0x0A, 0x12, 0x1F, 0x02, 0x02}, {0x1F, 0x10, 0x1E, 0x01, 0x01, 0x11, 0x0E},
+    {0x06, 0x08, 0x10, 0x1E, 0x11, 0x11, 0x0E}, {0x1F, 0x01, 0x02, 0x04, 0x08, 0x08, 0x08},
+    {0x0E, 0x11, 0x11, 0x0E, 0x11, 0x11, 0x0E}, {0x0E, 0x11, 0x11, 0x0F, 0x01, 0x02, 0x0C},
+    {0x1F, 0x10, 0x10, 0x1E, 0x10, 0x10, 0x10}, {0x1E, 0x11, 0x11, 0x1E, 0x10, 0x10, 0x10},
+    {0x0F, 0x10, 0x10, 0x0E, 0x01, 0x01, 0x1E},
+};
+static const CGFloat kPixel = 3;   // points par pixel de la police (9 pixels d'écran sur un iPhone ×3)
+static void draw_pixel_text(CGContextRef c, const char *text, CGPoint at) {
+    for (int i = 0; text[i]; ++i) {
+        const char *glyph = strchr(kPixelChars, text[i]);
+        if (!glyph || !text[i]) continue;   // espace
+        const uint8_t *rows = kPixelGlyphs[glyph - kPixelChars];
+        for (int y = 0; y < 7; ++y)
+            for (int x = 0; x < 5; ++x)
+                if (rows[y] & (0x10 >> x)) CGContextFillRect(c, CGRectMake(at.x + (i * 6 + x) * kPixel, at.y + y * kPixel, kPixel, kPixel));
+    }
 }
-// En haut, à droite du bouton pause (centre), dans la zone sûre.
+// En haut à gauche, dans la zone sûre (hors de l'arrondi et de l'encoche).
 - (CGRect)fpsBox:(NSString *)text {
     CGRect a = self.area;
-    CGSize size = [text sizeWithAttributes:fps_style()];
-    return CGRectMake(CGRectGetMidX(a) + kButtonSize * .55, CGRectGetMinY(a) + a.size.height * .08 - size.height / 2 - 3,
-                      size.width + 12, size.height + 6);
+    CGFloat margin = 2 * kPixel;
+    return CGRectMake(round(CGRectGetMinX(a) + 8), round(CGRectGetMinY(a) + 8),
+                      (text.length * 6 - 1) * kPixel + 2 * margin, 7 * kPixel + 2 * margin);
 }
 - (void)drawFPS {
     if (fps <= 0) return;
-    NSString *text = [NSString stringWithFormat:@"%d i/s", fps];
-    NSDictionary *style = fps_style();
+    NSString *text = [NSString stringWithFormat:@"%d FPS", fps];
     CGRect box = [self fpsBox:text];
-    [[UIColor colorWithWhite:0 alpha:.45] setFill];
-    [[UIBezierPath bezierPathWithRoundedRect:box cornerRadius:box.size.height / 2] fill];
-    [text drawAtPoint:CGPointMake(box.origin.x + 6, box.origin.y + 3) withAttributes:style];
+    CGContextRef c = UIGraphicsGetCurrentContext();
+    CGContextSaveGState(c);
+    CGContextSetShouldAntialias(c, NO);
+    CGContextSetFillColorWithColor(c, [UIColor colorWithWhite:0 alpha:.5].CGColor);
+    CGContextFillRect(c, box);
+    // Vert au-dessus de 55 i/s, jaune au-dessus de 30, rouge en dessous.
+    UIColor *ink = fps >= 55 ? [UIColor colorWithRed:.45 green:1 blue:.35 alpha:1]
+                 : fps >= 30 ? [UIColor colorWithRed:1 green:.85 blue:.2 alpha:1]
+                             : [UIColor colorWithRed:1 green:.35 blue:.3 alpha:1];
+    CGPoint at = CGPointMake(box.origin.x + 2 * kPixel, box.origin.y + 2 * kPixel);
+    CGContextSetFillColorWithColor(c, UIColor.blackColor.CGColor);   // ombre d'un pixel
+    draw_pixel_text(c, text.UTF8String, CGPointMake(at.x + kPixel / 3, at.y + kPixel / 3));
+    CGContextSetFillColorWithColor(c, ink.CGColor);
+    draw_pixel_text(c, text.UTF8String, at);
+    CGContextRestoreGState(c);
 }
 - (void)drawRect:(CGRect)rect {
     (void)rect;

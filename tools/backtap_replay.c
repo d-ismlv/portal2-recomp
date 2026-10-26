@@ -18,6 +18,8 @@ int main(int argc, char **argv) {
     if (!f) { perror(argv[1]); return 1; }
     rt_backtap_params p;
     rt_backtap_defaults(&p);
+    float k = env("P2_BACKTAP_SENSITIVITY", 1);   // comme touch_controls.m
+    if (k > 0.1f) { p.accel_min /= k; p.jerk_min /= k; p.gyro_accel_min /= k; p.gyro_rot_min /= k; }
     p.accel_min = env("P2_BACKTAP_ACCEL", p.accel_min);
     p.jerk_min = env("P2_BACKTAP_JERK", p.jerk_min);
     p.rot_min = env("P2_BACKTAP_ROT", p.rot_min);

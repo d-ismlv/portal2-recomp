@@ -40,6 +40,33 @@ l'iPhone est verrouillé.
 `Documents/launch.args` dans le conteneur de l'app ajoute des arguments
 (un par ligne), par exemple `+map` puis `sp_a2_laser_intro`.
 
+## Réglages (app Réglages d'iOS)
+
+Page « Portal 2 » de l'app Réglages (`ios/Settings.bundle`, copiée dans l'app
+par `tools/build_ios.py`). Au lancement, `runtime/ios/settings.c` traduit
+chaque réglage modifié en variable `P2_*` ; une variable déjà posée (devicectl,
+simctl) prime, un réglage jamais touché laisse le défaut du code. Effet au
+prochain lancement.
+
+| Réglage | Variable | Valeurs |
+|---|---|---|
+| Résolution | `P2_IOS_RENDER_SCALE` (+ `-w`/`-h` du jeu) | native, ×2 (défaut), ×1,5, ×1 |
+| Images par seconde | `P2_IOS_MAX_FPS` | 60 (défaut), 120 |
+| Compteur d'images | `P2_SHOW_FPS` | affiché par défaut ; toucher le compteur écrit `getpos` dans la console |
+| Commandes à l'écran | `P2_TOUCH_CONTROLS` | automatique (cachées avec une manette), toujours, jamais |
+| Caméra en trackpad | clé `P2TouchTrackpad` | aussi basculée par le bouton en bas à gauche |
+| Vitesse de la caméra | `P2_TOUCH_LOOK` | ×0,5 à ×3 |
+| Accélération du trackpad | `P2_TOUCH_ACCEL` | aucune (1) à forte (4), normale 2,5 |
+| Tapes au dos | `P2_BACKTAP` | activées par défaut |
+| Sensibilité des tapes | `P2_BACKTAP_SENSITIVITY` | 0,75 / 1 / 1,33 : seuils divisés d'autant |
+| Inverser gauche et droite | `P2_BACKTAP_INVERT` | |
+| Boutons de portail | `P2_PORTAL_BUTTONS` | automatique (sans tapes au dos), toujours, jamais |
+| Journal | `P2_LOG_FILE=Documents/game.log` | |
+
+Simulateur : `xcrun simctl spawn <appareil> defaults write fr.kanapitsas.portal2
+P2ResolutionScale -string 1.5`. `tests/checks_ios_settings.c` vérifie la
+traduction et la concordance des clés entre le code et la page.
+
 ## Diagnostics
 
 | Variable | Effet |

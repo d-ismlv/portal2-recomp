@@ -7,6 +7,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include "settings.h"
 
 // Échelle points -> pixels : celle de l'écran sur appareil. Sur simulateur
 // (rendu OpenGL ES logiciel, 0,5 image/s en 2622×1206), 1 par défaut.
@@ -34,6 +35,14 @@ float rt_ios_render_scale(void) {
     return scale = requested > 1.0f && requested < native ? requested : (float)native;
 }
 static int up(int v) { return (int)lroundf((float)v * rt_ios_render_scale()); }
+// Taille de rendu en paysage : écran en points × échelle (résolution du jeu, ios/main_ios.c).
+void rt_ios_render_size(int *w, int *h) {
+    __block CGSize size = CGSizeZero;
+    if ([NSThread isMainThread]) size = UIScreen.mainScreen.bounds.size;
+    else dispatch_sync(dispatch_get_main_queue(), ^{ size = UIScreen.mainScreen.bounds.size; });
+    *w = up((int)fmax(size.width, size.height));
+    *h = up((int)fmin(size.width, size.height));
+}
 static int down(int v) { return (int)lroundf((float)v / rt_ios_render_scale()); }
 
 void rt_ios_touch_controls_attach(SDL_Window *window);

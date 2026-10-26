@@ -16,6 +16,7 @@
 #include <sys/resource.h>
 #include <sys/stat.h>
 #include <unistd.h>
+#include "settings.h"
 
 int p2_main(int argc, char **argv);
 
@@ -36,6 +37,9 @@ static void read_launch_file(const char *bundle) {
 }
 
 int main(int argc, char **argv) {
+    // Réglages de l'app Réglages d'iOS : avant tout le reste (P2Log pose P2_LOG_FILE).
+    char settings[1024];
+    int applied = rt_ios_settings_load(settings, sizeof(settings));
     // Journal fiable : la console de simctl perd la fin quand le processus meurt.
     const char *log = getenv("P2_LOG_FILE");   // relatif : au conteneur de l'app (HOME)
     char log_path[PATH_MAX];
@@ -56,6 +60,7 @@ int main(int argc, char **argv) {
         getrlimit(RLIMIT_NOFILE, &files);
         fprintf(stderr, "[ios] descripteurs de fichiers : %llu\n", (unsigned long long)files.rlim_cur);
     }
+    fprintf(stderr, "[ios] réglages : %s\n", applied ? settings : "aucun modifié");
     char exe[PATH_MAX], bundle[PATH_MAX];
     uint32_t size = sizeof(exe);
     if (_NSGetExecutablePath(exe, &size)) return 2;
@@ -99,6 +104,20 @@ int main(int argc, char **argv) {
             memmove(arguments + 3, arguments + 1, (size_t)(count - 1) * sizeof(*arguments));
             arguments[1] = strdup(defaults[d].option); arguments[2] = strdup(path);
             count += 2;
+        }
+    }
+    // Échelle de rendu choisie (Réglages ou P2_IOS_RENDER_SCALE) : la
+    // résolution du jeu suit, sinon video.txt garderait l'ancienne.
+    if (getenv("P2_IOS_RENDER_SCALE") && count + 4 < 256) {
+        int present = 0;
+        for (int i = 1; i < count; ++i) present |= !strcmp(arguments[i], "-w") || !strcmp(arguments[i], "-width");
+        int w = 0, h = 0;
+        if (!present) rt_ios_render_size(&w, &h);
+        if (w > 0 && h > 0) {
+            char value[16];
+            push("-w"); snprintf(value, sizeof(value), "%d", w); push(value);
+            push("-h"); snprintf(value, sizeof(value), "%d", h); push(value);
+            fprintf(stderr, "[ios] résolution %dx%d (échelle %s)\n", w, h, getenv("P2_IOS_RENDER_SCALE"));
         }
     }
     arguments[count] = NULL;
