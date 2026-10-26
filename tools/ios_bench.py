@@ -92,7 +92,8 @@ def main():
                                                   'defaultres': round(pw * factor), 'defaultresheight': round(ph * factor)}))
             stop_game(udid)
             push(udid, video, VIDEO)
-            env = {'P2_LOG_FILE': 'Documents/game.log', 'P2_FRAME_LOG': '1', 'P2_IOS_RENDER_SCALE': scale}
+            env = {'P2_LOG_FILE': 'Documents/game.log', 'P2_FRAME_LOG': '1', 'P2_IOS_RENDER_SCALE': scale,
+                   'P2_IOS_NO_PRESENT': '1'}   # sans plafond de l'écran (image figée)
             launched = devicectl(udid, 'device', 'process', 'launch', '--terminate-existing', '--environment-variables',
                                  json.dumps(env), APP, check=False)
             if launched.returncode:
@@ -105,7 +106,7 @@ def main():
             steady = fps[len(fps) // 2:] or [0]
             results.append((name, size.group(1) if size else '?', statistics.mean(steady), min(steady), max(steady)))
             print(f'{name:12} {results[-1][1]:>10}  moyenne {results[-1][2]:5.1f}  min {results[-1][3]:5.1f}  '
-                  f'max {results[-1][4]:5.1f} i/s', flush=True)
+                  f'max {results[-1][4]:5.1f} i/s ({1000 / max(results[-1][2], 0.1):.1f} ms/image)', flush=True)
     finally:
         stop_game(udid)
         push(udid, original, VIDEO)

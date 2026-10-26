@@ -785,8 +785,17 @@ static void request_frame_rate(void) {
     float wanted = e && atof(e) > 0 ? (float)atof(e) : (float)UIScreen.mainScreen.maximumFramesPerSecond;
     if (wanted <= 60) return;
     link = [CADisplayLink displayLinkWithTarget:[P2FrameRate new] selector:@selector(tick:)];
-    link.preferredFrameRateRange = CAFrameRateRangeMake(60, wanted, wanted);
-    [link addToRunLoop:NSRunLoop.mainRunLoop forMode:NSRunLoopCommonModes];
+    link.preferredFrameRateRange = CAFrameRateRangeMake(wanted, wanted, wanted);   // avec un minimum de 60, iOS restait à 60
+    // Sur son propre thread : la boucle du thread principal n'est servie que
+    // quand le jeu lit ses événements (~20 fois/s mesuré), et iOS ignore une
+    // demande dont les rappels ne suivent pas (écran resté à 60 Hz hors toucher).
+    NSThread *thread = [[NSThread alloc] initWithBlock:^{
+        [link addToRunLoop:NSRunLoop.currentRunLoop forMode:NSRunLoopCommonModes];
+        for (;;) [NSRunLoop.currentRunLoop runMode:NSDefaultRunLoopMode beforeDate:NSDate.distantFuture];
+    }];
+    thread.name = @"P2FrameRate";
+    thread.qualityOfService = NSQualityOfServiceUserInteractive;
+    [thread start];
     fprintf(stderr, "[gl-ios] fréquence d'affichage demandée : jusqu'à %.0f Hz\n", wanted);
 }
 
@@ -841,7 +850,9 @@ static void probe_frame(void) {
 }
 
 void rt_ios_draws_frame_end(void);
+unsigned long rt_ios_frames;   // images présentées (compteur affiché par touch_controls.m)
 void rt_ios_gl_swap_window(SDL_Window *window) {
+    ++rt_ios_frames;
     rt_ios_draws_frame_end();
     gl4es_pre_swap();
     probe_frame();
@@ -851,6 +862,18 @@ void rt_ios_gl_swap_window(SDL_Window *window) {
     if (!bind_rb) bind_rb = dlsym(gles, "glBindRenderbuffer");
     GLint renderbuffer = 0;
     real_get_integerv(GL_RENDERBUFFER_BINDING, &renderbuffer);
+    // P2_IOS_NO_PRESENT=1 (banc) : images rendues mais jamais présentées, donc
+    // sans plafond de l'écran (qui arrondit à 120, 60, 40… i/s) ; l'écran reste
+    // figé, la cadence du journal (P2_FRAME_LOG) est la vraie.
+    static int present = -1;
+    if (present < 0) present = !getenv("P2_IOS_NO_PRESENT");
+    if (!present) {
+        static void (*flush)(void);
+        if (!flush) flush = dlsym(gles, "glFlush");
+        flush();
+        gl4es_post_swap();
+        return;
+    }
     bind_rb(GL_RENDERBUFFER, system_colorbuffer);
     SDL_GL_SwapWindow(window);
     bind_rb(GL_RENDERBUFFER, (GLuint)renderbuffer);

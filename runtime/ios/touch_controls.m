@@ -39,6 +39,7 @@
 #include <string.h>
 
 int rt_ios_game_ui_visible(void);   // game_state.c
+extern unsigned long rt_ios_frames;  // gl_ios.m : images présentées
 void rt_ios_move_response_linear(int on);
 int rt_ios_move_response(void);
 
@@ -137,6 +138,9 @@ static void redraw(UIView *view) {
     float lookCarry[2];       // fractions de comptes de souris reportées
     BOOL trackpad;            // moitié droite en trackpad plutôt qu'en stick
     BOOL physicalPad;         // vraie manette connectée
+    int fps;                  // compteur d'images affiché (-1 : masqué, P2_SHOW_FPS=0)
+    unsigned long fpsFrames;  // images au dernier relevé
+    CFTimeInterval fpsAt;     // instant du dernier relevé
     SDL_Joystick *pad;        // manette virtuelle du stick gauche (NULL : W/A/S/D)
     BOOL padRefused;          // création refusée : ne pas réessayer à chaque image
     Sint16 padAxes[2];        // dernières valeurs envoyées
@@ -187,6 +191,7 @@ static void redraw(UIView *view) {
         if (menu) [self releaseAll];
         redraw(self);
     }
+    [self updateFPS];
     [self syncPad];
     if (pad && rt_ios_move_response() != padResponse) { padResponse = rt_ios_move_response(); [self updateMove]; }
     [self testStep];
@@ -500,8 +505,36 @@ static Sint16 axis_value(CGFloat speed, int response) {
     CGContextStrokeEllipseInRect(c, CGRectMake(origin.x - r, origin.y - r, 2 * r, 2 * r));
     CGContextFillEllipseInRect(c, CGRectMake(knob.x - kButtonSize / 2, knob.y - kButtonSize / 2, kButtonSize, kButtonSize));
 }
+// Compteur d'images, relevé deux fois par seconde (redessiner l'incrustation
+// coûte : seulement quand la valeur change). P2_SHOW_FPS=0 le masque.
+- (void)updateFPS {
+    if (fps < 0) return;
+    static int hidden = -1;
+    if (hidden < 0) { const char *e = getenv("P2_SHOW_FPS"); hidden = e && !strcmp(e, "0"); if (hidden) { fps = -1; return; } }
+    CFTimeInterval now = CACurrentMediaTime();
+    if (!fpsAt) { fpsAt = now; fpsFrames = rt_ios_frames; return; }
+    if (now - fpsAt < .5) return;
+    int value = (int)lround((double)(rt_ios_frames - fpsFrames) / (now - fpsAt));
+    fpsAt = now; fpsFrames = rt_ios_frames;
+    if (value != fps) { fps = value; redraw(self); }
+}
+- (void)drawFPS {
+    if (fps <= 0) return;
+    CGRect a = self.area;
+    NSString *text = [NSString stringWithFormat:@"%d i/s", fps];
+    NSDictionary *style = @{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold],
+                            NSForegroundColorAttributeName: UIColor.whiteColor};
+    CGSize size = [text sizeWithAttributes:style];
+    // En haut, à droite du bouton pause (centre), dans la zone sûre.
+    CGRect box = CGRectMake(CGRectGetMidX(a) + kButtonSize * .55, CGRectGetMinY(a) + a.size.height * .08 - size.height / 2 - 3,
+                            size.width + 12, size.height + 6);
+    [[UIColor colorWithWhite:0 alpha:.45] setFill];
+    [[UIBezierPath bezierPathWithRoundedRect:box cornerRadius:box.size.height / 2] fill];
+    [text drawAtPoint:CGPointMake(box.origin.x + 6, box.origin.y + 3) withAttributes:style];
+}
 - (void)drawRect:(CGRect)rect {
     (void)rect;
+    if (!concealed) [self drawFPS];   // aussi dans les menus
     if (concealed || menu || getenv("P2_TOUCH_TEST_MOVE")) return;   // essai : écran dégagé
     CGContextRef c = UIGraphicsGetCurrentContext();
     UIColor *ink = [UIColor colorWithWhite:1 alpha:.3], *line = [UIColor colorWithWhite:1 alpha:.45];
