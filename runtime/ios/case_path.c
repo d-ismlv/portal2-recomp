@@ -18,7 +18,8 @@
 
 // Cache des contenus de répertoires (chemin exact -> noms), relu quand un nom
 // y manque (fichier créé depuis la mise en cache).
-typedef struct Directory { char *path; char **names; size_t count; time_t refreshed; struct Directory *next; } Directory;
+typedef struct Directory { char *path; char **names; size_t count; time_t refreshed; unsigned long generation; struct Directory *next; } Directory;
+unsigned long rt_paths_generation(void);   // paths.c : incrémenté à chaque écriture invitée
 #define BUCKETS 4096u
 static Directory *buckets[BUCKETS];
 static pthread_mutex_t lock = PTHREAD_MUTEX_INITIALIZER;
@@ -33,6 +34,7 @@ static Directory *listing(const char *path) {
     Directory *d = calloc(1, sizeof(*d));
     if (!d) { closedir(dir); return NULL; }
     d->path = strdup(path);
+    d->generation = rt_paths_generation();
     size_t capacity = 0;
     struct dirent *entry;
     while ((entry = readdir(dir))) {
@@ -56,9 +58,13 @@ static const char *find(Directory *d, const char *name) {
 // Relit un répertoire déjà en cache (une entrée a pu être créée depuis). Les
 // anciens noms restent alloués : des pointeurs renvoyés plus tôt les désignent.
 static void refresh(Directory *d) {
-    time_t now = time(NULL);   // au plus une relecture par seconde : le moteur sonde beaucoup d'absents
-    if (now == d->refreshed) return;
-    d->refreshed = now;
+    // Au plus une relecture par seconde (le moteur sonde beaucoup d'absents),
+    // sauf après une écriture du jeu : un fichier qu'il vient de créer (fichier
+    // de transition .HL1 relu aussitôt) doit être trouvé tout de suite.
+    time_t now = time(NULL);
+    unsigned long generation = rt_paths_generation();
+    if (now == d->refreshed && generation == d->generation) return;
+    d->refreshed = now; d->generation = generation;
     DIR *dir = opendir(d->path);
     if (!dir) return;
     struct dirent *entry;

@@ -382,6 +382,14 @@ int rt_libc_resolve(const char *name, RtShimRoute *route) {
     return 1;
 }
 
+// Diagnostic P2_TRACE_FILES=<texte> : ouvertures, suppressions et renommages
+// invités dont le chemin contient ce texte (sans casse ; « 1 » : tous), avec
+// le chemin hôte et le résultat, sur la sortie d'erreur.
+int rt_trace_files(const char *path) {
+    static const char *filter; static int read;
+    if (!read) { filter = getenv("P2_TRACE_FILES"); if (filter && (!*filter || !strcmp(filter, "0"))) filter = NULL; read = 1; }
+    return filter && path && (!strcmp(filter, "1") || strcasestr(path, filter));
+}
 int rt_libc_shim(CPU *c, const char *name) {
     uint32_t a, b, n;
     if (!strcmp(name, "__errno_location")) c->eax = errno_slot(c);
@@ -498,10 +506,13 @@ int rt_libc_shim(CPU *c, const char *name) {
             int writing = mode[0]=='w' || mode[0]=='a' || strchr(mode,'+');
             // Lecture d'un fichier que le cache sait absent : ENOENT sans fopen
             // hôte (le moteur sonde chaque dossier de recherche, ~110 fois/s).
-            if (!writing && rt_access_cached(path, F_OK) == -1 && errno == ENOENT) file = NULL;
-            else {
+            if (!writing && rt_access_cached(path, F_OK) == -1 && errno == ENOENT) {
+                file = NULL;
+                if (rt_trace_files(path)) { int kept = errno; fprintf(stderr, "[fichiers] fopen %s \"%s\" : absent (cache)\n", path, mode); errno = kept; }
+            } else {
                 const char *resolved=writing?rt_write_path(path,mode[0]!='w'):rt_read_path(path);
                 file=resolved?fopen(resolved,mode):NULL;
+                if (rt_trace_files(path)) { int kept = errno; fprintf(stderr, "[fichiers] fopen %s \"%s\" -> %s : %s\n", path, mode, resolved ? resolved : "(null)", file ? "ok" : strerror(errno)); errno = kept; }
             }
         }
         if (!file) { save_errno(c); c->eax = 0; }
@@ -595,6 +606,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         }
         const char *resolved=(flags & (3|0x40|0x200|0x400))?rt_write_path(path,!(flags & (0x80|0x200))):rt_read_path(path);
         int result = resolved?open(resolved, native, mode):-1; if (result < 0) save_errno(c);
+        if (rt_trace_files(path)) { int kept = errno; fprintf(stderr, "[fichiers] open %s %#x -> %s : %s\n", path, flags, resolved ? resolved : "(null)", result >= 0 ? "ok" : strerror(errno)); errno = kept; }
         c->eax = (uint32_t)result;
     } else if (!strcmp(name, "chdir")) {
         const char *resolved=rt_read_path(string(c,argument(c,0)));

@@ -10,6 +10,7 @@
 // SHIMS: pathconf faccessat futimes utimes flock __xmknod setvbuf ungetc getwc ungetwc
 // SHIMS: putwc putchar writev ioctl
 #include "posix.h"
+int rt_trace_files(const char *path);   // libc.c
 #include "modules.h"
 #include <errno.h>
 #include <fcntl.h>
@@ -325,14 +326,18 @@ static int posix_shim(CPU *c, const char *name) {
     } else if (!strcmp(name, "rmdir")) {
         finish(c, do_unlink(string(c, arg(c, 0)), 1));
     } else if (!strcmp(name, "unlink")) {
-        finish(c, do_unlink(string(c, arg(c, 0)), 0));
+        int result = do_unlink(string(c, arg(c, 0)), 0);
+        if (rt_trace_files(string(c, arg(c, 0)))) { int kept = errno; fprintf(stderr, "[fichiers] unlink %s : %s\n", string(c, arg(c, 0)), result ? strerror(errno) : "ok"); errno = kept; }
+        finish(c, result);
     } else if (!strcmp(name, "remove")) {
         const char *path = string(c, arg(c, 0));
         int result = do_unlink(path, 0);
         if (result && errno == EISDIR) result = do_unlink(path, 1);
         finish(c, result);
     } else if (!strcmp(name, "rename")) {
-        finish(c, do_rename(string(c, arg(c, 0)), string(c, arg(c, 1))));
+        int result = do_rename(string(c, arg(c, 0)), string(c, arg(c, 1)));
+        if (rt_trace_files(string(c, arg(c, 0))) || rt_trace_files(string(c, arg(c, 1)))) { int kept = errno; fprintf(stderr, "[fichiers] rename %s -> %s : %s\n", string(c, arg(c, 0)), string(c, arg(c, 1)), result ? strerror(errno) : "ok"); errno = kept; }
+        finish(c, result);
     } else if (!strcmp(name, "chmod")) {
         finish(c, copy_up(string(c, arg(c, 0)), a) ? -1 : chmod(a, (mode_t)arg(c, 1)));
     } else if (!strcmp(name, "chown") || !strcmp(name, "lchown")) {

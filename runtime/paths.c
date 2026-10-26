@@ -240,7 +240,15 @@ static int lower_directory(const char *relative) {
     if(rt_path_is_whiteout(relative)==1)return 0;
     char lower[2][PATH_MAX];int count=rt_path_lower(relative,lower);
     struct stat info;
-    for(int i=0;i<count;++i)if(!stat(lower[i],&info) && S_ISDIR(info.st_mode))return 1;
+    for(int i=0;i<count;++i){
+        const char *candidate=lower[i];
+#if TARGET_OS_IPHONE
+        // iOS compare la casse : « portal2/save » désigne le dossier « SAVE » du jeu.
+        size_t trusted=within(candidate,game_root)?strlen(game_root):within(candidate,linux_root)?strlen(linux_root):0;
+        const char *real=rt_ios_case_path(candidate,trusted); if(real)candidate=real;
+#endif
+        if(!stat(candidate,&info) && S_ISDIR(info.st_mode))return 1;
+    }
     return 0;
 }
 int rt_path_relative(const char *path,char relative[PATH_MAX]) {
@@ -255,7 +263,14 @@ static int join(char out[PATH_MAX],const char *root,const char *relative) {
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return -1;}
     return 0;
 }
-int rt_path_overlay(const char *relative,char out[PATH_MAX]) { return join(out,user_root,relative); }
+int rt_path_overlay(const char *relative,char out[PATH_MAX]) {
+    if(join(out,user_root,relative))return -1;
+#if TARGET_OS_IPHONE
+    // Casse réelle des composants existants (suppressions, renommages : posix.c).
+    {const char *c=rt_ios_case_path(out,strlen(user_root)); if(c && c!=out)strcpy(out,c);}
+#endif
+    return 0;
+}
 int rt_path_absolute(const char *path,char out[PATH_MAX]) { return absolute_path(path,out); }
 static int join(char out[PATH_MAX],const char *root,const char *relative);
 // Greffon Miles de bin/linux32 traduit d'avance (pe.c) : visible seulement si
@@ -389,6 +404,12 @@ static const char *write_path(const char *path,int preserve_existing,int follow_
     if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer(); int count=snprintf(result,PATH_MAX,"%s/%s",user_root,relative);
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
+#if TARGET_OS_IPHONE
+    // Le moteur écrit en minuscules (« portal2/save/… ») : composants existants
+    // de la copie utilisateur repris dans leur casse réelle (« SAVE »), sinon
+    // ils seraient recréés ou introuvables sur un système sensible à la casse.
+    {const char *c=rt_ios_case_path(result,strlen(user_root)); if(c && c!=result)strcpy(result,c);}
+#endif
     const char *linked;
     if(*relative && overlay_link(result,relative,preserve_existing,follow_final,&linked))return linked;
     // Ne recrée dans la copie utilisateur que les répertoires parents visibles
