@@ -15,8 +15,9 @@
 //   un bouton bascule la moitié droite en trackpad : le glissement du doigt
 //   devient directement le mouvement de souris (choix retenu entre parties,
 //   P2TouchTrackpad dans les réglages de l'app) ;
-// - portails : une paire bleu (clic gauche) / orange (clic droit) dans chaque
-//   coin du haut, pour la main libre ;
+// - portails : tapes au dos (ci-dessous) ; sans capteur de mouvement
+//   (simulateur) ou avec P2_BACKTAP=0, une paire de boutons bleu (clic gauche)
+//   / orange (clic droit) dans chaque coin du haut ;
 // - icônes : sauter (espace), s'accroupir (Ctrl gauche), utiliser (E),
 //   pause (Échap) ;
 // - tapes au dos ou sur les côtés du téléphone (index derrière, en paysage) :
@@ -482,8 +483,12 @@ static void backtap_touch(NSSet<UITouch *> *touches) {
         {LOOK_MODE, trackpad ? @"hand.draw.fill" : @"r.joystick.fill", ink,
          {x + kButtonSize * .45, y + h - kButtonSize * .45}, kButtonSize * .75},
     };
-    int n = (int)(sizeof(all) / sizeof(*all));
-    for (int i = 0; i < n && i < MAX_BUTTONS; ++i) b[i] = all[i];
+    int n = 0;
+    for (int i = 0; i < (int)(sizeof(all) / sizeof(*all)) && n < MAX_BUTTONS; ++i) {
+        // Les tapes au dos tirent les portails : leurs boutons ne servent que sans elles.
+        if (backtap_motion && (all[i].action == MOUSE_LEFT || all[i].action == MOUSE_RIGHT)) continue;
+        b[n++] = all[i];
+    }
     return n;
 }
 - (int)buttonAt:(CGPoint)p {

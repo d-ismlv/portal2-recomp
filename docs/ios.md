@@ -66,7 +66,9 @@ Console du jeu : `-condebug` l'écrit dans
 Tenu en paysage, un index qui tape le dos près du bord gauche tire le portail
 bleu, près du bord droit l'orange (`runtime/ios/back_tap.c`, testé par
 `tests/checks_back_tap.c` ; CoreMotion dans `touch_controls.m`, file dédiée,
-sans autorisation). Candidat dès la moitié des seuils : |accélération
+sans autorisation). Elles remplacent les boutons de portail de la surcouche,
+qui ne reviennent que sans capteur de mouvement (simulateur) ou avec
+`P2_BACKTAP=0`. Candidat dès la moitié des seuils : |accélération
 utilisateur| et sa variation d'un échantillon au suivant (secousse), ou
 variation brusque de la rotation autour de x ; jugé 100 ms plus tard aux seuils
 entiers. Deux voies : accélération (0,10 g, 6 g/s) ou gyroscope (0,06 g,
