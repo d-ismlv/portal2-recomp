@@ -122,6 +122,11 @@ Profiler avec `P2_PROFILE_RAW=1` avant de deviner.
 
 ## Pièges propres à iOS
 
+- L'éditeur de liens d'ES refuse un programme dont le nuanceur de fragments
+  lit une sortie que celui de sommets n'écrit pas (le GL de bureau l'accepte) :
+  les dessins sautés cassaient la vue à travers les portails et figeaient le
+  menu Options. `essl3.c` initialise ces sorties.
+
 - Système de fichiers sensible à la casse : le moteur écrit et lit en
   minuscules (`portal2/save/…`), `runtime/paths.c` et
   `runtime/ios/case_path.c` reprennent la casse réelle.
