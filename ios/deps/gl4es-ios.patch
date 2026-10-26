@@ -72,7 +72,7 @@ index 498ecc5..8652abf 100644
                  type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
          else
 diff --git a/src/gl/fpe.c b/src/gl/fpe.c
-index c21bcf1..6072743 100644
+index c21bcf1..bb46381 100644
 --- a/src/gl/fpe.c
 +++ b/src/gl/fpe.c
 @@ -462,6 +462,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
@@ -196,16 +196,26 @@ index c21bcf1..6072743 100644
          }
          if(glstate->gleshard->program != program)
          {
-@@ -1440,6 +1461,8 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+@@ -1440,6 +1461,18 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
          #undef GO
      }
      // set VertexAttrib if needed
-+    int p2_bgra_ok = gl4es_p2_bgra_program ? gl4es_p2_bgra_program(glstate->gleshard->program) : 0;
++    int p2_bgra_program = gl4es_p2_bgra_program ? gl4es_p2_bgra_program(glstate->gleshard->program) : 0;
++    // Seulement si tous les attributs du dessin sont dans des tampons : avec un
++    // tableau en mémoire client, le pilote ES passe en « mode immédiat », qui
++    // ne sait pas lire ces octets dans un tampon (appel nul dans GLEngine,
++    // gleSetVertexArrayFunc, au changement de niveau). Conversion CPU alors.
++    int p2_bgra_ok = p2_bgra_program;
++    for(int i=0; p2_bgra_ok && i<hardext.maxvattrib; i++) {
++        vertexattrib_t *w = &glstate->vao->vertexattrib[i];
++        if(glprogram->va_size[i] && w->enabled && !w->divisor && (w->buffer || w->pointer) && !w->real_buffer)
++            p2_bgra_ok = 0;
++    }
 +    unsigned p2_bgra = 0;
      for(int i=0; i<hardext.maxvattrib; i++) 
      if(glprogram->va_size[i])   // only check used VA...
      {
-@@ -1461,6 +1484,8 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+@@ -1461,6 +1494,8 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
              else
                  gles_glDisableVertexAttribArray(i);
          }
@@ -214,7 +224,7 @@ index c21bcf1..6072743 100644
          // check if new value has to be sent to hardware
          if(v->enabled) {
              // array case
-@@ -1469,7 +1494,17 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+@@ -1469,7 +1504,17 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
                  || v->stride!=w->stride || v->buffer!=w->buffer || (w->real_buffer==0 && v->pointer!=ptr)
                  || v->real_buffer!=w->real_buffer || (w->real_buffer!=0 && v->real_pointer != w->real_pointer) 
                  || w->real_buffer!=glstate->bind_buffer.array) {
@@ -233,11 +243,11 @@ index c21bcf1..6072743 100644
                      // need to adjust, so first need the min/max (a shame as I already must have that somewhere)
                      int imin, imax;
                      if(type==0) {
-@@ -1571,6 +1606,7 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+@@ -1571,6 +1616,7 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
              gles_glDisableVertexAttribArray(i);
          }
      }
-+    if(p2_bgra_ok) gl4es_p2_bgra_mask(glstate->gleshard->program, p2_bgra);
++    if(p2_bgra_program) gl4es_p2_bgra_mask(glstate->gleshard->program, p2_bgra);   // 0 si conversion CPU
  }
  
  void realize_blitenv(int alpha) {
