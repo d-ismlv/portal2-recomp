@@ -10,6 +10,7 @@
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -65,9 +66,34 @@ static void tick(int signal, siginfo_t *info, void *context) {
     ++dropped;
 }
 
+#if TARGET_OS_IPHONE
+// Symboles du cache partagé masqués sur iOS (« <redacted> ») : on écrit
+// « bibliothèque+décalage », résolu sur le Mac par tools/ios_symbolize.py avec
+// les symboles de l'appareil (Xcode, iOS DeviceSupport). Chaînes gardées dans
+// une table (appelé par le seul thread d'écriture).
+static const char *located(const Dl_info *where, uintptr_t pc) {
+    static char *names[16384]; static uintptr_t pcs[16384];
+    unsigned h = (unsigned)((pc >> 2) * 2654435761u) & 16383u;
+    for (unsigned probe = 0; probe < 64; ++probe, h = (h + 1) & 16383u) {
+        if (pcs[h] == pc && names[h]) return names[h];
+        if (!names[h]) {
+            const char *base = strrchr(where->dli_fname, '/'); base = base ? base + 1 : where->dli_fname;
+            char text[256]; snprintf(text, sizeof(text), "%s+%#lx", base, (unsigned long)(pc - (uintptr_t)where->dli_fbase));
+            names[h] = strdup(text); pcs[h] = pc;
+            return names[h] ? names[h] : "?";
+        }
+    }
+    return where->dli_fname;
+}
+#endif
 static const char *symbol(uintptr_t pc) {
     Dl_info where;
-    if (pc && dladdr((void *)pc, &where)) return where.dli_sname ? where.dli_sname : where.dli_fname;
+    if (pc && dladdr((void *)pc, &where)) {
+#if TARGET_OS_IPHONE
+        if (!where.dli_sname || !strcmp(where.dli_sname, "<redacted>")) return located(&where, pc);
+#endif
+        return where.dli_sname ? where.dli_sname : where.dli_fname;
+    }
     return "?";
 }
 typedef struct { const char *name; uint64_t count; } Entry;
@@ -132,7 +158,30 @@ static void dump_chains(FILE *out) {
     }
 }
 
+// Tous les échantillons, une ligne par clé : « coups, principal, feuille, pile… » séparés par des tabulations
+// (P2_PROFILE_RAW=1, fichier <P2_PROFILE>.raw), pour une agrégation hors ligne
+// (tools/ios_symbolize.py résout les « bibliothèque+décalage » d'iOS).
+static void dump_raw(void) {
+    char path[1100], temporary[1110];
+    snprintf(path, sizeof(path), "%s.raw", output);
+    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+    FILE *out = fopen(temporary, "w");
+    if (!out) return;
+    for (uint32_t i = 0; i < SLOTS; ++i) {
+        if (__atomic_load_n(&used[i], __ATOMIC_ACQUIRE) != 2 || !hits[i]) continue;
+        const Key *key = &keys[i];
+        fprintf(out, "%u\t%d\t%s", (unsigned)hits[i], key->main, symbol(key->pc));
+        for (int d = 0; d < DEPTH && key->chain[d]; ++d) fprintf(out, "\t%s", symbol(key->chain[d]));
+        fputc('\n', out);
+    }
+    fclose(out);
+    rename(temporary, path);
+}
+
 static void dump(void) {
+    static int raw = -1;
+    if (raw < 0) raw = getenv("P2_PROFILE_RAW") != NULL;
+    if (raw) dump_raw();
     char temporary[1100];
     snprintf(temporary, sizeof(temporary), "%s.tmp", output);
     FILE *out = fopen(temporary, "w");
