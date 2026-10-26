@@ -128,8 +128,11 @@ static int gl_shim(CPU *c, const char *name) {
 // directement gl_call avec l'entrée, sans comparaison GLX ni recherche
 // dichotomique parmi ~180 noms à chaque appel (des millions par seconde).
 static int stream_enabled(void);
-static int stream_before(CPU *c, const char *name);
-static void stream_after(CPU *c, const char *name);
+// Rôle de chaque fonction GL pour le suivi des tampons, calculé une fois par
+// entrée (pas de comparaison de noms à chaque appel).
+enum { GL_KIND_OTHER = 1, GL_KIND_SUBDATA, GL_KIND_DATA, GL_KIND_MAP, GL_KIND_COPY_BUFFER, GL_KIND_PACK_READ };
+static int stream_before(CPU *c, int kind);
+static void stream_after(CPU *c, int kind);
 
 // Diagnostic P2_GL_TIMING=1 : temps réel cumulé par fonction GL (et échange
 // d'images, sdl_video.c), affiché toutes les 5 s, sans signaux.
@@ -234,17 +237,29 @@ static void trace_gl(CPU *c, const char *name) {
     }
 }
 static int gl_execute(CPU *c, const char *name, const RtGlEntry *entry, void *fn) {
-    if (stream_enabled() && stream_before(c, name)) return 1;
+    static uint8_t *kinds;
+    if (__builtin_expect(!kinds, 0)) kinds = calloc(rt_gl_entry_count, 1);
+    size_t index = (size_t)(entry - rt_gl_entries);
+    int kind = kinds ? kinds[index] : 0;
+    if (__builtin_expect(!kind, 0)) {
+        kind = !strcmp(name, "glBufferSubData") || !strcmp(name, "glBufferSubDataARB") ? GL_KIND_SUBDATA
+             : !strcmp(name, "glBufferData") || !strcmp(name, "glBufferDataARB") ? GL_KIND_DATA
+             : !strncmp(name, "glMapBuffer", 11) ? GL_KIND_MAP
+             : !strcmp(name, "glCopyBufferSubData") ? GL_KIND_COPY_BUFFER
+             : !strcmp(name, "glReadPixels") || !strcmp(name, "glGetTexImage") || !strncmp(name, "glGetCompressedTexImage", 23)
+                   ? GL_KIND_PACK_READ : GL_KIND_OTHER;
+        if (kinds) kinds[index] = (uint8_t)kind;
+    }
+    if (kind != GL_KIND_OTHER && stream_enabled() && stream_before(c, kind)) return 1;
     if (__builtin_expect(blit_trace_start != -1, 0)) trace_gl(c, name);
     int handled;
     if (__builtin_expect(!gl_timing(), 1)) handled = entry->thunk(c, fn);
     else {
         uint64_t start = mach_absolute_time();
         handled = entry->thunk(c, fn);
-        size_t index = (size_t)(entry - rt_gl_entries);
         gl_ticks[index] += mach_absolute_time() - start; ++gl_counts[index];
     }
-    if (stream_enabled()) stream_after(c, name);
+    if (kind == GL_KIND_DATA && stream_enabled()) stream_after(c, kind);
     return handled;
 }
 static int gl_resolve(const char *name, RtShimRoute *route) {
@@ -805,28 +820,27 @@ static void stream_buffer_data_before(uint32_t target, uint32_t size, uint32_t u
     buffer_data_ok_before = name && (int32_t)size >= 0 && valid_usage(usage) && !mapped && !(m && m->mapped);
 }
 // Avant le thunk : détourne les ajouts, marque les écritures possibles.
-static int stream_before(CPU *c, const char *name) {
+static int stream_before(CPU *c, int kind) {
     uint32_t a = c->esp + 4;
-    if (!strcmp(name, "glBufferSubData") || !strcmp(name, "glBufferSubDataARB")) {
+    if (kind == GL_KIND_SUBDATA) {
         uint32_t target = R32(a), offset = R32(a + 4), size = R32(a + 8), data = R32(a + 12);
         if (stream_subdata(c, target, offset, size, data)) return 1;
         Stream *st = stream_state(bound_buffer(target), 0);
         if (st) { uint64_t end = (uint64_t)offset + size; if (end > st->written_end) st->written_end = end > st->size ? st->size : (uint32_t)end; }
-    } else if (!strcmp(name, "glBufferData") || !strcmp(name, "glBufferDataARB")) {
+    } else if (kind == GL_KIND_DATA) {
         stream_buffer_data_before(R32(a), R32(a + 4), R32(a + 12));
-    } else if (!strncmp(name, "glMapBuffer", 11)) {
+    } else if (kind == GL_KIND_MAP) {
         stream_unknown(R32(a));
-    } else if (!strcmp(name, "glCopyBufferSubData")) {
+    } else if (kind == GL_KIND_COPY_BUFFER) {
         stream_unknown(R32(a + 4));                            // cible d'écriture
-    } else if (!strcmp(name, "glReadPixels") || !strcmp(name, "glGetTexImage") ||
-               !strncmp(name, "glGetCompressedTexImage", 23)) {
+    } else if (kind == GL_KIND_PACK_READ) {
         stream_unknown(GL_PIXEL_PACK_BUFFER);                  // le GPU peut écrire dans le tampon de pixels lié
     }
     return 0;
 }
 // Après le thunk : glBufferData n'est pris en compte que s'il a réussi.
-static void stream_after(CPU *c, const char *name) {
-    if (strcmp(name, "glBufferData") && strcmp(name, "glBufferDataARB")) return;
+static void stream_after(CPU *c, int kind) {
+    if (kind != GL_KIND_DATA) return;
     uint32_t a = c->esp + 4, target = R32(a), size = R32(a + 4), data = R32(a + 8);
     Stream *st = stream_state(bound_buffer(target), 1);
     if (!st) return;

@@ -358,6 +358,30 @@ void rt_libc_destroy(void) {
 }
 
 
+// Imports fréquents en jeu (P2_IMPORT_COUNTS) : corps partagés par
+// rt_libc_shim et par leurs routes directes (rt_libc_resolve).
+static void libc_case(CPU *c, int lower) {
+    int value = (int32_t)argument(c, 0);
+    if (value < -1 || value > 255) rt_trap(c, c->eip, "invalid ctype input");
+    c->eax = (uint32_t)(lower ? tolower(value) : toupper(value));
+}
+static void libc_casecmp(CPU *c, int whole) {
+    const char *lhs = string(c, argument(c, 0)), *rhs = string(c, argument(c, 1));
+    c->eax = (uint32_t)(whole ? strcasecmp(lhs, rhs) : strncasecmp(lhs, rhs, argument(c, 2)));
+}
+static int tolower_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_case(c, 1); return 1; }
+static int toupper_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_case(c, 0); return 1; }
+static int strcasecmp_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_casecmp(c, 1); return 1; }
+static int strncasecmp_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_casecmp(c, 0); return 1; }
+int rt_libc_resolve(const char *name, RtShimRoute *route) {
+    if (!strcmp(name, "tolower")) route->handler = tolower_handler;
+    else if (!strcmp(name, "toupper")) route->handler = toupper_handler;
+    else if (!strcmp(name, "strcasecmp")) route->handler = strcasecmp_handler;
+    else if (!strcmp(name, "strncasecmp")) route->handler = strncasecmp_handler;
+    else return 0;
+    return 1;
+}
+
 int rt_libc_shim(CPU *c, const char *name) {
     uint32_t a, b, n;
     if (!strcmp(name, "__errno_location")) c->eax = errno_slot(c);
@@ -673,8 +697,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         }
         c->eax = result ? a + (uint32_t)(result - source) : 0;
     } else if (!strcmp(name, "strcasecmp") || !strcmp(name, "strncasecmp")) {
-        const char *lhs = string(c, argument(c, 0)), *rhs = string(c, argument(c, 1));
-        c->eax = (uint32_t)(!strcmp(name, "strcasecmp") ? strcasecmp(lhs, rhs) : strncasecmp(lhs, rhs, argument(c, 2)));
+        libc_casecmp(c, name[3] == 'c');
     } else if (!strcmp(name, "strdup")) {
         a = argument(c, 0); n = rt_string_length(c, a);
         c->eax = rt_alloc(n + 1);
@@ -706,9 +729,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         c->eax = rt_alloc((uint32_t)size);
         if (c->eax) memcpy(GPTR(c->eax), message, size);
     } else if (!strcmp(name, "tolower") || !strcmp(name, "toupper")) {
-        int value = (int32_t)argument(c, 0);
-        if (value < -1 || value > 255) rt_trap(c, c->eip, "invalid ctype input");
-        c->eax = (uint32_t)(!strcmp(name, "tolower") ? tolower(value) : toupper(value));
+        libc_case(c, name[2] == 'l');
     } else if (!strcmp(name, "getppid")) {
         c->eax = (uint32_t)getppid();
     } else if (!strcmp(name, "strtol") || !strcmp(name, "strtoul")) {

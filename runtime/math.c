@@ -46,15 +46,20 @@ static const struct { const char *name; unary_d fd; unary_f ff; int flags; } una
     {"tanh", tanh, 0, 0}, {"tanhf", 0, tanhf, 0}, {"trunc", trunc, 0, 0},
 };
 
+static void run_unary(CPU *c, size_t i) {
+    double x, result;
+    if (unary[i].fd) { x = arg_d(c, 0); result = unary[i].fd(x); }
+    else { float xf = arg_f(c, 0); x = xf; result = unary[i].ff(xf); }
+    // Pour exp*, -inf → 0 n'est pas un sous-dépassement (argument non fini).
+    check(c, result, x, 0, 1, unary[i].flags);
+    rt_return_st0(c, result);
+}
+
+static int sincosf_handler(CPU *c, const char *name, void *data);
 int rt_math_shim(CPU *c, const char *name) {
     for (size_t i = 0; i < sizeof(unary) / sizeof(*unary); ++i) {
         if (strcmp(name, unary[i].name)) continue;
-        double x, result;
-        if (unary[i].fd) { x = arg_d(c, 0); result = unary[i].fd(x); }
-        else { float xf = arg_f(c, 0); x = xf; result = unary[i].ff(xf); }
-        // Pour exp*, -inf → 0 n'est pas un sous-dépassement (argument non fini).
-        check(c, result, x, 0, 1, unary[i].flags);
-        rt_return_st0(c, result);
+        run_unary(c, i);
         return 1;
     }
     double x, y, result;
@@ -82,14 +87,29 @@ int rt_math_shim(CPU *c, const char *name) {
         check(c, sv, x, 0, 1, 0);
         WD(s, sv); WD(co, cv);
         return 1;  // void : rien dans ST(0)
-    } else if (!strcmp(name, "sincosf")) {
-        float xf = arg_f(c, 0); uint32_t s = arg_u(c, 4), co = arg_u(c, 8);
-        float sv = sinf(xf), cv = cosf(xf);
-        check(c, sv, xf, 0, 1, 0);
-        WF(s, sv); WF(co, cv);
-        return 1;
-    } else return 0;
+    } else if (!strcmp(name, "sincosf")) return sincosf_handler(c, name, NULL);
+    else return 0;
     rt_return_st0(c, result);
     return 1;
 }
-RT_SHIM_PROVIDER(rt_math_shim)
+// Route directe (sans recherche par nom) : fonctions unaires par leur entrée
+// de table, sincosf par un handler dédié (appelée des dizaines de milliers de
+// fois par seconde en jeu) ; les autres gardent le fournisseur.
+static int unary_handler(CPU *c, const char *name, void *data) {
+    (void)name; run_unary(c, (size_t)(uintptr_t)data); return 1;
+}
+static int sincosf_handler(CPU *c, const char *name, void *data) {
+    (void)name; (void)data;
+    float xf = arg_f(c, 0); uint32_t s = arg_u(c, 4), co = arg_u(c, 8);
+    float sv = sinf(xf), cv = cosf(xf);
+    check(c, sv, xf, 0, 1, 0);
+    WF(s, sv); WF(co, cv);
+    return 1;
+}
+static int math_resolve(const char *name, RtShimRoute *route) {
+    for (size_t i = 0; i < sizeof(unary) / sizeof(*unary); ++i)
+        if (!strcmp(name, unary[i].name)) { route->handler = unary_handler; route->data = (void *)(uintptr_t)i; return 1; }
+    if (!strcmp(name, "sincosf")) { route->handler = sincosf_handler; return 1; }
+    return 0;
+}
+RT_SHIM_PROVIDER_RESOLVER(rt_math_shim, math_resolve)

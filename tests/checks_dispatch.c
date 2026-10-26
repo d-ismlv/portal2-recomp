@@ -2,6 +2,7 @@
 // refaire à chaque appel (cache par adresse cible), y compris entre threads.
 #include "checks.h"
 #include <fcntl.h>
+#include <math.h>
 #include <pthread.h>
 #include <sched.h>
 #include <signal.h>
@@ -152,4 +153,46 @@ RT_CHECK(import_dispatch_falls_back_to_full_chain) {
     flaky_enabled = 0;
     call_import(&c, a, 2); call_import(&c, a, 2);
     flaky_enabled = 1;
+}
+
+// Routes directes des imports fréquents (math, core, libc) : un handler est
+// mémorisé et donne le même résultat que la recherche par nom.
+static uint32_t route_call(const char *name, RtShimRoute *route, const uint32_t *args, unsigned count) {
+    CPU c; rt_cpu_reset(&c); c.esp = 0x20010000u;
+    for (unsigned i = 0; i < count; ++i) W32(c.esp + 4 + 4 * i, args[i]);
+    assert(rt_route_call(route, &c, name) == 1);
+    return c.eax;
+}
+RT_CHECK(dispatch_hot_imports_have_direct_routes) {
+    const char *names[] = {"tolower", "toupper", "strcasecmp", "strncasecmp", "memcpy", "memcmp", "memset",
+                           "strlen", "strcmp", "malloc", "free", "sinf", "acosf", "sincosf"};
+    CPU c; rt_cpu_reset(&c); c.esp = 0x20010000u;
+    for (unsigned i = 0; i < sizeof(names) / sizeof(*names); ++i) {
+        RtShimRoute route = {0};
+        // Résolution sans exécution utile : arguments sûrs pour chacun.
+        memset(GPTR(0x20011000u), 0, 64);
+        for (unsigned k = 0; k < 4; ++k) W32(c.esp + 4 + 4 * k, k < 2 ? 0x20011000u : 0);
+        c.eax = 0x20011000u;
+        if (!strcmp(names[i], "free") || !strcmp(names[i], "malloc")) W32(c.esp + 4, 0);
+        if (!strncmp(names[i], "to", 2)) W32(c.esp + 4, 'a');
+        if (!strcmp(names[i], "sincosf")) W32(c.esp + 12, 0x20011008u);
+        assert(rt_shim_route(&c, names[i], &route) == 1);
+        assert(route.handler != NULL);
+    }
+    RtShimRoute lower = {0}, casecmp = {0}, cmp = {0}, sincos = {0};
+    W32(c.esp + 4, 'A'); assert(rt_shim_route(&c, "tolower", &lower) == 1);
+    uint32_t a[] = {'Q'}; assert(route_call("tolower", &lower, a, 1) == 'q');
+    memcpy(GPTR(0x20011000u), "Portal", 7); memcpy(GPTR(0x20011010u), "PORTAL", 7);
+    uint32_t s[] = {0x20011000u, 0x20011010u, 4};
+    for (unsigned k = 0; k < 3; ++k) W32(c.esp + 4 + 4 * k, s[k]);
+    assert(rt_shim_route(&c, "strcasecmp", &casecmp) == 1);
+    assert(route_call("strcasecmp", &casecmp, s, 2) == 0);
+    assert(rt_shim_route(&c, "memcmp", &cmp) == 1);
+    assert((int32_t)route_call("memcmp", &cmp, s, 3) > 0);   // 'o' > 'O'
+    float x = 0.5f; uint32_t bits; memcpy(&bits, &x, 4);
+    uint32_t sc[] = {bits, 0x20011020u, 0x20011024u};
+    W32(c.esp + 4, bits); W32(c.esp + 8, 0x20011020u); W32(c.esp + 12, 0x20011024u);
+    assert(rt_shim_route(&c, "sincosf", &sincos) == 1);
+    route_call("sincosf", &sincos, sc, 3);
+    assert(RF(0x20011020u) == sinf(0.5f) && RF(0x20011024u) == cosf(0.5f));
 }

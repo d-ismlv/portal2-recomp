@@ -14,7 +14,7 @@
 #include <unistd.h>
 
 #define SLOTS 65536u
-#define DEPTH 12
+#define DEPTH 24
 typedef struct { uintptr_t pc, caller, caller2; int main; uintptr_t chain[DEPTH]; } Key;
 static Key keys[SLOTS];
 static uint32_t used[SLOTS];   // 0 libre, 1 en cours, 2 prêt (accès __atomic)
@@ -147,15 +147,32 @@ static void dump(void) {
     rename(temporary, output);
 }
 
+// P2_PROFILE_DELAY=<s> : l'échantillonnage ne commence qu'après s secondes
+// (régime établi, sans le chargement de la carte).
+static int wall_mode;
+static pthread_t main_thread;
+static void *wall_sampler(void *unused);
+static void start_sampling(void) {
+    if (wall_mode) {
+        pthread_t thread;
+        pthread_create(&thread, NULL, wall_sampler, NULL);
+        pthread_detach(thread);
+    } else {
+        struct itimerval timer = {{0, 1000}, {0, 1000}};
+        setitimer(ITIMER_PROF, &timer, NULL);
+    }
+}
+
 static void *writer(void *unused) {
     (void)unused;
+    const char *delay = getenv("P2_PROFILE_DELAY");
+    if (delay && atoi(delay) > 0) { sleep((unsigned)atoi(delay)); start_sampling(); }
     for (;;) { sleep(5); dump(); }
     return NULL;
 }
 
 // P2_PROFILE_WALL=1 : échantillonne le thread principal en temps réel (même
 // bloqué) en lui envoyant SIGPROF toutes les millisecondes ; montre où il attend.
-static pthread_t main_thread;
 static void *wall_sampler(void *unused) {
     (void)unused;
     struct timespec period = {0, 1000000};
@@ -171,15 +188,11 @@ __attribute__((constructor)) static void start_profiler(void) {
     action.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&action.sa_mask);
     sigaction(SIGPROF, &action, NULL);
+    wall_mode = getenv("P2_PROFILE_WALL") != NULL;
+    main_thread = pthread_self();   // constructeur : thread principal
+    const char *delay = getenv("P2_PROFILE_DELAY");
+    if (!delay || atoi(delay) <= 0) start_sampling();
     pthread_t thread;
-    if (getenv("P2_PROFILE_WALL")) {
-        main_thread = pthread_self();   // constructeur : thread principal
-        pthread_create(&thread, NULL, wall_sampler, NULL);
-        pthread_detach(thread);
-    } else {
-        struct itimerval timer = {{0, 1000}, {0, 1000}};
-        setitimer(ITIMER_PROF, &timer, NULL);
-    }
     pthread_create(&thread, NULL, writer, NULL);
     pthread_detach(thread);
 }
