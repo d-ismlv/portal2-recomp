@@ -120,16 +120,20 @@ static void update_move_response(CPU *c) {
     response = now[0] ? (int)strtol(now, NULL, 10) : -1;
 }
 
-// ---- Commande console sans argument, exécutée au prochain relevé ----------
-// Trouvée par ICvar (FindCommandBase, comme les variables), puis son rappel
+// ---- Commandes console exécutées au prochain relevé --------------------
+// Trouvées par ICvar (FindCommandBase, comme les variables), puis leur rappel
 // appelé directement avec un CCommand invité : ConCommand garde le rappel à
 // +24 et ses drapeaux à +32 (bit 1 : rappel à arguments, bit 2 : interface) ;
 // CCommand = argc, taille d'argv[0], deux tampons de 512 octets, 64 pointeurs.
-// Le rappel ne passe pas par le contrôle sv_cheats du moteur : réservé aux
-// diagnostics (getpos).
-static char pending_command[32];
-void rt_ios_console_command(const char *name) { snprintf(pending_command, sizeof(pending_command), "%s", name); }
-static void run_console_command(CPU *c, const char *name) {
+// Diagnostics seulement (getpos ; P2_IOS_AUTOEXEC pour le banc). Une commande
+// du serveur (setpos…) passe par « cmd », qui l'envoie comme un joueur.
+static char pending_command[256];
+void rt_ios_console_command(const char *line) { snprintf(pending_command, sizeof(pending_command), "%s", line); }
+static void run_console_command(CPU *c, const char *line) {
+    enum { ARGV = 64, LENGTH = 512, SIZE = 8 + 2 * LENGTH + 4 * ARGV };
+    char name[64] = {0};
+    sscanf(line, "%63s", name);
+    if (!name[0] || strlen(line) >= LENGTH) return;
     if (!icvar) find_convar(c, "joy_response_move");   // initialise icvar
     if (icvar <= 1) return;
     uint32_t text = guest_text(name);
@@ -142,18 +146,53 @@ static void run_console_command(CPU *c, const char *name) {
     }
     uint32_t callback = R32(base + 24); uint8_t bits = *(uint8_t *)GPTR(base + 32);
     if (!plausible(callback) || (bits & 4)) { fprintf(stderr, "[ios] commande %s : rappel inattendu\n", name); return; }
-    enum { ARGV = 64, LENGTH = 512, SIZE = 8 + 2 * LENGTH + 4 * ARGV };
     uint32_t command = rt_alloc(SIZE);
     if (!command) return;
     memset(GPTR(command), 0, SIZE);
-    size_t n = strlen(name);
-    W32(command, 1); W32(command + 4, (uint32_t)n);
-    memcpy(GPTR(command + 8), name, n + 1);                 // m_pArgSBuffer
-    memcpy(GPTR(command + 8 + LENGTH), name, n + 1);        // m_pArgvBuffer
-    W32(command + 8 + 2 * LENGTH, command + 8 + LENGTH);    // m_ppArgv[0]
-    fprintf(stderr, "[ios] commande %s\n", name);
+    char *full = GPTR(command + 8), *argv = GPTR(command + 8 + LENGTH);
+    snprintf(full, LENGTH, "%s", line);
+    // Mots séparés par des espaces, chacun terminé par un zéro dans m_pArgvBuffer.
+    uint32_t argc = 0, at = 0;
+    for (const char *p = line; *p && argc < ARGV;) {
+        while (*p == ' ') ++p;
+        if (!*p) break;
+        W32(command + 8 + 2 * LENGTH + 4 * argc, command + 8 + LENGTH + at);
+        while (*p && *p != ' ' && at < LENGTH - 1) argv[at++] = *p++;
+        argv[at++] = 0; ++argc;
+    }
+    W32(command, argc); W32(command + 4, (uint32_t)strlen(name));
+    fprintf(stderr, "[ios] commande %s\n", line);
     if (bits & 2) rt_invoke(c, callback, &command, 1); else rt_invoke(c, callback, NULL, 0);
     rt_free(command);
+}
+// P2_IOS_AUTOEXEC="var=valeur;commande args;pause 2;…" : exécuté 5 s après la
+// première entrée en partie (banc : sv_cheats=1;cmd setpos …;cmd setang …) ;
+// « pause N » attend N secondes avant la suite.
+static void autoexec(CPU *c) {
+    static int done; static uint64_t resume; static char plan[1024]; static char *next, *save;
+    if (done || ui_visible) return;
+    uint64_t now = SDL_GetTicks64();
+    if (!next) {
+        const char *e = getenv("P2_IOS_AUTOEXEC");
+        if (!e || !*e) { done = 1; return; }
+        snprintf(plan, sizeof(plan), "%s", e);
+        next = strtok_r(plan, ";", &save);
+        resume = now + 5000;
+    }
+    while (next && now >= resume) {
+        char *item = next; next = strtok_r(NULL, ";", &save);
+        while (*item == ' ') ++item;
+        char *equal = strchr(item, '=');
+        double seconds;
+        if (sscanf(item, "pause %lf", &seconds) == 1) resume = now + (uint64_t)(seconds * 1000);
+        else if (equal && !strchr(item, ' ')) {
+            *equal = 0;
+            uint32_t convar = find_convar(c, item);
+            int ok = convar && set_convar(c, convar, equal + 1);
+            fprintf(stderr, "[ios] %s = %s : %s\n", item, equal + 1, ok ? "posé" : "échec");
+        } else run_console_command(c, item);
+    }
+    if (!next) done = 1;
 }
 
 void rt_ios_game_state_poll(void) {
@@ -180,6 +219,7 @@ void rt_ios_game_state_poll(void) {
     if (visible != ui_visible) fprintf(stderr, "[ios] interface du jeu %s\n", visible ? "affichée" : "masquée");
     ui_visible = visible;
     if (linear_wanted || saved_response[0]) update_move_response(c);
-    if (pending_command[0]) { char name[32]; snprintf(name, sizeof(name), "%s", pending_command); pending_command[0] = 0; run_console_command(c, name); }
+    if (pending_command[0]) { char line[256]; snprintf(line, sizeof(line), "%s", pending_command); pending_command[0] = 0; run_console_command(c, line); }
+    autoexec(c);
 }
 #endif

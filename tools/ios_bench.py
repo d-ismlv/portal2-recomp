@@ -61,6 +61,22 @@ def stop_game(udid):
     time.sleep(2)
 
 
+def in_game_fps(text, teleported):
+    """Cadences mesurées en partie seulement : après l'entrée en jeu (et après
+    la dernière commande de P2_IOS_AUTOEXEC si elle sert à se placer), en
+    sautant les premières mesures (chargement de textures, transition)."""
+    started, skip, values = False, 0, []
+    for line in text.splitlines():
+        if '[ios] interface du jeu masquée' in line and not teleported: started, skip, values = True, 5, []
+        elif teleported and line.startswith('[ios] commande cmd '): started, skip, values = True, 3, []
+        elif '[ios] interface du jeu affichée' in line: started = False
+        m = re.search(r'\[diag\] frame \d+, ([0-9.]+) fps', line)
+        if m and started:
+            if skip: skip -= 1
+            else: values.append(float(m.group(1)))
+    return values
+
+
 def with_settings(text, values):
     for key, value in values.items():
         pattern = rf'("setting\.{key}"\s+)"[^"]*"'
@@ -103,9 +119,9 @@ def main():
             time.sleep(args.seconds)
             log = OUT / f'game.{name}.log'
             pull(udid, 'Documents/game.log', log)
-            fps = [float(m) for m in re.findall(r'\[diag\] frame \d+, ([0-9.]+) fps', log.read_text())]
+            fps = in_game_fps(log.read_text(), 'P2_IOS_AUTOEXEC' in env)
             size = re.search(r'contexte ES 3, FBO système \d+, (\d+x\d+)', log.read_text())
-            steady = fps[len(fps) // 2:] or [0]
+            steady = fps or [0]
             results.append((name, size.group(1) if size else '?', statistics.mean(steady), min(steady), max(steady)))
             print(f'{name:12} {results[-1][1]:>10}  moyenne {results[-1][2]:5.1f}  min {results[-1][3]:5.1f}  '
                   f'max {results[-1][4]:5.1f} i/s ({1000 / max(results[-1][2], 0.1):.1f} ms/image)', flush=True)
