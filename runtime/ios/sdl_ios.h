@@ -4,7 +4,8 @@
 // remplacent les appels SDL qui exposent des tailles ou des coordonnées :
 // fenêtre haute résolution, tailles et modes multipliés par l'échelle,
 // coordonnées de souris et événements de fenêtre convertis.
-// P2_IOS_RENDER_SCALE=1 garde le rendu en points (plus rapide).
+// Simulateur : rendu en points par défaut (P2_IOS_RENDER_SCALE=native pour
+// l'écran entier) ; appareil : pixels réels (P2_IOS_RENDER_SCALE=1 pour les points).
 #pragma once
 #include <SDL.h>
 

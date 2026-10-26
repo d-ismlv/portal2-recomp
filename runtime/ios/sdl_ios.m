@@ -5,13 +5,20 @@
 #include <SDL.h>
 #include <math.h>
 #include <stdlib.h>
+#include <string.h>
 
-// Échelle points -> pixels : celle de l'écran, sauf P2_IOS_RENDER_SCALE=1.
+// Échelle points -> pixels : celle de l'écran sur appareil. Sur simulateur
+// (rendu OpenGL ES logiciel, 0,5 image/s en 2622×1206), 1 par défaut.
+// P2_IOS_RENDER_SCALE=1 ou =native force l'un ou l'autre.
 float rt_ios_render_scale(void) {
     static float scale;
     if (scale > 0) return scale;
     const char *e = getenv("P2_IOS_RENDER_SCALE");
-    if (e && *e && atof(e) <= 1.0) return scale = 1.0f;
+    int native_requested = e && !strcmp(e, "native");
+    if (e && *e && !native_requested && atof(e) <= 1.0) return scale = 1.0f;
+#if TARGET_OS_SIMULATOR
+    if (!native_requested) return scale = 1.0f;
+#endif
     __block CGFloat native = 1;
     if ([NSThread isMainThread]) native = UIScreen.mainScreen.nativeScale;
     else dispatch_sync(dispatch_get_main_queue(), ^{ native = UIScreen.mainScreen.nativeScale; });
