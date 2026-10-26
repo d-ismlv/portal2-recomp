@@ -1,16 +1,24 @@
-# État — 25 octobre 2026, 21 h (reprise Claude)
+# État — 26 octobre 2026, nuit (reprise Claude)
 
-**On entre en jeu.** Le build natif ARM64 charge le menu puis la première
-carte (`sp_a1_intro1`, chambre de repos, « LOOK UP ») et la rend sans
-erreur, en fenêtre cachée (vérifié sur `cc21499`, -O1). En fenêtre cachée le
-moteur dort 50 ms par image faute de focus (~15 fps) ; sans ce sommeil
-(chargement) on mesure 200-250 fps. Pas encore vérifié : contrôles
-clavier/souris, son audible, cadence réelle avec focus, suite de la partie.
+**Le jeu est jouable** (testé par l'utilisateur : menus, clavier/souris, son,
+voix, musique, début de partie, retour au menu, Cmd-Q). Performances
+mesurées en jeu (sp_a1_intro1, focus simulé, fenêtre cachée, M3 Pro) :
+
+| build | 1280×720 | 2560×1440 |
+|---|---|---|
+| `-O1` mémoire contrôlée | ~117 fps | — |
+| `--release` (`-O2 --fast-memory`) | 200-250 fps | ~180 fps |
+
+Le thread principal attend surtout le pilote OpenGL d'Apple (soumissions
+Metal sur glBufferSubData de tampons en vol, compilation GLSL à la volée,
+mise en cache par togl dans `update/glshaders.cfg`). La carte graphique a de
+la marge : la cadence varie peu avec la résolution.
 
 Lancer (depuis ce dossier, client Steam ouvert) :
 
 ```sh
-python3 tools/build_game.py            # tout le jeu, -O1 (≈ 10 min à froid)
+python3 tools/build_game.py --release  # pour jouer : -O2 sans contrôle mémoire (≈ 10 min à froid)
+python3 tools/build_game.py            # diagnostic : -O1, mémoire contrôlée (≈ 20 min à froid)
 SteamAppId=620 python3 tools/run_game.py --show --timeout 3600
 ```
 
