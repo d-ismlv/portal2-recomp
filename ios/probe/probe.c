@@ -8,6 +8,9 @@
 #include <sys/mman.h>
 #include <sys/stat.h>
 #include "gl4esinit.h"
+#if __has_include(<os/proc.h>)
+#include <os/proc.h>
+#endif
 
 typedef void (*clear_color_fn)(float, float, float, float);
 typedef void (*clear_fn)(unsigned);
@@ -26,9 +29,27 @@ static void fb_size(int *w, int *h) { *w = fb_w; *h = fb_h; }
 
 int main(int argc, char **argv) {
     (void)argc; (void)argv;
+    // Sur appareil, sortie dans Documents/probe.log (rapatriée par tools/ios_device.sh).
+    if (getenv("P2_PROBE_LOG") && getenv("HOME")) {
+        char path[1024]; snprintf(path, sizeof(path), "%s/Documents/probe.log", getenv("HOME"));
+        freopen(path, "w", stdout);
+    }
+    setvbuf(stdout, NULL, _IONBF, 0);
     // 1. Espace invité : 4 Go + garde, sans droit (comme rt_init).
     void *space = mmap(NULL, (1ull << 32) + 65536, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
     printf("probe: guest space %s\n", space == MAP_FAILED ? "FAILED" : "ok");
+    if (space == MAP_FAILED) {   // plus grande réservation possible, par dichotomie (Mo)
+        unsigned long lo = 0, hi = 4096 + 1;
+        while (hi - lo > 1) {
+            unsigned long mid = (lo + hi) / 2;
+            void *p = mmap(NULL, mid << 20, PROT_NONE, MAP_PRIVATE | MAP_ANON, -1, 0);
+            if (p == MAP_FAILED) hi = mid; else { munmap(p, mid << 20); lo = mid; }
+        }
+        printf("probe: largest reservation %lu MB\n", lo);
+    } else munmap(space, (1ull << 32) + 65536);
+#if __has_include(<os/proc.h>)
+    printf("probe: available memory %zu MB\n", os_proc_available_memory() >> 20);
+#endif
     // 2. Données du jeu, lues directement depuis le disque de l'hôte.
     const char *data = getenv("P2_PROBE_FILE");
     struct stat st;

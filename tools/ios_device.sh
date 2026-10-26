@@ -1,0 +1,61 @@
+#!/bin/bash
+# Portal 2 sur un appareil iOS réel, par câble (xcrun devicectl).
+#   tools/ios_device.sh probe [VAR=valeur...]   sonde (P2_PROBE_CLIP=1 : découpe au plan proche)
+#   tools/ios_device.sh install                  installe build/ios/device/Portal2.app
+#   tools/ios_device.sh data                     copie les données dans Documents (prep, game, linux)
+#   tools/ios_device.sh run [secondes] [VAR=valeur...]   lance, puis rapatrie Documents/game.log
+# Appareil : P2_DEVICE (UDID ou nom), sinon le premier iPhone/iPad connecté.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+DEVICE=${P2_DEVICE:-$(xcrun devicectl list devices 2>/dev/null |
+  awk '/physical/ && / connected|available \(paired\)/ {for (i = 1; i <= NF; ++i) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) {print $i; exit}}')}
+[ -n "$DEVICE" ] || { echo "aucun appareil connecté (câble, appareil déverrouillé, mode développeur)"; exit 1; }
+APP_ID=fr.kanapitsas.portal2
+GAME_ROOT=$(python3 -c "import json;print(json.load(open('config/local.json'))['game_root'])")
+LINUX_ROOT=$(python3 -c "import json;print(json.load(open('config/local.json'))['linux_root'])")
+dc() {  # sous-commande de trois mots, --device, puis le reste (options et arguments)
+  xcrun devicectl "${@:1:3}" --device "$DEVICE" "${@:4}"
+}
+env_json() {  # VAR=valeur... -> {"VAR":"valeur",...}
+  python3 -c 'import json,sys; print(json.dumps(dict(a.split("=",1) for a in sys.argv[1:])))' "$@"
+}
+copy_to() {  # source destination (relative au conteneur de données)
+  dc device copy to --domain-type appDataContainer --domain-identifier "$1" --source "$2" --destination "$3"
+}
+
+case "${1:-}" in
+probe)
+  shift
+  dc device install app build/ios/device/probe.app >/dev/null
+  dc device process launch --terminate-existing --environment-variables "$(env_json P2_PROBE_LOG=1 "$@")" \
+    fr.kanapitsas.p2probe >/dev/null
+  sleep "${PROBE_SECONDS:-20}"
+  mkdir -p build/ios/device
+  dc device copy from --domain-type appDataContainer --domain-identifier fr.kanapitsas.p2probe \
+    --source Documents/probe.log --destination build/ios/device/probe.log >/dev/null
+  cat build/ios/device/probe.log
+  ;;
+install)
+  dc device install app build/ios/device/Portal2.app
+  ;;
+data)
+  # Sans la bande son ni sdk_content (inutiles au jeu) : ~11,5 Go.
+  copy_to $APP_ID build/game/prep Documents/prep
+  copy_to $APP_ID "$LINUX_ROOT" Documents/linux
+  for d in bin platform update portal2 portal2_dlc1 portal2_dlc2; do
+    [ -e "$GAME_ROOT/$d" ] && copy_to $APP_ID "$GAME_ROOT/$d" "Documents/game/$d"
+  done
+  ;;
+run)
+  shift
+  SECONDS_MAX=${1:-180}; shift || true
+  dc device process launch --terminate-existing \
+    --environment-variables "$(env_json P2_LOG_FILE=Documents/game.log P2_FRAME_LOG=1 "$@")" $APP_ID
+  sleep "$SECONDS_MAX"
+  mkdir -p build/ios/device
+  dc device copy from --domain-type appDataContainer --domain-identifier $APP_ID \
+    --source Documents/game.log --destination build/ios/device/game.log
+  echo "journal : build/ios/device/game.log ($(wc -l < build/ios/device/game.log) lignes)"
+  ;;
+*) sed -n '2,7p' "$0"; exit 2 ;;
+esac

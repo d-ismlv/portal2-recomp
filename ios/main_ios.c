@@ -4,7 +4,8 @@
 //
 // Arguments : ceux du lancement (simctl launch … -- arguments), sinon le
 // fichier launch.args du paquet (un argument par ligne, # pour commenter).
-// --user-dir est ajouté s'il manque : Documents/portal2-userdata du conteneur.
+// --user-dir, --images, --game-dir et --linux-root manquants : dossiers
+// portal2-userdata, prep, game et linux de Documents (s'ils existent).
 #include <SDL_main.h>
 #include <limits.h>
 #include <mach-o/dyld.h>
@@ -35,7 +36,12 @@ static void read_launch_file(const char *bundle) {
 
 int main(int argc, char **argv) {
     // Journal fiable : la console de simctl perd la fin quand le processus meurt.
-    const char *log = getenv("P2_LOG_FILE");
+    const char *log = getenv("P2_LOG_FILE");   // relatif : au conteneur de l'app (HOME)
+    char log_path[PATH_MAX];
+    if (log && *log && *log != '/' && getenv("HOME")) {
+        snprintf(log_path, sizeof(log_path), "%s/%s", getenv("HOME"), log);
+        log = log_path;
+    }
     if (log && *log && freopen(log, "w", stderr)) {
         dup2(fileno(stderr), fileno(stdout));
         setvbuf(stderr, NULL, _IONBF, 0);
@@ -62,17 +68,28 @@ int main(int argc, char **argv) {
     push(argc > 0 ? argv[0] : "portal2");
     if (argc > 1) for (int i = 1; i < argc; ++i) push(argv[i]);
     else read_launch_file(bundle);
-    int has_user = 0;
-    for (int i = 1; i < count; ++i) has_user |= !strcmp(arguments[i], "--user-dir");
-    if (!has_user && getenv("HOME")) {
-        char user[PATH_MAX], documents[PATH_MAX];
+    // Options du runtime absentes : dossiers de Documents (sur appareil, les
+    // données du jeu y sont copiées ; voir tools/ios_device.sh). Elles
+    // précèdent « -- » : insérées en tête.
+    if (getenv("HOME")) {
+        char documents[PATH_MAX];
         snprintf(documents, sizeof(documents), "%s/Documents", getenv("HOME"));
-        snprintf(user, sizeof(user), "%s/portal2-userdata", documents);
-        mkdir(documents, 0755); mkdir(user, 0755);
-        // Les options du runtime précèdent « -- » : insérer en tête.
-        memmove(arguments + 3, arguments + 1, (size_t)(count - 1) * sizeof(*arguments));
-        arguments[1] = strdup("--user-dir"); arguments[2] = strdup(user);
-        count += 2;
+        mkdir(documents, 0755);
+        static const struct { const char *option, *folder; int create; } defaults[] = {
+            {"--user-dir", "portal2-userdata", 1}, {"--images", "prep", 0},
+            {"--game-dir", "game", 0}, {"--linux-root", "linux", 0}};
+        for (size_t d = 0; d < sizeof(defaults) / sizeof(*defaults) && count + 2 < 256; ++d) {
+            int present = 0;
+            for (int i = 1; i < count; ++i) present |= !strcmp(arguments[i], defaults[d].option);
+            char path[PATH_MAX]; struct stat st;
+            snprintf(path, sizeof(path), "%s/%s", documents, defaults[d].folder);
+            if (present) continue;
+            if (defaults[d].create) mkdir(path, 0755);
+            else if (stat(path, &st) || !S_ISDIR(st.st_mode)) continue;
+            memmove(arguments + 3, arguments + 1, (size_t)(count - 1) * sizeof(*arguments));
+            arguments[1] = strdup(defaults[d].option); arguments[2] = strdup(path);
+            count += 2;
+        }
     }
     arguments[count] = NULL;
     fprintf(stderr, "[ios] %d arguments, Steam : stub iOS (%s)\n", count, exe);

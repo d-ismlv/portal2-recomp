@@ -5,7 +5,8 @@ Même C généré que le build macOS (tools/build_game.py, génération et cache
 d'objets réutilisés sans modification), compilé pour iOS et lié avec les
 dépendances de work/ios-deps (SDL2, FreeType, gl4es ; voir son build.sh), le
 stub Steam et fontconfig minimal du build iOS (runtime/ios). Produit
-build/ios/<cible>/Portal2.app, signée ad hoc pour le simulateur.
+build/ios/<cible>/Portal2.app, signée ad hoc pour le simulateur, avec le profil
+obtenu par Xcode pour un appareil (ios/signing).
 
     python3 tools/build_ios.py                       # simulateur
     xcrun simctl install booted build/ios/sim/Portal2.app
@@ -90,8 +91,13 @@ def main():
                            PLATFORM=target['plist']).items():
         plist = plist.replace(f'@{key}@', value)
     (app / 'Info.plist').write_text(plist)
+    # Lancement depuis l'écran d'accueil : arguments du jeu par défaut (les
+    # dossiers de données sont ajoutés par ios/main_ios.c).
+    (app / 'launch.args').write_text('--\n-game\nportal2\n-novid\n-fullscreen\n')
     if args.target == 'sim':
         subprocess.run(['codesign', '-s', '-', '-f', str(app)], check=True, capture_output=True)
+    else:
+        subprocess.run([sys.executable, str(ROOT / 'ios/signing/sign.py'), str(app)], check=True)
     size = (app / 'portal2').stat().st_size
     print(f'{app} : exécutable {size / 1e6:.0f} Mo, {time.time() - started:.0f} s au total')
 
