@@ -3,7 +3,8 @@
 // runtime (src/main.c, compilé avec -Dmain=p2_main).
 //
 // Arguments : ceux du lancement (simctl launch … -- arguments), sinon le
-// fichier launch.args du paquet (un argument par ligne, # pour commenter).
+// fichier launch.args du paquet (un argument par ligne, # pour commenter),
+// complété par Documents/launch.args s'il existe.
 // --user-dir, --images, --game-dir et --linux-root manquants : dossiers
 // portal2-userdata, prep, game et linux de Documents (s'ils existent).
 #include <SDL_main.h>
@@ -67,7 +68,16 @@ int main(int argc, char **argv) {
     setenv("SteamGameId", "620", 0);
     push(argc > 0 ? argv[0] : "portal2");
     if (argc > 1) for (int i = 1; i < argc; ++i) push(argv[i]);
-    else read_launch_file(bundle);
+    else {
+        read_launch_file(bundle);
+        // Documents/launch.args (facultatif) : arguments du jeu ajoutés, par
+        // exemple « +map sp_a2_laser_intro » pour démarrer dans une salle.
+        if (getenv("HOME")) {
+            char documents[PATH_MAX];
+            snprintf(documents, sizeof(documents), "%s/Documents", getenv("HOME"));
+            read_launch_file(documents);
+        }
+    }
     // Options du runtime absentes : dossiers de Documents (sur appareil, les
     // données du jeu y sont copiées ; voir tools/ios_device.sh). Elles
     // précèdent « -- » : insérées en tête.

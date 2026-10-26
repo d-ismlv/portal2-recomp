@@ -1,9 +1,10 @@
 // Commandes tactiles de Portal 2 sur iPhone/iPad.
 //
-// Une surcouche UIKit posée sur la fenêtre de SDL, toujours affichée (le moteur
-// ne signale pas quand il est en partie : il ne capture jamais la souris sur
-// iOS). Elle traduit les doigts en ce que le jeu comprend par défaut, clavier
-// et souris :
+// Une surcouche UIKit posée sur la fenêtre de SDL, affichée en partie
+// seulement : quand l'interface du jeu est visible (menus, pause, écrans de
+// chargement ; game_state.c le demande au moteur), elle s'efface et laisse les
+// doigts à SDL, pour qui un toucher est un clic. En partie, elle traduit les
+// doigts en ce que le jeu comprend par défaut, clavier et souris :
 // - stick gauche : déplacement, touches W/A/S/D (8 directions, zone morte) ;
 // - stick droit : caméra, mouvements de souris relatifs à vitesse
 //   proportionnelle à l'inclinaison (courbe quadratique pour viser finement) ;
@@ -11,9 +12,7 @@
 // - portails : une paire bleu (clic gauche) / orange (clic droit) dans chaque
 //   coin du haut, pour la main libre ;
 // - icônes : sauter (espace), s'accroupir (Ctrl gauche), utiliser (E),
-//   pause (Échap) ;
-// - toucher bref sans glissement hors des boutons : clic gauche à cet endroit
-//   (menus). En jeu, il tire donc aussi un portail bleu.
+//   pause (Échap).
 // Avec une manette ou un clavier connecté, elle se cache jusqu'au premier
 // toucher. P2_TOUCH_CONTROLS=0 la désactive, =1 l'affiche toujours ; P2_TOUCH_LOOK règle la vitesse
 // de la caméra (1 par défaut).
@@ -31,14 +30,14 @@
 #include <stdio.h>
 #include <stdlib.h>
 
+int rt_ios_game_ui_visible(void);   // game_state.c
+
 typedef enum { ROLE_MOVE, ROLE_LOOK, ROLE_BUTTON } Role;
 typedef enum { KEY_SPACE, KEY_CTRL, KEY_E, KEY_ESCAPE, MOUSE_LEFT, MOUSE_RIGHT, ACTION_COUNT } Action;
 typedef struct { Action action; NSString *symbol; UIColor *color; CGPoint at; CGFloat size; } Button;
 enum { MAX_BUTTONS = 10 };
 
 static const CGFloat kButtonSize = 54, kPortalSize = 60;
-static const NSTimeInterval kTapTime = 0.25;   // toucher bref = clic
-static const CGFloat kTapSlop = 12;            // points de glissement tolérés pour un clic
 static float look_speed(void) {
     static float speed;
     if (!speed) { const char *e = getenv("P2_TOUCH_LOOK"); speed = e && atof(e) > 0 ? (float)atof(e) : 1.0f; }
@@ -53,9 +52,9 @@ static void redraw(UIView *view) {
     [CATransaction flush];
 }
 
-// Doigt suivi : rôle, point de départ, dernier point, instant du toucher.
+// Doigt suivi : rôle, action (bouton), point de départ, dernier point.
 @interface P2Finger : NSObject
-@property Role role; @property Action action; @property CGPoint start, at; @property NSTimeInterval began;
+@property Role role; @property Action action; @property CGPoint start, at;
 @end
 @implementation P2Finger
 @end
@@ -70,6 +69,7 @@ static void redraw(UIView *view) {
     int held[ACTION_COUNT];   // nombre de doigts par action
     BOOL wasd[4];             // W, A, S, D enfoncées
     BOOL concealed;           // cachée pour une manette ou un clavier
+    BOOL menu;                // interface du jeu affichée : surcouche effacée
     NSTimer *tick;            // caméra : un pas par image tant que le stick est incliné
     float lookCarry[2];       // fractions de comptes de souris reportées
 }
@@ -105,6 +105,12 @@ static void redraw(UIView *view) {
 // fenêtre), suivre la taille de la fenêtre, tourner la caméra.
 - (void)step {
     UIView *host = self.superview;
+    BOOL ui = rt_ios_game_ui_visible() != 0;
+    if (ui != menu) {
+        menu = ui;
+        if (menu) [self releaseAll];
+        redraw(self);
+    }
     if (host.subviews.lastObject != self) [host bringSubviewToFront:self];
     if (!CGRectEqualToRect(self.frame, host.bounds)) { self.frame = host.bounds; redraw(self); }
     for (P2Finger *f in fingers.objectEnumerator) {
@@ -124,6 +130,16 @@ static void redraw(UIView *view) {
     }
 }
 
+// Hors partie, les doigts passent à la vue de SDL (clics dans les menus).
+- (UIView *)hitTest:(CGPoint)point withEvent:(UIEvent *)event {
+    return menu ? nil : [super hitTest:point withEvent:event];
+}
+- (void)releaseAll {
+    for (P2Finger *f in fingers.objectEnumerator) if (f.role == ROLE_BUTTON) [self action:f.action down:NO];
+    [fingers removeAllObjects];
+    [self updateMove];
+}
+
 // ---- événements SDL ----
 - (void)key:(SDL_Scancode)code down:(BOOL)down {
     SDL_Event e = {0};
@@ -140,14 +156,6 @@ static void redraw(UIView *view) {
     e.button.state = down ? SDL_PRESSED : SDL_RELEASED; e.button.clicks = 1;
     e.button.x = (Sint32)p.x; e.button.y = (Sint32)p.y;
     SDL_PushEvent(&e);
-}
-- (void)click:(CGPoint)p {
-    SDL_Event e = {0};
-    e.type = SDL_MOUSEMOTION; e.motion.windowID = SDL_GetWindowID(window);
-    e.motion.x = (Sint32)p.x; e.motion.y = (Sint32)p.y;
-    SDL_PushEvent(&e);
-    [self mouseButton:SDL_BUTTON_LEFT down:YES at:p];
-    [self mouseButton:SDL_BUTTON_LEFT down:NO at:p];
 }
 - (void)action:(Action)action down:(BOOL)down {
     int before = held[action];
@@ -235,7 +243,7 @@ static void redraw(UIView *view) {
     concealed = NO;   // un toucher ramène la surcouche cachée pour une manette
     for (UITouch *t in touches) {
         P2Finger *f = [P2Finger new];
-        f.start = f.at = [t locationInView:self]; f.began = t.timestamp;
+        f.start = f.at = [t locationInView:self];
         int button = [self buttonAt:f.start];
         BOOL left = f.start.x < CGRectGetMidX(self.bounds);
         if (button >= 0) { f.role = ROLE_BUTTON; f.action = (Action)button; [self action:f.action down:YES]; }
@@ -251,19 +259,16 @@ static void redraw(UIView *view) {
     for (UITouch *t in touches) [fingers objectForKey:t].at = [t locationInView:self];
     [self updateMove]; redraw(self);
 }
-- (void)finish:(NSSet<UITouch *> *)touches tap:(BOOL)tapAllowed {
+- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event {
+    (void)event;
     for (UITouch *t in touches) {
         P2Finger *f = [fingers objectForKey:t];
-        if (!f) continue;
         if (f.role == ROLE_BUTTON) [self action:f.action down:NO];
-        else if (tapAllowed && t.timestamp - f.began < kTapTime && hypot(f.at.x - f.start.x, f.at.y - f.start.y) < kTapSlop)
-            [self click:f.start];
         [fingers removeObjectForKey:t];
     }
     [self updateMove]; redraw(self);
 }
-- (void)touchesEnded:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self finish:touches tap:YES]; }
-- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { (void)event; [self finish:touches tap:NO]; }
+- (void)touchesCancelled:(NSSet<UITouch *> *)touches withEvent:(UIEvent *)event { [self touchesEnded:touches withEvent:event]; }
 - (void)safeAreaInsetsDidChange { [super safeAreaInsetsDidChange]; redraw(self); }
 
 // ---- dessin ----
@@ -280,7 +285,7 @@ static void redraw(UIView *view) {
 }
 - (void)drawRect:(CGRect)rect {
     (void)rect;
-    if (concealed) return;
+    if (concealed || menu) return;
     CGContextRef c = UIGraphicsGetCurrentContext();
     UIColor *ink = [UIColor colorWithWhite:1 alpha:.3], *line = [UIColor colorWithWhite:1 alpha:.45];
     CGContextSetLineWidth(c, 2);
