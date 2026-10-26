@@ -98,6 +98,7 @@ int rt_ios_srgb_enabled(void);
 void rt_ios_srgb_bind_texture(GLenum target, GLuint name);
 void rt_ios_srgb_tex_image(GLenum target, GLint level, GLint internal);
 void rt_ios_srgb_decode(GLenum target, GLint value);
+void rt_ios_srgb_wrap_mode(GLenum target, GLenum name, GLint value);
 void *rt_ios_srgb_wrap(const char *name, void *fn);
 static void (*es_shader_source)(GLuint, GLsizei, const GLchar *const *, const GLint *);
 static void shader_source(GLuint shader, GLsizei count, const GLchar *const *strings, const GLint *lengths) {
@@ -334,13 +335,26 @@ static void es_level_parameter(GLenum target, GLenum name, GLfloat value) {
     if (real_bound != name_bound) glBindTexture(target, (GLuint)real_bound);
     if (real_unit != unit) glActiveTexture((GLenum)real_unit);
 }
+static int trace_enabled(void);
+static void trace_parameter(GLenum target, GLenum name, GLfloat v0, const GLfloat *v) {
+    int border = name == 0x1004 && v && (v[0] || v[1] || v[2] || v[3]);
+    if (!trace_enabled() || (v0 != 0x812D && !border)) return;
+    static int count;
+    if (count++ > 60) return;
+    GLint bound = 0; gl4es_get_integerv(GL_TEXTURE_BINDING_2D, &bound);
+    fprintf(stderr, "[gl-trace] paramètre %#x cible %#x texture %d = %g %g %g %g\n", name, target, bound, v0,
+            v ? v[1] : 0, v ? v[2] : 0, v ? v[3] : 0);
+}
 static void tex_parameteri(GLenum target, GLenum name, GLint value) {
+    trace_parameter(target, name, (GLfloat)value, NULL);
+    rt_ios_srgb_wrap_mode(target, name, value);
     if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, value); return; }
     if (target == 0x806F) { tex_parameter_3d_i(target, name, value); return; }
     gl4es_tex_parameteri(target, name, value);
     if (level_parameter(name)) es_level_parameter(target, name, (GLfloat)value);
 }
 static void tex_parameteriv(GLenum target, GLenum name, const GLint *values) {
+    rt_ios_srgb_wrap_mode(target, name, values[0]);
     if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, values[0]); return; }
     if (target == 0x806F) { tex_parameter_3d_i(target, name, values[0]); return; }
     gl4es_tex_parameteriv(target, name, values);
@@ -474,6 +488,7 @@ static void tex_parameter_3d_i(GLenum target, GLenum name, GLint value) {
     GLint previous = with_unit_begin(); glTexParameteri(target, name, value); with_unit_end(previous);
 }
 static void tex_parameterf(GLenum target, GLenum name, GLfloat value) {
+    rt_ios_srgb_wrap_mode(target, name, (GLint)value);
     if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, (GLint)value); return; }
     if (target != TARGET_3D) {
         gl4es_tex_parameterf(target, name, value);
@@ -483,6 +498,8 @@ static void tex_parameterf(GLenum target, GLenum name, GLfloat value) {
     GLint previous = with_unit_begin(); glTexParameterf(target, name, value); with_unit_end(previous);
 }
 static void tex_parameterfv(GLenum target, GLenum name, const GLfloat *values) {
+    trace_parameter(target, name, values[0], name == 0x1004 ? values : NULL);
+    rt_ios_srgb_wrap_mode(target, name, (GLint)values[0]);
     if (name == TEXTURE_SRGB_DECODE) { rt_ios_srgb_decode(target, (GLint)values[0]); return; }
     if (target != TARGET_3D) { gl4es_tex_parameterfv(target, name, values); return; }
     GLint previous = with_unit_begin(); glTexParameterfv(target, name, values); with_unit_end(previous);
@@ -652,7 +669,9 @@ static void probe_frame(void) {
             p[3][0], p[3][1], p[3][2], p[4][0], p[4][1], p[4][2]);
 }
 
+void rt_ios_draws_frame_end(void);
 void rt_ios_gl_swap_window(SDL_Window *window) {
+    rt_ios_draws_frame_end();
     gl4es_pre_swap();
     probe_frame();
     // SDL présente le renderbuffer lié à GL_RENDERBUFFER en supposant que c'est

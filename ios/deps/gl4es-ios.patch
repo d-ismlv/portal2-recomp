@@ -26,6 +26,51 @@ index a2c7edb..05d1309 100644
  
  void APIENTRY_GL4ES gl4es_glEnableVertexArray(GLuint vaobj, GLenum array) {
      DBG(printf("glEnableVertexArray(%d, %s)\n", vaobj, PrintEnum(array));)
+diff --git a/src/gl/drawing.c b/src/gl/drawing.c
+index 498ecc5..8652abf 100644
+--- a/src/gl/drawing.c
++++ b/src/gl/drawing.c
+@@ -1064,7 +1064,7 @@ void APIENTRY_GL4ES gl4es_glMultiDrawElementsBaseVertex( GLenum mode, GLsizei *c
+         GLushort *sindices = NULL;
+         GLuint *iindices = NULL;
+ 
+-        if(type==GL_UNSIGNED_INT && hardext.elementuint && !compiling && !intercept)
++        if((type==GL_UNSIGNED_INT || basevertex[i]>0) && hardext.elementuint && !compiling && !intercept)
+             iindices = copy_gl_array((glstate->vao->elements)?(void*)((char*)glstate->vao->elements->data + (uintptr_t)indices):indices,
+                 type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
+         else
+@@ -1108,10 +1108,11 @@ void APIENTRY_GL4ES gl4es_glMultiDrawElementsBaseVertex( GLenum mode, GLsizei *c
+             list->indice_cap = count;
+             continue;
+         } else {
++            const GLint base = basevertex[i];   // iOS : l'indice interne masquait celui du tracé
+             if(iindices)
+-                for(int i=0; i<count; i++) iindices[i]+=basevertex[i];
++                for(int j=0; j<count; j++) iindices[j]+=base;
+             else
+-                for(int i=0; i<count; i++) sindices[i]+=basevertex[i];
++                for(int j=0; j<count; j++) sindices[j]+=base;
+             GLuint old_index = wantBufferIndex(0);
+             glDrawElementsCommon(mode, 0, count, 0, sindices, iindices, 1);
+             if(iindices)
+@@ -1165,7 +1166,7 @@ void APIENTRY_GL4ES gl4es_glDrawElementsBaseVertex(GLenum mode, GLsizei count, G
+         GLushort *sindices = NULL;
+         GLuint *iindices = NULL;
+ 
+-        if(type==GL_UNSIGNED_INT && hardext.elementuint && !compiling && !intercept)
++        if((type==GL_UNSIGNED_INT || basevertex>0) &&  /* iOS : indices + basevertex > 65535 */ hardext.elementuint && !compiling && !intercept)
+             iindices = copy_gl_array((glstate->vao->elements)?(void*)((char*)glstate->vao->elements->data + (uintptr_t)indices):indices,
+                 type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
+         else
+@@ -1260,7 +1261,7 @@ void APIENTRY_GL4ES gl4es_glDrawRangeElementsBaseVertex(GLenum mode, GLuint star
+         noerrorShim();
+         GLushort *sindices = NULL;
+         GLuint *iindices = NULL;
+-        if(type==GL_UNSIGNED_INT && hardext.elementuint && !compiling && !intercept)
++        if((type==GL_UNSIGNED_INT || basevertex>0) &&  /* iOS : indices + basevertex > 65535 */ hardext.elementuint && !compiling && !intercept)
+             iindices = copy_gl_array((glstate->vao->elements)?(void*)((char*)glstate->vao->elements->data + (uintptr_t)indices):indices,
+                 type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
+         else
 diff --git a/src/gl/framebuffers.c b/src/gl/framebuffers.c
 index b0f0299..3929400 100644
 --- a/src/gl/framebuffers.c

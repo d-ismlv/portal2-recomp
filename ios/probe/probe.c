@@ -52,6 +52,7 @@ int main(int argc, char **argv) {
     SDL_GLContext context = window ? SDL_GL_CreateContext(window) : NULL;
     if (!context) { printf("probe: GL context failed: %s\n", SDL_GetError()); return 1; }
     SDL_GL_GetDrawableSize(window, &fb_w, &fb_h);
+    if (getenv("P2_PROBE_CLIP")) { void clip_test(int, int); clip_test(fb_w, fb_h); return 0; }
     gles = dlopen("/System/Library/Frameworks/OpenGLES.framework/OpenGLES", RTLD_NOW | RTLD_LOCAL);
     set_getprocaddress(gles_proc);
     set_getmainfbsize(fb_size);

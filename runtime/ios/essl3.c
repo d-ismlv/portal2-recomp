@@ -9,13 +9,16 @@
 // gl_FragColor -> sortie déclarée, fonctions texture*D* -> texture*,
 // shadow2D* -> fonctions d'appoint qui rendent le vec4 de GLSL 1.20.
 //
-// sRGB (srgb != 0, shaders de fragments) : OpenGL ES 3 d'iOS n'a ni
-// EXT_texture_sRGB_decode ni EXT_sRGB_write_control, que togl utilise pour
-// basculer, par texture et par tracé, le décodage des textures sRGB et
-// l'encodage de la sortie (GL_FRAMEBUFFER_SRGB). Les deux conversions sont
-// faites ici dans le shader, commandées par des uniformes que srgb.c règle
-// avant chaque tracé : un masque d'unités à décoder par type d'échantillonneur
-// (p2_srgb_2d, p2_srgb_cube, p2_srgb_3d) et p2_srgb_write.
+// Émulation (emulate != 0, shaders de fragments), commandée par des uniformes
+// que srgb.c règle avant chaque tracé. OpenGL ES 3.0 d'iOS n'a pas :
+// - EXT_texture_sRGB_decode : décodage sRGB par unité et par type
+//   d'échantillonneur (masques p2_srgb_2d, p2_srgb_cube, p2_srgb_3d) ;
+// - EXT_sRGB_write_control : encodage de la sortie (p2_srgb_write) ;
+// - CLAMP_TO_BORDER (gl4es le change en CLAMP_TO_EDGE) : hors de [0,1], la
+//   carte d'ombre et la texture projetée de la lumière étiraient leurs texels
+//   de bord sur les murs. Bordure noire (seule couleur que togl demande) par
+//   axe et par unité (p2_border_s, p2_border_t).
+// Chaque appel « f( samplerN, ... ) » devient « p2_f( N, samplerN, ... ) ».
 #include <ctype.h>
 #include <stdio.h>
 #include <stdlib.h>
@@ -80,18 +83,18 @@ static int uses(const char *source, const char *word) {
 }
 
 // Type des échantillonneurs samplerN déclarés : 0 = 2D, 1 = cube, 2 = 3D,
-// -1 = autre (ombre) ou absent.
+// 3 = 2D d'ombre, -1 = autre ou absent.
 enum { MAX_SAMPLERS = 32 };
 static void sampler_types(const char *source, signed char types[MAX_SAMPLERS]) {
     memset(types, -1, MAX_SAMPLERS);
-    static const char *names[] = {"sampler2D", "samplerCube", "sampler3D"};
+    static const char *names[] = {"sampler2D", "samplerCube", "sampler3D", "sampler2DShadow"};
     for (const char *p = strstr(source, "uniform"); p; p = strstr(p + 7, "uniform")) {
         if (p != source && ident_char((unsigned char)p[-1])) continue;
         const char *q = p + 7;
         while (*q == ' ' || *q == '\t') ++q;
         if (!strncmp(q, "lowp ", 5)) q += 5; else if (!strncmp(q, "mediump ", 8)) q += 8; else if (!strncmp(q, "highp ", 6)) q += 6;
         int type = -1; size_t n = 0;
-        for (int t = 0; t < 3; ++t) {
+        for (int t = 0; t < 4; ++t) {
             size_t m = strlen(names[t]);
             if (!strncmp(q, names[t], m) && !ident_char((unsigned char)q[m])) { type = t; n = m; }
         }
@@ -115,24 +118,60 @@ static int texture_call_unit(const char *after_name) {
     if (ident_char((unsigned char)*d)) return -1;
     return atoi(q + 7);
 }
-static int texture_function(const char *name) {
-    return !strcmp(name, "texture") || !strcmp(name, "textureLod") || !strcmp(name, "textureProj") ||
-           !strcmp(name, "textureProjLod") || !strcmp(name, "textureGrad");
+// Fonction d'échantillonnage enveloppée pour ce type d'échantillonneur ?
+static int wrapped(const char *name, int type) {
+    if (type == 3) return !strncmp(name, "gl4es_shadow2D", 14);
+    return type >= 0 && (!strcmp(name, "texture") || !strcmp(name, "textureLod") || !strcmp(name, "textureProj") ||
+                         !strcmp(name, "textureProjLod") || !strcmp(name, "textureGrad"));
 }
-static const char srgb_helpers[] =
-    "uniform int p2_srgb_2d;\nuniform int p2_srgb_cube;\nuniform int p2_srgb_3d;\nuniform float p2_srgb_write;\n"
-    "vec4 p2_srgb_read(int mask, int unit, vec4 c) {\n"
-    "    if (((mask >> unit) & 1) == 0) return c;\n"
+static const char emulation_helpers[] =
+    "uniform int p2_srgb_2d;\nuniform int p2_srgb_cube;\nuniform int p2_srgb_3d;\n"
+    "uniform int p2_border_s;\nuniform int p2_border_t;\nuniform float p2_srgb_write;\n"
+    "vec4 p2_decode(int mask, int u, vec4 c) {\n"
+    "    if (((mask >> u) & 1) == 0) return c;\n"
     "    vec3 x = clamp(c.rgb, 0.0, 1.0);\n"
     "    return vec4(mix(pow((x + 0.055) / 1.055, vec3(2.4)), x / 12.92, vec3(lessThanEqual(x, vec3(0.04045)))), c.a);\n"
     "}\n"
     "vec3 p2_srgb_encode(vec3 c) {\n"
     "    vec3 x = clamp(c, 0.0, 1.0);\n"
     "    return mix(1.055 * pow(x, vec3(1.0 / 2.4)) - 0.055, x * 12.92, vec3(lessThan(x, vec3(0.0031308))));\n"
-    "}\n";
+    "}\n"
+    "bool p2_outside(int u, vec2 c) {\n"
+    "    return (((p2_border_s >> u) & 1) != 0 && (c.x < 0.0 || c.x > 1.0)) ||\n"
+    "           (((p2_border_t >> u) & 1) != 0 && (c.y < 0.0 || c.y > 1.0));\n"
+    "}\n"
+    "vec4 p2_texture(int u, sampler2D s, vec2 c) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, texture(s, c)); }\n"
+    "vec4 p2_texture(int u, sampler2D s, vec2 c, float b) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, texture(s, c, b)); }\n"
+    "vec4 p2_texture(int u, samplerCube s, vec3 c) { return p2_decode(p2_srgb_cube, u, texture(s, c)); }\n"
+    "vec4 p2_texture(int u, samplerCube s, vec3 c, float b) { return p2_decode(p2_srgb_cube, u, texture(s, c, b)); }\n"
+    "vec4 p2_texture(int u, sampler3D s, vec3 c) { return p2_decode(p2_srgb_3d, u, texture(s, c)); }\n"
+    "vec4 p2_texture(int u, sampler3D s, vec3 c, float b) { return p2_decode(p2_srgb_3d, u, texture(s, c, b)); }\n"
+    "vec4 p2_textureLod(int u, sampler2D s, vec2 c, float l) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureLod(s, c, l)); }\n"
+    "vec4 p2_textureLod(int u, samplerCube s, vec3 c, float l) { return p2_decode(p2_srgb_cube, u, textureLod(s, c, l)); }\n"
+    "vec4 p2_textureLod(int u, sampler3D s, vec3 c, float l) { return p2_decode(p2_srgb_3d, u, textureLod(s, c, l)); }\n"
+    "vec4 p2_textureProj(int u, sampler2D s, vec3 c) { return p2_outside(u, c.xy / c.z) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProj(s, c)); }\n"
+    "vec4 p2_textureProj(int u, sampler2D s, vec4 c) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProj(s, c)); }\n"
+    "vec4 p2_textureProj(int u, sampler3D s, vec4 c) { return p2_decode(p2_srgb_3d, u, textureProj(s, c)); }\n"
+    "vec4 p2_textureProjLod(int u, sampler2D s, vec3 c, float l) { return p2_outside(u, c.xy / c.z) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProjLod(s, c, l)); }\n"
+    "vec4 p2_textureProjLod(int u, sampler2D s, vec4 c, float l) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureProjLod(s, c, l)); }\n"
+    "vec4 p2_textureGrad(int u, sampler2D s, vec2 c, vec2 x, vec2 y) { return p2_outside(u, c) ? vec4(0.0) : p2_decode(p2_srgb_2d, u, textureGrad(s, c, x, y)); }\n"
+    "vec4 p2_textureGrad(int u, samplerCube s, vec3 c, vec3 x, vec3 y) { return p2_decode(p2_srgb_cube, u, textureGrad(s, c, x, y)); }\n"
+    "vec4 p2_textureGrad(int u, sampler3D s, vec3 c, vec3 x, vec3 y) { return p2_decode(p2_srgb_3d, u, textureGrad(s, c, x, y)); }\n";
+// Fonctions d'appoint pour les échantillonneurs d'ombre : vec4 de GLSL 1.20,
+// et bordure (profondeur 0 : comparaison perdue, résultat 0).
+static const char shadow_helpers[] =
+    "vec4 gl4es_shadow2D(sampler2DShadow s, vec3 c) { return vec4(texture(s, c)); }\n"
+    "vec4 gl4es_shadow2DLod(sampler2DShadow s, vec3 c, float l) { return vec4(textureLod(s, c, l)); }\n"
+    "vec4 gl4es_shadow2DProj(sampler2DShadow s, vec4 c) { return vec4(textureProj(s, c)); }\n"
+    "vec4 gl4es_shadow2DProjLod(sampler2DShadow s, vec4 c, float l) { return vec4(textureProjLod(s, c, l)); }\n";
+static const char shadow_emulation_helpers[] =
+    "vec4 p2_gl4es_shadow2D(int u, sampler2DShadow s, vec3 c) { return p2_outside(u, c.xy) ? vec4(0.0) : gl4es_shadow2D(s, c); }\n"
+    "vec4 p2_gl4es_shadow2DLod(int u, sampler2DShadow s, vec3 c, float l) { return p2_outside(u, c.xy) ? vec4(0.0) : gl4es_shadow2DLod(s, c, l); }\n"
+    "vec4 p2_gl4es_shadow2DProj(int u, sampler2DShadow s, vec4 c) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : gl4es_shadow2DProj(s, c); }\n"
+    "vec4 p2_gl4es_shadow2DProjLod(int u, sampler2DShadow s, vec4 c, float l) { return p2_outside(u, c.xy / c.w) ? vec4(0.0) : gl4es_shadow2DProjLod(s, c, l); }\n";
 
 // NULL si le source n'est pas du GLSL ES 1.00 (déjà 3.00, ou autre version).
-char *rt_essl1_to_essl3(const char *source, int is_fragment, int srgb) {
+char *rt_essl1_to_essl3(const char *source, int is_fragment, int emulate) {
     const char *p = source;
     while (*p == ' ' || *p == '\t' || *p == '\n' || *p == '\r') ++p;
     int versioned = !strncmp(p, "#version", 8);
@@ -170,36 +209,33 @@ char *rt_essl1_to_essl3(const char *source, int is_fragment, int srgb) {
     // placée avant main (_gl4es_main de ses shaders de pipeline fixe).
     if (frag_color && puts_(&out, "out vec4 gl4es_FragColor;\n")) goto fail;
     if (frag_data && puts_(&out, "layout(location = 0) out vec4 gl4es_FragData[4];\n")) goto fail;
-    srgb = srgb && is_fragment && (frag_color || frag_data);
+    emulate = emulate && is_fragment && (frag_color || frag_data);
+    if (shadow && puts_(&out, shadow_helpers)) goto fail;
     signed char types[MAX_SAMPLERS];
-    if (srgb) { sampler_types(source, types); if (puts_(&out, srgb_helpers)) goto fail; }
-    static const char *masks[] = {"p2_srgb_2d", "p2_srgb_cube", "p2_srgb_3d"};
-    int depth = 0, closes[64], pending = 0;   // parenthèses à fermer après un appel enveloppé
+    if (emulate) {
+        sampler_types(source, types);
+        if (puts_(&out, emulation_helpers) || (shadow && puts_(&out, shadow_emulation_helpers))) goto fail;
+    }
     int inserted = 0;
-    // Corps : identifiants renommés ; déclarations ajoutées juste avant main,
-    // une fois la précision par défaut des flottants établie par gl4es.
+    // Corps : identifiants renommés ; main renommé p2_main si émulation.
     while (*p) {
         if (!inserted && !strncmp(p, "void main", 9) && (p == source || p[-1] == '\n')) {
-            if (shadow && puts_(&out,
-                    "vec4 gl4es_shadow2D(sampler2DShadow s, vec3 c) { return vec4(texture(s, c)); }\n"
-                    "vec4 gl4es_shadow2DLod(sampler2DShadow s, vec3 c, float l) { return vec4(textureLod(s, c, l)); }\n"
-                    "vec4 gl4es_shadow2DProj(sampler2DShadow s, vec4 c) { return vec4(textureProj(s, c)); }\n"
-                    "vec4 gl4es_shadow2DProjLod(sampler2DShadow s, vec4 c, float l) { return vec4(textureProjLod(s, c, l)); }\n"))
-                goto fail;
             inserted = 1;
-            if (srgb) { if (puts_(&out, "void p2_main")) goto fail; p += 9; continue; }
+            if (emulate) { if (puts_(&out, "void p2_main")) goto fail; p += 9; continue; }
         }
         if (ident_char((unsigned char)*p) && !isdigit((unsigned char)*p)) {
             const char *start = p;
             while (ident_char((unsigned char)*p)) ++p;
             const char *to = renamed(start, (size_t)(p - start), is_fragment);
             if (color_as_data && to && !strcmp(to, "gl4es_FragColor")) to = "gl4es_FragData[0]";
-            int unit = srgb && to && texture_function(to) && pending < 64 ? texture_call_unit(p) : -1;
-            if (unit >= 0 && unit < MAX_SAMPLERS && types[unit] >= 0) {
-                char wrap[64];
-                snprintf(wrap, sizeof(wrap), "p2_srgb_read(%s, %d, ", masks[types[unit]], unit);
-                if (puts_(&out, wrap)) goto fail;
-                closes[pending++] = depth;
+            int unit = emulate && to ? texture_call_unit(p) : -1;
+            if (unit >= 0 && unit < MAX_SAMPLERS && wrapped(to, types[unit])) {
+                char call[96];   // « f ( samplerN » -> « p2_f(N, samplerN »
+                snprintf(call, sizeof(call), "p2_%s(%d, ", to, unit);
+                if (puts_(&out, call)) goto fail;
+                while (*p != '(') ++p;
+                ++p;
+                continue;
             }
             if (to ? puts_(&out, to) : put(&out, start, (size_t)(p - start))) goto fail;
         } else if (p[0] == '/' && p[1] == '/') {   // commentaires recopiés tels quels
@@ -216,16 +252,11 @@ char *rt_essl1_to_essl3(const char *source, int is_fragment, int srgb) {
             if (put(&out, start, (size_t)(p - start))) goto fail;
         } else {
             if (put(&out, p, 1)) goto fail;
-            if (*p == '(') ++depth;
-            else if (*p == ')') {
-                --depth;
-                while (pending && closes[pending - 1] == depth) { if (put(&out, ")", 1)) goto fail; --pending; }
-            }
             ++p;
         }
     }
-    if (!inserted || pending) goto fail;   // pas de main : laisser le source tel quel
-    if (srgb) {
+    if (!inserted) goto fail;   // pas de main : laisser le source tel quel
+    if (emulate) {
         const char *output = frag_color ? "gl4es_FragColor" : "gl4es_FragData[0]";
         char tail[256];
         snprintf(tail, sizeof(tail), "\nvoid main() {\n    p2_main();\n    if (p2_srgb_write > 0.5) %s.rgb = p2_srgb_encode(%s.rgb);\n}\n",

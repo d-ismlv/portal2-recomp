@@ -1,4 +1,5 @@
-// sRGB de togl sur OpenGL ES 3 d'iOS (voir essl3.c pour la moitié shader).
+// sRGB et bordures de togl sur OpenGL ES 3 d'iOS (voir essl3.c pour la
+// moitié shader).
 //
 // togl suppose EXT_texture_sRGB_decode et GL_FRAMEBUFFER_SRGB : une texture
 // créée en format sRGB est décodée à la lecture sauf si son paramètre
@@ -10,6 +11,10 @@
 // le transmet aux uniformes ajoutés par essl3.c (p2_srgb_2d/cube/3d,
 // p2_srgb_write) au programme courant. Différences restantes avec un vrai
 // GPU : filtrage et mélange (blending) faits sur les valeurs encodées.
+//
+// Même mécanisme pour CLAMP_TO_BORDER, absent d'ES 3.0 : les axes S et T en
+// bordure de chaque texture sont suivis et passés en masques par unité
+// (p2_border_s, p2_border_t).
 //
 // P2_IOS_SRGB=0 désactive l'émulation (comparaison).
 #include <stdint.h>
@@ -32,7 +37,9 @@ int rt_ios_srgb_enabled(void) {
 #define TEXTURE_3D 0x806F
 #define UNITS 16
 
-enum { TEX_SRGB = 1, TEX_SKIP_DECODE = 2 };
+enum { TEX_SRGB = 1, TEX_SKIP_DECODE = 2, TEX_BORDER_S = 4, TEX_BORDER_T = 8 };
+#define CLAMP_TO_BORDER 0x812D
+enum { UNIFORMS = 6 };
 
 // Tableaux indexés par nom d'objet, agrandis à la demande.
 typedef struct { unsigned char *flags; size_t size; } ByteMap;
@@ -79,7 +86,7 @@ static unsigned char color0_flags(GLuint fbo) {
 }
 
 // Uniformes par programme : emplacements (-2 = à chercher) et dernières valeurs.
-typedef struct { GLint loc[4]; GLint value[4]; } ProgramState;
+typedef struct { GLint loc[UNIFORMS]; GLint value[UNIFORMS]; } ProgramState;
 static ProgramState *programs;
 static size_t program_count;
 static ProgramState *program_state(GLuint program) {
@@ -89,7 +96,7 @@ static ProgramState *program_state(GLuint program) {
         ProgramState *grown = realloc(programs, size * sizeof(*grown));
         if (!grown) return NULL;
         for (size_t i = program_count; i < size; ++i)
-            for (int k = 0; k < 4; ++k) { grown[i].loc[k] = -2; grown[i].value[k] = -1; }
+            for (int k = 0; k < UNIFORMS; ++k) { grown[i].loc[k] = -2; grown[i].value[k] = -1; }
         programs = grown; program_count = size;
     }
     return &programs[program];
@@ -121,6 +128,15 @@ void rt_ios_srgb_decode(GLenum target, GLint value) {
     GLuint name = bound[active_unit][kind];
     unsigned char *f = name ? byte_at(&textures, name) : NULL;
     if (f) *f = (unsigned char)((*f & ~TEX_SKIP_DECODE) | (value == SKIP_DECODE ? TEX_SKIP_DECODE : 0));
+}
+
+void rt_ios_srgb_wrap_mode(GLenum target, GLenum name, GLint value) {
+    int kind = kind_of(target);
+    unsigned char bit = name == GL_TEXTURE_WRAP_S ? TEX_BORDER_S : name == GL_TEXTURE_WRAP_T ? TEX_BORDER_T : 0;
+    if (!bit || kind < 0 || active_unit >= UNITS) return;
+    GLuint texture = bound[active_unit][kind];
+    unsigned char *f = texture ? byte_at(&textures, texture) : NULL;
+    if (f) *f = (unsigned char)((*f & ~bit) | (value == CLAMP_TO_BORDER ? bit : 0));
 }
 
 // ---- enveloppes propres à ce module ----
@@ -157,8 +173,15 @@ static void delete_textures(GLsizei n, const GLuint *names) {
     }
     next_delete_textures(n, names);
 }
-static void enable(GLenum cap) { if (cap == FRAMEBUFFER_SRGB) framebuffer_srgb = 1; else next_enable(cap); }
-static void disable(GLenum cap) { if (cap == FRAMEBUFFER_SRGB) framebuffer_srgb = 0; else next_disable(cap); }
+static unsigned clip_planes;   // diagnostic : plans de découpe actifs (bits)
+static void enable(GLenum cap) {
+    if (cap >= 0x3000 && cap < 0x3006) clip_planes |= 1u << (cap - 0x3000);
+    if (cap == FRAMEBUFFER_SRGB) framebuffer_srgb = 1; else next_enable(cap);
+}
+static void disable(GLenum cap) {
+    if (cap >= 0x3000 && cap < 0x3006) clip_planes &= ~(1u << (cap - 0x3000));
+    if (cap == FRAMEBUFFER_SRGB) framebuffer_srgb = 0; else next_disable(cap);
+}
 static GLboolean is_enabled(GLenum cap) {
     return cap == FRAMEBUFFER_SRGB ? (GLboolean)framebuffer_srgb : next_is_enabled(cap);
 }
@@ -213,7 +236,7 @@ static void use_program(GLuint program) { current_program = program; next_use_pr
 static void link_program(GLuint program) {
     next_link_program(program);
     ProgramState *s = program_state(program);
-    if (s) for (int k = 0; k < 4; ++k) { s->loc[k] = -2; s->value[k] = -1; }
+    if (s) for (int k = 0; k < UNIFORMS; ++k) { s->loc[k] = -2; s->value[k] = -1; }
 }
 static void compressed_tex_image_2d(GLenum t, GLint l, GLenum i, GLsizei w, GLsizei h, GLint b, GLsizei n, const void *d) {
     rt_ios_srgb_tex_image(t, l, (GLint)i);
@@ -221,17 +244,18 @@ static void compressed_tex_image_2d(GLenum t, GLint l, GLenum i, GLsizei w, GLsi
 }
 
 // P2_IOS_SRGB_TRACE=1 : statistiques toutes les 2 000 tracés.
-static void trace(GLint value[4], const ProgramState *s) {
+static void trace(const GLint *value, const ProgramState *s) {
     static int enabled = -1;
     if (enabled < 0) { const char *e = getenv("P2_IOS_SRGB_TRACE"); enabled = e && *e == '1'; }
     if (!enabled) return;
-    static unsigned long draws, srgb_on, fbo_srgb, writes, reads, no_loc;
+    static unsigned long draws, srgb_on, fbo_srgb, writes, reads, no_loc, borders, border_loc;
     ++draws; srgb_on += framebuffer_srgb != 0; reads += (value[0] | value[1] | value[2]) != 0;
     fbo_srgb += draw_fbo && (color0_flags(draw_fbo) & TEX_SRGB);
     writes += value[3] != 0; no_loc += s->loc[3] < 0;
+    borders += (value[4] | value[5]) != 0; border_loc += (value[4] | value[5]) && s->loc[4] >= 0;
     if (draws % 2000 == 0)
         fprintf(stderr, "[srgb] tracés %lu : FRAMEBUFFER_SRGB %lu, cible sRGB %lu, encodage %lu, décodage %lu, "
-                        "sans uniforme %lu (fbo %u couleur0 %u)\n", draws, srgb_on, fbo_srgb, writes, reads, no_loc,
+                        "sans uniforme %lu, bordure %lu (dont shader %lu) (fbo %u couleur0 %u)\n", draws, srgb_on, fbo_srgb, writes, reads, no_loc, borders, border_loc,
                 draw_fbo, name_get(&fbo_color0, draw_fbo));
 }
 
@@ -239,32 +263,122 @@ static void sync_uniforms(void) {
     if (!current_program) return;
     ProgramState *s = program_state(current_program);
     if (!s) return;
-    static const char *names[4] = {"p2_srgb_2d", "p2_srgb_cube", "p2_srgb_3d", "p2_srgb_write"};
+    static const char *names[UNIFORMS] = {"p2_srgb_2d", "p2_srgb_cube", "p2_srgb_3d", "p2_srgb_write", "p2_border_s",
+                                          "p2_border_t"};
     if (s->loc[0] == -2)
-        for (int k = 0; k < 4; ++k) s->loc[k] = g4_get_uniform_location(current_program, names[k]);
-    GLint value[4] = {0, 0, 0, 0};
-    for (int u = 0; u < UNITS; ++u)
+        for (int k = 0; k < UNIFORMS; ++k) s->loc[k] = g4_get_uniform_location(current_program, names[k]);
+    GLint value[UNIFORMS] = {0};
+    for (int u = 0; u < UNITS; ++u) {
         for (int k = 0; k < 3; ++k) {
             unsigned char f = byte_get(&textures, bound[u][k]);
             if ((f & (TEX_SRGB | TEX_SKIP_DECODE)) == TEX_SRGB) value[k] |= 1 << u;
         }
+        unsigned char f = byte_get(&textures, bound[u][0]);   // bordures : textures 2D
+        if (f & TEX_BORDER_S) value[4] |= 1 << u;
+        if (f & TEX_BORDER_T) value[5] |= 1 << u;
+    }
     if (framebuffer_srgb && draw_fbo) value[3] = color0_flags(draw_fbo) & TEX_SRGB;
     trace(value, s);
-    for (int k = 0; k < 4; ++k) {
+    for (int k = 0; k < UNIFORMS; ++k) {
         if (s->loc[k] < 0 || s->value[k] == value[k]) continue;
-        if (k < 3) g4_uniform1i(s->loc[k], value[k]); else g4_uniform1f(s->loc[k], value[k] ? 1.0f : 0.0f);
+        if (k == 3) g4_uniform1f(s->loc[k], value[k] ? 1.0f : 0.0f); else g4_uniform1i(s->loc[k], value[k]);
         s->value[k] = value[k];
     }
 }
-static void draw_arrays(GLenum m, GLint f, GLsizei c) { sync_uniforms(); next_draw_arrays(m, f, c); }
-static void draw_elements(GLenum m, GLsizei c, GLenum t, const void *i) { sync_uniforms(); next_draw_elements(m, c, t, i); }
+// Diagnostic par bissection : P2_IOS_SKIP_DRAWS=a-b saute, à chaque image,
+// les tracés numérotés [a, b) ; P2_IOS_DRAW_LOG=n journalise ceux de l'image n.
+static unsigned draw_index, frame_index;
+void rt_ios_draws_frame_end(void) { draw_index = 0; ++frame_index; }
+static int draw_skipped(const char *fn, GLenum mode, GLsizei count, GLuint start, GLuint end, GLint base) {
+    static int init; static long skip_a = -1, skip_b = -1, log_frame = -1;
+    if (!init) {
+        init = 1;
+        const char *e = getenv("P2_IOS_SKIP_DRAWS");
+        if (e && *e) { skip_a = strtol(e, (char **)&e, 10); skip_b = *e == '-' ? strtol(e + 1, NULL, 10) : skip_a + 1; }
+        e = getenv("P2_IOS_DRAW_LOG");
+        if (e && *e) log_frame = atol(e);
+    }
+    unsigned index = draw_index++;
+    if ((long)frame_index == log_frame) {
+        fprintf(stderr, "[draw] %u %s mode %u n %d [%u,%u] base %d prog %u fbo %u srgb %d clip %#x\n", index, fn, mode, count,
+                start, end, base, current_program, draw_fbo, framebuffer_srgb, clip_planes);
+        static void (*attrib_iv)(GLuint, GLenum, GLint *);
+        static void (*attrib_pointer)(GLuint, GLenum, void **);
+        if (!attrib_iv) {
+            attrib_iv = gl4es_GetProcAddress("glGetVertexAttribiv");
+            attrib_pointer = gl4es_GetProcAddress("glGetVertexAttribPointerv");
+        }
+        static GLuint described[64]; static int n_described;
+        int seen = 0;
+        for (int i = 0; i < n_described; ++i) seen |= described[i] == current_program;
+        if (!seen && n_described < 64) {
+            described[n_described++] = current_program;
+            void (*program_iv)(GLuint, GLenum, GLint *) = gl4es_GetProcAddress("glGetProgramiv");
+            void (*active_attrib)(GLuint, GLuint, GLsizei, GLsizei *, GLint *, GLenum *, GLchar *) =
+                gl4es_GetProcAddress("glGetActiveAttrib");
+            GLint (*attrib_location)(GLuint, const GLchar *) = gl4es_GetProcAddress("glGetAttribLocation");
+            const char *dump = getenv("P2_IOS_PROGRAM_DUMP");   // dossier : sources des programmes journalisés
+            if (dump && *dump) {
+                void (*attached)(GLuint, GLsizei, GLsizei *, GLuint *) = gl4es_GetProcAddress("glGetAttachedShaders");
+                void (*source)(GLuint, GLsizei, GLsizei *, GLchar *) = gl4es_GetProcAddress("glGetShaderSource");
+                GLuint shaders[4]; GLsizei n = 0; attached(current_program, 4, &n, shaders);
+                for (GLsizei i = 0; i < n; ++i) {
+                    static char text[262144]; GLsizei length = 0; source(shaders[i], sizeof(text), &length, text);
+                    char path[1024]; snprintf(path, sizeof(path), "%s/prog%u_%d.glsl", dump, current_program, (int)i);
+                    FILE *f = fopen(path, "w"); if (f) { fwrite(text, 1, (size_t)length, f); fclose(f); }
+                }
+            }
+            GLint count = 0; program_iv(current_program, GL_ACTIVE_ATTRIBUTES, &count);
+            for (GLint i = 0; i < count; ++i) {
+                char name[64]; GLint size = 0; GLenum type = 0;
+                active_attrib(current_program, (GLuint)i, sizeof(name), NULL, &size, &type, name);
+                fprintf(stderr, "[draw]    programme %u entrée %s type %#x emplacement %d\n", current_program, name, type,
+                        attrib_location(current_program, name));
+            }
+        }
+        for (GLuint a = 0; a < 16 && attrib_iv; ++a) {
+            GLint on = 0, size = 0, type = 0, stride = 0, norm = 0, buffer = 0; void *ptr = NULL;
+            attrib_iv(a, GL_VERTEX_ATTRIB_ARRAY_ENABLED, &on);
+            if (!on) continue;
+            attrib_iv(a, GL_VERTEX_ATTRIB_ARRAY_SIZE, &size); attrib_iv(a, GL_VERTEX_ATTRIB_ARRAY_TYPE, &type);
+            attrib_iv(a, GL_VERTEX_ATTRIB_ARRAY_STRIDE, &stride); attrib_iv(a, GL_VERTEX_ATTRIB_ARRAY_NORMALIZED, &norm);
+            attrib_iv(a, GL_VERTEX_ATTRIB_ARRAY_BUFFER_BINDING, &buffer);
+            attrib_pointer(a, GL_VERTEX_ATTRIB_ARRAY_POINTER, &ptr);
+            fprintf(stderr, "[draw]    attr %u : %d x %#x norm %d stride %d buffer %d offset %p\n", a, size, type, norm, stride,
+                    buffer, ptr);
+        }
+    }
+    static char programs[256] = ",";
+    static int programs_init;
+    if (!programs_init) {   // P2_IOS_SKIP_PROGRAMS=45,802 : programmes à sauter
+        programs_init = 1;
+        const char *e = getenv("P2_IOS_SKIP_PROGRAMS");
+        if (e && *e) snprintf(programs, sizeof(programs), ",%s,", e);
+    }
+    if (programs[1]) {
+        char key[16]; snprintf(key, sizeof(key), ",%u,", current_program);
+        if (strstr(programs, key)) return 1;
+    }
+    return (long)index >= skip_a && (long)index < skip_b;
+}
+static void draw_arrays(GLenum m, GLint f, GLsizei c) {
+    if (draw_skipped("arrays", m, c, (GLuint)f, 0, 0)) return;
+    sync_uniforms(); next_draw_arrays(m, f, c);
+}
+static void draw_elements(GLenum m, GLsizei c, GLenum t, const void *i) {
+    if (draw_skipped("elements", m, c, 0, 0, 0)) return;
+    sync_uniforms(); next_draw_elements(m, c, t, i);
+}
 static void draw_range_elements(GLenum m, GLuint s, GLuint e, GLsizei c, GLenum t, const void *i) {
+    if (draw_skipped("range", m, c, s, e, 0)) return;
     sync_uniforms(); next_draw_range_elements(m, s, e, c, t, i);
 }
 static void draw_elements_base_vertex(GLenum m, GLsizei c, GLenum t, const void *i, GLint b) {
+    if (draw_skipped("elements_base", m, c, 0, 0, b)) return;
     sync_uniforms(); next_draw_elements_base_vertex(m, c, t, i, b);
 }
 static void draw_range_elements_base_vertex(GLenum m, GLuint s, GLuint e, GLsizei c, GLenum t, const void *i, GLint b) {
+    if (draw_skipped("range_base", m, c, s, e, b)) return;
     sync_uniforms(); next_draw_range_elements_base_vertex(m, s, e, c, t, i, b);
 }
 
