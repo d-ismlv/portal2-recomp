@@ -122,7 +122,25 @@ static int gl_shim(CPU *c, const char *name) {
     }
     return entry->thunk(c, fn);
 }
-RT_SHIM_PROVIDER(gl_shim)
+// Résolution unique par adresse d'import : l'aiguillage rappelle ensuite
+// directement gl_call avec l'entrée, sans comparaison GLX ni recherche
+// dichotomique parmi ~180 noms à chaque appel (des millions par seconde).
+static int gl_call(CPU *c, const char *name, void *data) {
+    const RtGlEntry *entry = data;
+    void *fn = host_function(entry);
+    if (!fn) rt_trap(c, c->eip, "fonction GL absente de OpenGL.framework");
+    if (!CGLGetCurrentContext()) return gl_shim(c, name);   // chemin rare : même traitement que sans résolution
+    return entry->thunk(c, fn);
+}
+static int gl_resolve(const char *name, RtShimRoute *route) {
+    if (is_glx(name)) return 0;
+    const RtGlEntry *entry = find_entry(name);
+    if (!entry) return 0;
+    route->handler = gl_call;
+    route->data = (void *)entry;
+    return 1;
+}
+RT_SHIM_PROVIDER_RESOLVER(gl_shim, gl_resolve)
 
 // ---- Arguments i386 cdecl ----
 uint32_t rt_gl_u32(CPU *c, unsigned slot) { return R32(c->esp + 4 + 4 * slot); }
