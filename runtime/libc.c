@@ -27,6 +27,7 @@ typedef struct Stream {
     struct Stream *next, *prev;
 } Stream;
 static Stream *streams;
+static uint32_t *free_handles; static size_t free_count, free_capacity;
 // Index des flux ouverts par handle (adressage ouvert, suppression par décalage
 // arrière). Les flux fermés sont retirés : la liste ne grandit plus avec
 // chaque fopen (des milliers en jeu), et un handle fermé reste inconnu.
@@ -76,6 +77,13 @@ static void release_if_unused(Stream *s) {
     if (s->prev) s->prev->next = s->next; else streams = s->next;
     if (s->next) s->next->prev = s->prev;
     index_remove(s->handle);
+    if (free_count == free_capacity) {
+        size_t capacity = free_capacity ? free_capacity * 2 : 256;
+        uint32_t *grown = realloc(free_handles, capacity * sizeof(*grown));
+        if (!grown) abort();
+        free_handles = grown; free_capacity = capacity;
+    }
+    free_handles[free_count++] = s->handle;
     free(s);
 }
 static uint32_t next_handle = 0xd0000100u;
@@ -140,10 +148,20 @@ static Stream *lookup(CPU *c, uint32_t handle, int directory) {
     rt_trap(c, c->eip, directory ? "unknown guest DIR handle" : "unknown guest FILE handle");
 }
 void *rt_stream_file(CPU *c, uint32_t handle) { return lookup(c, handle, 0)->file; }
+// Handles des flux libérés, réutilisés : la plage 0xd0000100-0xd0ffff00 (65 535
+// handles, 0xd1000000 = flux standard) s'épuisait en deux minutes de jeu (le
+// correcteur de casse ouvre ~400 dossiers par seconde) et le compteur
+// atteignait le handle de stdin.
 static Stream *new_stream_record(void) {
+    uint32_t handle;
+    if (free_count) handle = free_handles[--free_count];
+    else {
+        if (next_handle >= 0xd1000000u) { fputs("guest stream handles exhausted\n", stderr); abort(); }
+        handle = next_handle; next_handle += 0x100;
+    }
     Stream *s = calloc(1, sizeof(*s));
-    if (!s) return NULL;
-    s->handle = next_handle; next_handle += 0x100;
+    if (!s) { free_handles[free_count++] = handle; return NULL; }
+    s->handle = handle;
     link_stream(s);
     return s;
 }
@@ -334,6 +352,7 @@ void rt_libc_destroy(void) {
         free(streams); streams = next;
     }
     free(stream_index); stream_index = NULL; index_capacity = index_count = 0;
+    free(free_handles); free_handles = NULL; free_count = free_capacity = 0;
     while (environment) { Environment *next = environment->next; free(environment->name); free(environment); environment = next; }
     next_handle = 0xd0000100u; errno_address = 0; environ_slot_count = 0;
 }

@@ -618,11 +618,38 @@ RT_CHECK(posix_closed_streams_are_released) {
         uint32_t file = call("fopen", 2, path, mode);
         assert(file && call("fclose", 1, file) == 0);
     }
-    uint32_t dir = call("opendir", 1, gstr(game_path("dir")));
-    assert(dir && call("closedir", 1, dir) == 0);
-    // Un flux fermé reste inconnu : l'utiliser piège (dans un fils).
+    uint32_t dirpath = gstr(game_path("dir"));
+    for (int i = 0; i < 70000; ++i) {                            // > 65 535 handles : réutilisés
+        uint32_t dir = call("opendir", 1, dirpath);
+        assert(dir && dir < 0xd1000000u && call("closedir", 1, dir) == 0);
+    }
+    assert(rt_standard_stream(0) == 0xd1000000u);                // stdin garde son handle propre
+    // Un flux fermé (handle non réutilisé depuis) reste inconnu : l'utiliser piège.
     pid_t pid = fork();
     if (!pid) { freopen("/dev/null", "w", stderr); call("fgetc", 1, first); _exit(0); }
     int status; assert(waitpid(pid, &status, 0) == pid && WIFSIGNALED(status));
+    cleanup();
+}
+
+RT_CHECK(posix_interleaved_stream_handles_stay_valid) {
+    setup();
+    uint32_t path = gstr(game_path("a.txt")), mode = gstr("rb"), dirpath = gstr(game_path("dir"));
+    uint32_t open_files[64] = {0}, open_dirs[64] = {0};
+    unsigned seed = 7;
+    for (int i = 0; i < 4000; ++i) {
+        seed = seed * 1103515245u + 12345u;
+        unsigned k = (seed >> 8) & 63;
+        if ((seed >> 20) & 1) {
+            if (open_files[k]) { assert(call("fgetc", 1, open_files[k]) != 0xdeadbeefu); assert(call("fclose", 1, open_files[k]) == 0); open_files[k] = 0; }
+            else assert((open_files[k] = call("fopen", 2, path, mode)));
+        } else {
+            if (open_dirs[k]) { call("readdir", 1, open_dirs[k]); assert(call("closedir", 1, open_dirs[k]) == 0); open_dirs[k] = 0; }
+            else assert((open_dirs[k] = call("opendir", 1, dirpath)));
+        }
+    }
+    for (int k = 0; k < 64; ++k) {
+        if (open_files[k]) assert(call("fclose", 1, open_files[k]) == 0);
+        if (open_dirs[k]) assert(call("closedir", 1, open_dirs[k]) == 0);
+    }
     cleanup();
 }
