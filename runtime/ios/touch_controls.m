@@ -5,7 +5,10 @@
 // chargement ; game_state.c le demande au moteur), elle s'efface et laisse les
 // doigts à SDL, pour qui un toucher est un clic. En partie, elle traduit les
 // doigts en ce que le jeu comprend par défaut, clavier et souris :
-// - stick gauche : déplacement, touches W/A/S/D (8 directions, zone morte) ;
+// - stick gauche : déplacement analogique, par une manette SDL virtuelle
+//   (axe gauche) que le jeu lit comme une manette Xbox : direction continue,
+//   vitesse proportionnelle à l'inclinaison. À défaut de manette virtuelle
+//   (création refusée par SDL), touches W/A/S/D en 8 directions ;
 // - stick droit : caméra, mouvements de souris relatifs à vitesse
 //   proportionnelle à l'inclinaison (courbe quadratique pour viser finement) ;
 //   chaque stick se centre là où le doigt se pose, dans sa moitié d'écran ;
@@ -17,7 +20,8 @@
 // - icônes : sauter (espace), s'accroupir (Ctrl gauche), utiliser (E),
 //   pause (Échap).
 // Avec une manette ou un clavier connecté, elle se cache jusqu'au premier
-// toucher. P2_TOUCH_CONTROLS=0 la désactive, =1 l'affiche toujours ; P2_TOUCH_LOOK règle la vitesse
+// toucher ; avec une vraie manette, la manette virtuelle est retirée pour que
+// le jeu ne lise qu'elle. P2_TOUCH_CONTROLS=0 la désactive, =1 l'affiche toujours ; P2_TOUCH_LOOK règle la vitesse
 // de la caméra (1 par défaut, stick et trackpad).
 //
 // Disposition et dessin inspirés de la manette tactile de TOTK de
@@ -32,13 +36,39 @@
 #include <math.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 
 int rt_ios_game_ui_visible(void);   // game_state.c
+void rt_ios_move_response_linear(int on);
+int rt_ios_move_response(void);
 
 typedef enum { ROLE_MOVE, ROLE_LOOK, ROLE_BUTTON } Role;
 typedef enum { KEY_SPACE, KEY_CTRL, KEY_E, KEY_ESCAPE, MOUSE_LEFT, MOUSE_RIGHT, LOOK_MODE, ACTION_COUNT } Action;
 typedef struct { Action action; NSString *symbol; UIColor *color; CGPoint at; CGFloat size; } Button;
 enum { MAX_BUTTONS = 10 };
+
+// Manette virtuelle : deux axes seulement (stick gauche), aucun bouton, pour
+// qu'elle ne porte aucune autre commande que le déplacement.
+static SDL_Joystick *virtual_pad(void) {
+    SDL_VirtualJoystickDesc desc = {0};
+    desc.version = SDL_VIRTUAL_JOYSTICK_DESC_VERSION;
+    desc.type = SDL_JOYSTICK_TYPE_GAMECONTROLLER;
+    desc.naxes = 2;
+    desc.axis_mask = (1u << SDL_CONTROLLER_AXIS_LEFTX) | (1u << SDL_CONTROLLER_AXIS_LEFTY);
+    desc.name = "Commandes tactiles";
+    int index = SDL_JoystickAttachVirtualEx(&desc);
+    SDL_Joystick *pad = index < 0 ? NULL : SDL_JoystickOpen(index);
+    if (index >= 0 && !pad) SDL_JoystickDetachVirtual(index);
+    fprintf(stderr, "[ios] manette virtuelle : %s\n", pad ? "créée" : SDL_GetError());
+    return pad;
+}
+static void remove_virtual_pad(SDL_Joystick *pad) {
+    SDL_JoystickID id = SDL_JoystickInstanceID(pad);
+    SDL_JoystickClose(pad);
+    for (int i = 0; i < SDL_NumJoysticks(); ++i)
+        if (SDL_JoystickGetDeviceInstanceID(i) == id) { SDL_JoystickDetachVirtual(i); break; }
+    fprintf(stderr, "[ios] manette virtuelle retirée\n");
+}
 
 static const CGFloat kButtonSize = 54, kPortalSize = 60;
 static const float kStickLook = 90;      // comptes de souris par image, stick à fond (≈ 360°/s à la sensibilité 3 du jeu)
@@ -79,6 +109,14 @@ static void redraw(UIView *view) {
     NSTimer *tick;            // caméra : un pas par image tant que le stick est incliné
     float lookCarry[2];       // fractions de comptes de souris reportées
     BOOL trackpad;            // moitié droite en trackpad plutôt qu'en stick
+    BOOL physicalPad;         // vraie manette connectée
+    SDL_Joystick *pad;        // manette virtuelle du stick gauche (NULL : W/A/S/D)
+    BOOL padRefused;          // création refusée : ne pas réessayer à chaque image
+    Sint16 padAxes[2];        // dernières valeurs envoyées
+    int padResponse;          // courbe du jeu pour ces valeurs (joy_response_move)
+    CGFloat testMove;         // essai : inclinaison avant imposée (P2_TOUCH_TEST_MOVE)
+    Uint64 testNext;          // essai : prochaine étape (ms de SDL)
+    int testPhase;            // essai : étape en cours
 }
 
 - (instancetype)initWithWindow:(SDL_Window *)sdlWindow {
@@ -102,8 +140,11 @@ static void redraw(UIView *view) {
 }
 
 - (void)devicesChanged {
-    BOOL any = GCKeyboard.coalescedKeyboard != nil;
-    for (GCController *c in GCController.controllers) any |= c.extendedGamepad != nil;
+    BOOL gamepad = NO;
+    for (GCController *c in GCController.controllers) gamepad |= c.extendedGamepad != nil;
+    // Manette que le jeu verra (sauf pilote MFi de SDL coupé, SDL_JOYSTICK_MFI=0).
+    physicalPad = gamepad && SDL_GetHintBoolean(SDL_HINT_JOYSTICK_MFI, SDL_TRUE);
+    BOOL any = gamepad || GCKeyboard.coalescedKeyboard != nil;
     const char *force = getenv("P2_TOUCH_CONTROLS");   // 1 : jamais cachée (essais sur simulateur)
     if (force && *force == '1') any = NO;
     if (any != concealed) { concealed = any; redraw(self); }
@@ -119,6 +160,9 @@ static void redraw(UIView *view) {
         if (menu) [self releaseAll];
         redraw(self);
     }
+    [self syncPad];
+    if (pad && rt_ios_move_response() != padResponse) { padResponse = rt_ios_move_response(); [self updateMove]; }
+    [self testStep];
     if (host.subviews.lastObject != self) [host bringSubviewToFront:self];
     if (!CGRectEqualToRect(self.frame, host.bounds)) { self.frame = host.bounds; redraw(self); }
     if (trackpad) return;   // trackpad : mouvements envoyés au glissement (touchesMoved)
@@ -242,9 +286,11 @@ static void redraw(UIView *view) {
 }
 - (void)updateMove {
     BOOL wanted[4] = {NO, NO, NO, NO};
+    CGFloat ax = 0, ay = 0;
     for (P2Finger *f in fingers.objectEnumerator) {
         if (f.role != ROLE_MOVE) continue;
         CGFloat x, y; [self deflectionOf:f x:&x y:&y];
+        ax = x; ay = y;
         if (hypot(x, y) < .2) continue;
         CGFloat angle = atan2(y, x);   // secteurs de 45° : les diagonales enfoncent deux touches
         wanted[0] |= angle > M_PI / 8 && angle < M_PI - M_PI / 8;
@@ -252,7 +298,117 @@ static void redraw(UIView *view) {
         wanted[3] |= fabs(angle) < 3 * M_PI / 8;
         wanted[1] |= fabs(angle) > 5 * M_PI / 8;
     }
+    if (testMove) {   // essai (testStep)
+        static double angle = -1;
+        if (angle < 0) { const char *e = getenv("P2_TOUCH_TEST_ANGLE"); angle = e ? atof(e) * M_PI / 180 : 0; }
+        ax = testMove * sin(angle); ay = testMove * cos(angle);
+        memset(wanted, 0, sizeof(wanted)); wanted[testMove > 0 ? 0 : 2] = YES;
+    }
+    if (pad) { [self padX:ax y:ay]; memset(wanted, 0, sizeof(wanted)); }
     [self setDirections:wanted];
+}
+
+// Mode d'essai, sans toucher l'écran (simulateur) : P2_TOUCH_TEST_MOVE="0.5,1"
+// incline le stick de chaque valeur (négative : vers l'arrière) pendant
+// P2_TOUCH_TEST_SECONDS (2 par défaut), après P2_TOUCH_TEST_DELAY secondes de
+// partie (20 par défaut), trois secondes de repos entre deux ; direction
+// P2_TOUCH_TEST_ANGLE (degrés, 0 vers l'avant, 90 à droite). La surcouche n'est
+// alors pas dessinée. Vitesse lue à l'écran avec « +cl_showpos 1 » ; avec
+// « +sv_cheats 1 +host_framerate 0.0166667 », la physique est celle de 60
+// images/s malgré la lenteur du simulateur. P2_TOUCH_TEST_WASD=1 garde les
+// touches W/A/S/D (témoin). Sur simulateur, SDL_JOYSTICK_MFI=0 écarte la
+// manette MFi « Gamepad » qu'il expose et que le jeu prendrait avant celle-ci.
+// P2_TOUCH_TEST_CLICK="s,x,y" : clic gauche (points de la fenêtre SDL) s secondes
+// après le premier affichage d'un menu, pour ouvrir un écran sans toucher.
+- (void)testClick {
+    static double at = -1, x, y; static Uint64 when; static int step;
+    if (at == -1) { const char *e = getenv("P2_TOUCH_TEST_CLICK");
+        if (!e || sscanf(e, "%lf,%lf,%lf", &at, &x, &y) != 3 || at <= 0) at = -2; }
+    if (at <= 0 || !menu) return;
+    Uint64 now = SDL_GetTicks64();
+    if (!when) { when = now + (Uint64)(at * 1000); return; }
+    if (now < when) return;
+    CGPoint p = CGPointMake(x, y);
+    if (step == 0) {   // survol, puis appui et relâchement sur des images distinctes
+        SDL_Event e = {0};
+        e.type = SDL_MOUSEMOTION; e.motion.windowID = SDL_GetWindowID(window);
+        e.motion.x = (Sint32)x; e.motion.y = (Sint32)y;
+        SDL_PushEvent(&e);
+    } else if (step == 1) [self mouseButton:SDL_BUTTON_LEFT down:YES at:p];
+    else { [self mouseButton:SDL_BUTTON_LEFT down:NO at:p]; at = -2; }
+    fprintf(stderr, "[ios] essai clic %d à (%.0f, %.0f), %llu ms\n", step, x, y, (unsigned long long)now);
+    ++step; when = now + 300;
+}
+- (void)testStep {
+    [self testClick];
+    static const char *plan; static double seconds, delay; static int parsed;
+    if (!parsed) {
+        parsed = 1; plan = getenv("P2_TOUCH_TEST_MOVE");
+        const char *e = getenv("P2_TOUCH_TEST_SECONDS"); seconds = e && atof(e) > 0 ? atof(e) : 2;
+        e = getenv("P2_TOUCH_TEST_DELAY"); delay = e && atof(e) >= 0 ? atof(e) : 20;
+    }
+    if (!plan || !*plan) return;
+    Uint64 now = SDL_GetTicks64();
+    if (menu || (!pad && !padRefused)) { testNext = 0; return; }   // en partie, manette prête
+    if (!testNext) { testNext = now + (Uint64)(delay * 1000); testPhase = 0; return; }
+    if (now < testNext) return;
+    // Étapes paires : début d'inclinaison ; impaires : fin et repos.
+    const char *at = plan;
+    for (int i = 0; i < testPhase / 2 && at; ++i) { at = strchr(at, ','); if (at) ++at; }
+    if (!at || !*at) { if (testMove) { testMove = 0; [self updateMove]; } return; }
+    BOOL start = testPhase % 2 == 0;
+    testMove = start ? atof(at) : 0;
+    fprintf(stderr, "[ios] essai stick : %s inclinaison %.2f à %llu ms\n", start ? "début" : "fin", atof(at),
+            (unsigned long long)now);
+    [self updateMove];
+    testNext = now + (Uint64)((start ? seconds : 3.0) * 1000);
+    ++testPhase;
+}
+
+// ---- manette virtuelle ----
+// Présente tant qu'aucune vraie manette n'est connectée, une fois les manettes
+// de SDL initialisées par le jeu (inputsystem) : elle lui arrive comme une
+// manette branchée en cours de partie.
+- (void)syncPad {
+    if (getenv("P2_TOUCH_TEST_WASD")) padRefused = YES;   // essai témoin : touches W/A/S/D
+    BOOL wanted = !physicalPad && !padRefused && SDL_WasInit(SDL_INIT_GAMECONTROLLER);
+    if (wanted && !pad) {
+        if (!(pad = virtual_pad())) padRefused = YES;
+        rt_ios_move_response_linear(pad != NULL);
+        padAxes[0] = padAxes[1] = 0;
+        [self updateMove];
+    } else if (!wanted && pad) {
+        remove_virtual_pad(pad);
+        pad = NULL;
+        rt_ios_move_response_linear(0);
+        [self updateMove];   // le stick repasse aux touches
+    }
+}
+// Inclinaison (-1..1 après zone morte, y vers le haut) -> axe gauche de SDL
+// (y vers le bas). Le jeu (in_joystick.cpp du client) calcule par axe
+// t = (|axe| - 0,15) / 0,85 (seuils joy_forwardthreshold/joy_sidethreshold),
+// applique la courbe joy_response_move puis avance de 175 × t unités/s
+// (mesuré dans le simulateur). On inverse ce calcul pour que la vitesse suive
+// l'inclinaison, de 40 à 175 unités/s : sous 40, le frottement du sol de
+// Source l'emporte sur l'accélération (sv_friction × sv_stopspeed /
+// sv_accelerate) et le joueur ne fait que glisser.
+static const CGFloat kMinWalk = 40.0 / 175, kAxisThreshold = .15;
+// Composante de vitesse voulue (-1..1, en vitesse de marche) -> axe SDL.
+static Sint16 axis_value(CGFloat speed, int response) {
+    CGFloat s = fmin(1, fabs(speed)), t = s;
+    if (s < 1e-3) return 0;
+    // Réponse 5 (si le passage en linéaire a échoué) : t réduit de moitié
+    // jusqu'à 0,6 ; les vitesses entre 30 et 60 % sont inaccessibles, la plus
+    // proche est prise.
+    if (response != 0) t = s <= .3 ? 2 * s : s < .45 ? .6 : fmax(s, .601);
+    return (Sint16)lround(copysign(kAxisThreshold + (1 - kAxisThreshold) * fmin(1, t), speed) * 32767);
+}
+- (void)padX:(CGFloat)x y:(CGFloat)y {
+    CGFloat d = fmin(1, hypot(x, y)), m = d > 0 ? (kMinWalk + (1 - kMinWalk) * d) / d : 0;
+    int response = rt_ios_move_response();
+    Sint16 v[2] = {axis_value(x * m, response), axis_value(-y * m, response)};
+    for (int i = 0; i < 2; ++i)
+        if (v[i] != padAxes[i]) { padAxes[i] = v[i]; SDL_JoystickSetVirtualAxis(pad, i, v[i]); }
 }
 - (BOOL)roleTaken:(Role)role {
     for (P2Finger *f in fingers.objectEnumerator) if (f.role == role) return YES;
@@ -311,7 +467,7 @@ static void redraw(UIView *view) {
 }
 - (void)drawRect:(CGRect)rect {
     (void)rect;
-    if (concealed || menu) return;
+    if (concealed || menu || getenv("P2_TOUCH_TEST_MOVE")) return;   // essai : écran dégagé
     CGContextRef c = UIGraphicsGetCurrentContext();
     UIColor *ink = [UIColor colorWithWhite:1 alpha:.3], *line = [UIColor colorWithWhite:1 alpha:.45];
     CGContextSetLineWidth(c, 2);

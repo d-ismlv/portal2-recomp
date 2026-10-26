@@ -13,6 +13,9 @@ xcrun simctl bootstatus "$DEVICE" -b >/dev/null 2>&1 || xcrun simctl boot "$DEVI
 xcrun simctl terminate "$DEVICE" fr.kanapitsas.portal2 >/dev/null 2>&1 && sleep 2
 xcrun simctl install "$DEVICE" build/ios/sim/Portal2.app
 export SIMCTL_CHILD_P2_LOG_FILE="$PWD/build/ios/sim/game.log"
+# Le simulateur expose une fausse manette MFi que le jeu prendrait avant la
+# manette virtuelle du stick tactile (touch_controls.m).
+export SIMCTL_CHILD_SDL_JOYSTICK_MFI=${SIMCTL_CHILD_SDL_JOYSTICK_MFI:-0}
 # Le simulateur joue le son sur les haut-parleurs du Mac : muet sauf P2_SIM_AUDIO=1.
 [ "${P2_SIM_AUDIO:-0}" = 1 ] || export SIMCTL_CHILD_SDL_AUDIODRIVER=dummy
 perl -e "alarm $SECONDS_MAX; exec @ARGV" xcrun simctl launch --console-pty --terminate-running-process "$DEVICE" \
