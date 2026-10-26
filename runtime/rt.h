@@ -53,6 +53,7 @@ void rt_cpu_reset(RT_NOESCAPE CPU *c);
 void rt_fxsave(RT_NOESCAPE CPU *c, uint32_t address);
 void rt_ldmxcsr(RT_NOESCAPE CPU *c, uint32_t value);
 void rt_cpuid(RT_NOESCAPE CPU *c);
+unsigned rt_guest_cpu_count(void);   // processeurs logiques annoncés (cpu.c)
 uint64_t rt_rdtsc(void);
 uint32_t rt_rand32(void);
 

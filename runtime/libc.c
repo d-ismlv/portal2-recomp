@@ -285,17 +285,6 @@ void rt_libc_destroy(void) {
     next_handle = 0xd0000100u; errno_address = 0; environ_slot_count = 0;
 }
 
-static FILE *virtual_cpuinfo(void) {
-    FILE *file = tmpfile();
-    if (!file) return NULL;
-    // Linux system view of the same one-core, 1 GHz virtual CPU as CPUID/RDTSC.
-    fputs("processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 15\n"
-          "model name\t: Portal 2 AOT virtual CPU (Apple Silicon)\nstepping\t: 2\n"
-          "cpu MHz\t\t: 1000.000\nphysical id\t: 0\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\n"
-          "flags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2\n\n", file);
-    rewind(file);
-    return file;
-}
 
 int rt_libc_shim(CPU *c, const char *name) {
     uint32_t a, b, n;
@@ -369,7 +358,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         case 2: result = sysconf(_SC_CLK_TCK); break;
         case 4: result = sysconf(_SC_OPEN_MAX); break;
         case 30: result = 4096; break; // virtual i386/Linux page size
-        case 83: case 84: result = 1; break; // same topology as CPUID/proc
+        case 83: case 84: result = (long)rt_guest_cpu_count(); break; // même topologie que CPUID et /proc
         case 85: case 86: {
             uint64_t memory = 0; size_t size = sizeof(memory);
             if (sysctlbyname("hw.memsize", &memory, &size, NULL, 0)) result = -1;
@@ -409,10 +398,7 @@ int rt_libc_shim(CPU *c, const char *name) {
     } else if (!strcmp(name, "fopen") || !strcmp(name, "fopen64")) {
         const char *path = string(c, argument(c, 0)), *mode = string(c, argument(c, 1));
         FILE *file;
-        if (!strcmp(path, "/proc/cpuinfo")) {
-            if (strcmp(mode, "r") && strcmp(mode, "rb")) { errno = EACCES; file = NULL; }
-            else file = virtual_cpuinfo();
-        } else {
+        {   // /proc/cpuinfo et les autres fichiers /proc viennent de procfs.c (rt_read_path)
             int writing = mode[0]=='w' || mode[0]=='a' || strchr(mode,'+');
             // Lecture d'un fichier que le cache sait absent : ENOENT sans fopen
             // hôte (le moteur sonde chaque dossier de recherche, ~110 fois/s).
@@ -561,8 +547,7 @@ int rt_libc_shim(CPU *c, const char *name) {
     } else if (!strcmp(name, "access")) {
         const char *path = string(c, argument(c, 0));
         int result;
-        if (!strcmp(path, "/proc/cpuinfo")) { result = (argument(c, 1) & 3) ? -1 : 0; if (result) errno = EACCES; }
-        else if ((result = rt_access_cached(path, (int)argument(c, 1))) == -2) {
+        if ((result = rt_access_cached(path, (int)argument(c, 1))) == -2) {
             const char *resolved=rt_read_path(path); result=resolved?access(resolved,(int)argument(c,1)):-1;
         }
         if (result) save_errno(c);
