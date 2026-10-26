@@ -27,9 +27,12 @@ float rt_ios_render_scale(void) {
 static int up(int v) { return (int)lroundf((float)v * rt_ios_render_scale()); }
 static int down(int v) { return (int)lroundf((float)v / rt_ios_render_scale()); }
 
+void rt_ios_touch_controls_attach(SDL_Window *window);
 SDL_Window *rt_ios_create_window(const char *title, int x, int y, int w, int h, Uint32 flags) {
     if (rt_ios_render_scale() > 1) flags |= SDL_WINDOW_ALLOW_HIGHDPI;
-    return SDL_CreateWindow(title, x, y, down(w), down(h), flags);
+    SDL_Window *window = SDL_CreateWindow(title, x, y, down(w), down(h), flags);
+    rt_ios_touch_controls_attach(window);   // commandes tactiles (touch_controls.m)
+    return window;
 }
 void rt_ios_get_window_size(SDL_Window *window, int *w, int *h) {
     int pw = 0, ph = 0;
