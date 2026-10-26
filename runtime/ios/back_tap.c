@@ -10,13 +10,16 @@
 // accel_min et que sa variation d'un échantillon au suivant (secousse)
 // dépasse jerk_min. Il est jugé DELAY plus tard, une fois connus son pic, sa
 // durée et les touchers qui l'entourent :
-// - montée : délai du début du pic à son maximum (fenêtre de 40 ms) ; une
-//   tape culmine en 10 ou 20 ms, un geste brusque monte encore au bout de 40 ;
 // - durée : temps passé au-dessus de max(accel_min, 35 % du pic) ; la main
 //   fait vibrer le téléphone 50 à 100 ms après une tape (calibration) : la
 //   limite par défaut est au-delà de la fenêtre de mesure, donc inactive ;
-// - agitation : moyenne quadratique de |a| dans les 300 ms qui précèdent ; un
-//   pic au milieu d'un mouvement n'est pas une tape ;
+// - agitation : moyenne quadratique de |a| dans les 300 ms qui précèdent, sans
+//   les 300 ms qui suivent le candidat d'avant (une tape forte fait vibrer le
+//   téléphone jusque-là) ; un pic au milieu d'un mouvement n'est pas une tape ;
+//   il en faut au moins 80 ms hors de cette vibration (une secousse enchaîne
+//   les candidats tous les 250 ms : il n'en resterait rien) ;
+// - téléphone à plat, écran vers le haut (gravité z ≈ -1) : posé sur une
+//   table, on ne tape pas son dos ; le poser ou le reprendre secoue ;
 // - gravité : sa variation dans les 200 ms qui précèdent (téléphone qu'on
 //   tourne) ;
 // - toucher à l'écran à moins de touch_guard (une tape sur l'écran secoue
@@ -38,7 +41,7 @@
 #include <math.h>
 #include <string.h>
 
-static const double kPre = 0.300, kPreGap = 0.015, kGravityLag = 0.200, kWindow = 0.040, kRinging = 0.150;
+static const double kPre = 0.300, kPreGap = 0.015, kGravityLag = 0.200, kWindow = 0.040, kRinging = 0.300, kMinHistory = 0.080;
 
 // Valeurs par défaut : estimations à calibrer (docs/ios.md). Une tape d'index
 // sur un téléphone tenu à deux mains : pic de 0,1 à 0,5 g, rotation de 0,1 à
@@ -56,7 +59,7 @@ void rt_backtap_defaults(rt_backtap_params *p) {
     p->refractory = 0.25f;    // 4 tapes/s au plus ; couvre les rebonds de la main
     p->touch_guard = 0.08f;   // ±80 ms autour d'un début ou d'une fin de toucher
     p->max_width = 0.12f;     // inactive : tapes mesurées de 50 à 100 ms (vibration de la main), fenêtre de 100 ms
-    p->max_rise = 0.025f;     // à 100 Hz : maximum au 1er, 2e ou 3e échantillon du pic
+    p->flat_z = -0.95f;       // en jeu (calibration) : -0,75 à -0,86 ; posé sur la table : -1,00
     p->pre_rms_max = 0.05f;   // téléphone tenu immobile : ~0,01 g ; marche : 0,1 g et plus
     p->gravity_max = 0.12f;   // ~7° de rotation en 200 ms
     p->log_factor = 1.0f;
@@ -87,7 +90,7 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
 
     // Avant le pic : agitation, rotation moyenne, gravité (dernier échantillon
     // avant t0 - 15 ms, et 200 ms plus tôt).
-    double base[3] = {0, 0, 0}, sq = 0; int n = 0;
+    double base[3] = {0, 0, 0}, sq = 0, span = 0; int n = 0;
     const rt_backtap_sample *g_now = NULL, *g_then = NULL;
     unsigned long onset = end;   // indice du premier échantillon du pic
     for (unsigned long i = first; i < end; ++i) {
@@ -98,6 +101,8 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
         if (!g_then || s->t <= t0 - kPreGap - kGravityLag) g_then = s;
         if (s->t < t0 - kPre) continue;
         if (s->t >= d->last_candidate && s->t < d->last_candidate + kRinging) continue;   // rebonds de la tape d'avant
+        const rt_backtap_sample *q = i > first ? at(d, i - 1) : NULL;
+        if (q) span += fmin(s->t - q->t, 0.02);
         float m = norm3(s->a);
         sq += (double)m * m;
         for (int k = 0; k < 3; ++k) base[k] += s->w[k];
@@ -165,10 +170,10 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     // (toucher passé à SDL, inconnu ici) secoue aussi le téléphone.
     else if (!active || d->last_inactive >= t0 - p->touch_guard) r->reject = "menu";
     else if (fabs(r->touch_dt) <= p->touch_guard) r->reject = "toucher à l'écran";
-    else if (n < 3) r->reject = "historique insuffisant";
+    else if (n < 3 || span < kMinHistory) r->reject = "historique insuffisant";
     else if (r->pre_rms > p->pre_rms_max) r->reject = "agitation avant le pic";
     else if (r->gravity > p->gravity_max) r->reject = "gravité qui change";
-    else if (r->rise > p->max_rise) r->reject = "montée trop lente";
+    else if (g_now && g_now->g[2] < p->flat_z) r->reject = "téléphone à plat";
     else if (r->width > p->max_width) r->reject = "pic trop long";
     else if (p->z_sign && (onset_az > 0 ? 1 : -1) != p->z_sign) r->reject = "sens z";
     else if (!r->orient) r->reject = "orientation inconnue";

@@ -140,6 +140,9 @@ static _Atomic int backtap_active;    // en partie, surcouche affichée
 static _Atomic int backtap_pending;   // tape à cliquer : -1 gauche, +1 droite
 static int backtap_log;               // P2_BACKTAP_LOG=1 : chaque candidat, et le bruit toutes les 5 s
 static float backtap_hold;            // s : durée de l'appui
+// P2_BACKTAP_RAW=<fichier> (relatif à HOME) : échantillons et touchers bruts,
+// rejoués sur le Mac par tools/backtap_replay.c pour régler les seuils.
+static FILE *backtap_raw;
 // Journal, sur la file des capteurs seulement : origine des temps, bruit de fond.
 static struct { double origin, window, last_t, sq; float last_a[3], max_a, max_jerk, max_rot; long samples; } backtap_noise;
 
@@ -202,7 +205,7 @@ static void backtap_start(void) {
     p.refractory = env_float("P2_BACKTAP_REFRACTORY", p.refractory, 0);
     p.touch_guard = env_float("P2_BACKTAP_TOUCH_GUARD", p.touch_guard, 0);
     p.max_width = env_float("P2_BACKTAP_WIDTH", p.max_width, 0.001f);
-    p.max_rise = env_float("P2_BACKTAP_RISE", p.max_rise, 0);
+    p.flat_z = env_float("P2_BACKTAP_FLAT", p.flat_z, -2);
     p.pre_rms_max = env_float("P2_BACKTAP_AGITATION", p.pre_rms_max, 0.001f);
     p.gravity_max = env_float("P2_BACKTAP_GRAVITY", p.gravity_max, 0.001f);
     p.lateral_sign = env_sign("P2_BACKTAP_LATERAL", p.lateral_sign);
@@ -211,6 +214,15 @@ static void backtap_start(void) {
     backtap_log = getenv("P2_BACKTAP_LOG") && *getenv("P2_BACKTAP_LOG") != '0';
     if (backtap_log) p.log_factor = 0.5f;   // candidats jusqu'à la moitié des seuils, marqués « sous les seuils »
     backtap_hold = env_float("P2_BACKTAP_HOLD", 0.05f, 0);
+    const char *raw = getenv("P2_BACKTAP_RAW");
+    if (raw && *raw) {
+        char path[1024];
+        snprintf(path, sizeof(path), "%s%s%s", raw[0] == '/' ? "" : getenv("HOME"), raw[0] == '/' ? "" : "/", raw);
+        backtap_raw = fopen(path, "w");
+        fprintf(stderr, "[ios] tapes au dos : enregistrement brut %s%s\n", path, backtap_raw ? "" : " impossible");
+        if (backtap_raw) setvbuf(backtap_raw, NULL, _IOLBF, 0);   // tout est écrit si le jeu est tué
+        if (backtap_raw) fprintf(backtap_raw, "# m t ax ay az wx wy wz gx gy gz orient active | t t_toucher\n");
+    }
     float hz = env_float("P2_BACKTAP_HZ", 200, 10);
     rt_backtap_init(&backtap_detector, &p);
 
@@ -220,9 +232,9 @@ static void backtap_start(void) {
     backtap_queue.qualityOfService = NSQualityOfServiceUserInteractive;
     motion.deviceMotionUpdateInterval = 1.0 / hz;
     fprintf(stderr, "[ios] tapes au dos : %g Hz demandés ; seuils %.3g g, %.3g g/s, rotation %.3g rad/s ; "
-            "réfractaire %.0f ms, toucher ±%.0f ms, montée %.0f ms, durée %.0f ms, agitation %.3g g, gravité %.3g g ; "
+            "réfractaire %.0f ms, toucher ±%.0f ms, à plat sous %.2f g, durée %.0f ms, agitation %.3g g, gravité %.3g g ; "
             "latéral %+d, z %+d, inversé %d, appui %.0f ms%s\n",
-            hz, p.accel_min, p.jerk_min, p.rot_min, p.refractory * 1e3, p.touch_guard * 1e3, p.max_rise * 1e3, p.max_width * 1e3,
+            hz, p.accel_min, p.jerk_min, p.rot_min, p.refractory * 1e3, p.touch_guard * 1e3, p.flat_z, p.max_width * 1e3,
             p.pre_rms_max, p.gravity_max, p.lateral_sign, p.z_sign, p.invert, backtap_hold * 1e3,
             backtap_log ? ", journal" : "");
     [motion startDeviceMotionUpdatesToQueue:backtap_queue withHandler:^(CMDeviceMotion *m, NSError *error) {
@@ -233,6 +245,9 @@ static void backtap_start(void) {
                                {(float)w.x, (float)w.y, (float)w.z}, {(float)g.x, (float)g.y, (float)g.z}};
         rt_backtap_report r;
         os_unfair_lock_lock(&backtap_lock);
+        if (backtap_raw)
+            fprintf(backtap_raw, "m %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %.4f %d %d\n", s.t, s.a[0], s.a[1], s.a[2],
+                    s.w[0], s.w[1], s.w[2], s.g[0], s.g[1], s.g[2], atomic_load(&backtap_orient), atomic_load(&backtap_active));
         int judged = rt_backtap_feed(&backtap_detector, &s, atomic_load(&backtap_orient), atomic_load(&backtap_active), &r);
         os_unfair_lock_unlock(&backtap_lock);
         if (judged && !r.reject) atomic_store(&backtap_pending, r.side);
@@ -243,7 +258,10 @@ static void backtap_start(void) {
 static void backtap_touch(NSSet<UITouch *> *touches) {
     if (!backtap_motion) return;
     os_unfair_lock_lock(&backtap_lock);
-    for (UITouch *t in touches) rt_backtap_touch(&backtap_detector, t.timestamp);
+    for (UITouch *t in touches) {
+        rt_backtap_touch(&backtap_detector, t.timestamp);
+        if (backtap_raw) fprintf(backtap_raw, "t %.4f\n", t.timestamp);
+    }
     os_unfair_lock_unlock(&backtap_lock);
 }
 

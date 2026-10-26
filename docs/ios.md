@@ -72,13 +72,21 @@ Côté : signe de la rotation brève autour de l'axe x de l'appareil (vertical e
 paysage), rapporté à l'orientation de l'écran (gravité à défaut) ; repli
 « latéral » (tape sur la tranche) par le signe de l'accélération selon y.
 Rejets : menu ou surcouche masquée (jusqu'à 80 ms avant le pic), toucher qui commence ou finit à ±80 ms,
-agitation ou gravité qui change avant le pic, maximum atteint plus de 25 ms après le début (geste brusque). Clic :
+agitation ou gravité qui change avant le pic (hors des 300 ms qui suivent le candidat d'avant, 80 ms d'historique au moins), téléphone posé à plat écran vers le haut (gravité z < -0,95). Clic :
 appui, relâchement après 50 ms et au moins deux images. Valeurs par défaut
 calibrées le 26/10/2026 sur iPhone 15 Pro Max (`P2_BACKTAP_LOG=1`) : 30 tapes au
 dos sur 30 du bon côté dans les deux paysages ; la main fait vibrer le
 téléphone 50 à 100 ms après la tape, d'où la limite de durée relâchée ;
 CoreMotion livre 100 Hz au plus. Les tapes sur la tranche n'ont pas été
-essayées ; poser le téléphone sur une table peut encore tirer. `P2_TOUCH_CONTROLS=0` les coupe aussi.
+essayées. Les tapes fortes culminent 30 à 40 ms après leur début et font vibrer
+le téléphone plus de 150 ms : critère de montée abandonné, vibration exclue sur
+300 ms. Limite connue : le premier à-coup d'un geste brusque depuis le repos
+ressemble à une tape (l'écarter retarderait chaque tir).
+
+Enregistrement brut pour régler les seuils sur le Mac :
+`P2_BACKTAP_RAW=Documents/backtap.raw` (échantillons et touchers), puis
+`cc -O2 -o build/backtap-replay tools/backtap_replay.c -lm` et
+`build/backtap-replay backtap.raw` (mêmes variables `P2_BACKTAP_*`). `P2_TOUCH_CONTROLS=0` les coupe aussi.
 
 | Variable | Défaut | Rôle |
 |---|---|---|
@@ -87,7 +95,7 @@ essayées ; poser le téléphone sur une table peut encore tirer. `P2_TOUCH_CONT
 | `P2_BACKTAP_ROT` | 0.08 rad/s | rotation minimale (axe x) pour décider le côté |
 | `P2_BACKTAP_REFRACTORY` | 0.25 s | rien après un candidat |
 | `P2_BACKTAP_TOUCH_GUARD` | 0.08 s | rien autour d'un début ou d'une fin de toucher |
-| `P2_BACKTAP_RISE` | 0.025 s | délai maximal du début du pic à son maximum |
+| `P2_BACKTAP_FLAT` | -0.95 g | gravité z sous ce seuil : téléphone à plat, ignoré (`-2` : jamais) |
 | `P2_BACKTAP_WIDTH` | 0.12 s | durée maximale du pic (au-dessus de 35 % de son maximum ; mesurée sur 100 ms, donc inactive par défaut) |
 | `P2_BACKTAP_AGITATION` | 0.05 g | moyenne quadratique maximale dans les 300 ms d'avant |
 | `P2_BACKTAP_GRAVITY` | 0.12 g | variation maximale de la gravité dans les 200 ms d'avant |
@@ -97,7 +105,7 @@ essayées ; poser le téléphone sur une table peut encore tirer. `P2_TOUCH_CONT
 | `P2_BACKTAP_HOLD` | 0.05 s | durée de l'appui |
 | `P2_BACKTAP_HZ` | 200 | fréquence demandée à CoreMotion (100 Hz obtenus sur iPhone 15 Pro Max) |
 
-Journal : `[ios] tape <s> : pic, (x y z), secousse, rotation x y z, montée,
+Journal : `[ios] tape <s> : pic, (x y z), secousse, rotation x y z, montée (délai du maximum),
 durée, avant (agitation), gravité (variation, puis vecteur), toucher (écart en
 ms), orientation -> côté ou raison du rejet`. Constats : tape au dos a_z < 0
 au pic, tape à l'écran a_z > 0.
