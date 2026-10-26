@@ -113,7 +113,10 @@ static int overlay_link(const char *result,const char *relative,int preserve_exi
 // écriture invitée (write_path, marques de suppression) ou changement de
 // racines l'invalide. Les changements faits hors du jeu ne sont pas vus.
 #define READ_CACHE 4096u
-typedef struct { unsigned long generation; int error; char canonical[PATH_MAX]; char result[PATH_MAX]; } ReadEntry;
+#define ACCESS_UNKNOWN (-1)
+// f_ok/r_ok : résultat mémorisé de access(F_OK/R_OK) sur le chemin résolu
+// (0, un errno, ou ACCESS_UNKNOWN) ; même invalidation que la résolution.
+typedef struct { unsigned long generation; int error, f_ok, r_ok; char canonical[PATH_MAX]; char result[PATH_MAX]; } ReadEntry;
 static ReadEntry *read_cache;
 static pthread_mutex_t read_lock=PTHREAD_MUTEX_INITIALIZER;
 static unsigned read_slot(const char *canonical) {
@@ -149,12 +152,46 @@ const char *rt_read_path(const char *path) {
     if(!result && error!=ENOENT)return NULL;   // erreurs inattendues : non mémorisées
     pthread_mutex_lock(&read_lock);
     if(e && strlen(canonical)<PATH_MAX && (!result || strlen(result)<PATH_MAX)){
-        e->generation=now; e->error=error; strcpy(e->canonical,canonical);
+        e->generation=now; e->error=error; e->f_ok=e->r_ok=ACCESS_UNKNOWN; strcpy(e->canonical,canonical);
         if(result)strcpy(e->result,result);
     }
     pthread_mutex_unlock(&read_lock);
     if(!result)errno=error;
     return result;
+}
+// access(F_OK|R_OK) mémorisé : filesystem_stdio teste l'existence des mêmes
+// fichiers en continu, même en jeu (27 % du thread principal). Renvoie 0, -1
+// (errno positionné), ou -2 si le cas n'est pas mémorisable (autre mode, hors
+// du jeu) : l'appelant fait alors l'appel système.
+int rt_access_cached(const char *path,int mode) {
+    if((mode!=F_OK && mode!=R_OK) || !game_root[0] || rt_is_proc_path(path))return -2;
+    char canonical[PATH_MAX]; if(absolute_path(path,canonical))return -2;
+    // Parent d'une racine (le correcteur de casse remonte jusqu'à « /volumes »
+    // à chaque fichier absent, 1,7 million d'appels en 150 s) : c'est un dossier
+    // existant et lisible, sans appel système.
+    const char *roots[3]={game_root,linux_root,user_root};
+    for(int i=0;i<3;++i){
+        size_t length=strlen(canonical);
+        if(length && !strncmp(roots[i],canonical,length) && (roots[i][length]=='/' || (length==1 && canonical[0]=='/')))return 0;
+    }
+    if(!within(canonical,game_root))return -2;
+    for(int attempt=0;attempt<2;++attempt){
+        unsigned long now=generation; unsigned slot=read_slot(canonical);
+        pthread_mutex_lock(&read_lock);
+        ReadEntry *e=read_cache?&read_cache[slot]:NULL;
+        if(e && e->generation==now && !strcmp(e->canonical,canonical)){
+            int *field=mode==F_OK?&e->f_ok:&e->r_ok, outcome;
+            if(e->error)outcome=e->error;
+            else if(*field!=ACCESS_UNKNOWN)outcome=*field;
+            else { outcome=access(e->result,mode)?errno:0; *field=outcome; }
+            pthread_mutex_unlock(&read_lock);
+            if(outcome){errno=outcome;return -1;}
+            return 0;
+        }
+        pthread_mutex_unlock(&read_lock);
+        if(!rt_read_path(path))return -1;   // remplit le cache, puis seconde passe
+    }
+    return -2;
 }
 static const char *read_path_uncached(const char *path) {
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;

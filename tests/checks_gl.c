@@ -1,6 +1,10 @@
 // Pont OpenGL : appels invités i386 vers le GL hôte, dans un contexte CGL
 // legacy hors écran (celui que SDL crée sous macOS pour togl).
 #include "checks.h"
+#include <stdlib.h>
+uint64_t rt_gl_stream_unsync_writes(void);
+int rt_gl_stream_tracked(uint32_t name);
+__attribute__((constructor)) static void enable_stream_unsync(void) { setenv("P2_GL_STREAM_UNSYNC", "1", 0); }
 #include <OpenGL/OpenGL.h>
 #include <OpenGL/gl.h>
 #include <OpenGL/glext.h>
@@ -281,5 +285,161 @@ RT_CHECK(gl_call_without_context_is_a_noop_like_linux) {
     assert(gl("glGetError", 0) == 0);                     // rend 0
     gl("glGetIntegerv", 2, GL_VIEWPORT, DATA);            // n'écrit rien
     assert(R32(DATA) == 0x12345678);
+    CGLSetCurrentContext(saved);
+}
+
+// Ajouts dans un stockage neuf : chemin non synchronisé ; chevauchement : chemin
+// normal. Le contenu relu doit être exactement celui d'appels glBufferSubData.
+RT_CHECK(gl_stream_subdata_keeps_buffer_contents) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    W32(DATA, 0); gl("glGenBuffersARB", 2, 1, DATA);
+    uint32_t buffer = R32(DATA);
+    gl("glBindBufferARB", 2, GL_ARRAY_BUFFER, buffer);
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);          // stockage neuf
+    for (uint32_t i = 0; i < 64; ++i) W8(DATA + 0x100 + i, (uint8_t)(i * 3 + 1));
+    uint64_t first = rt_gl_stream_unsync_writes();
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);            // ajout (premier appel de l'import)
+    assert(rt_gl_stream_unsync_writes() == first + 1);                         // suivi dès le premier appel
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 16, 16, DATA + 0x110);           // ajout
+    W8(DATA + 0x108, 0xee);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 8, 1, DATA + 0x108);             // chevauchement : synchronisé
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 40, 8, DATA + 0x128);            // ajout après un trou
+    uint8_t back[64]; glGetBufferSubData(GL_ARRAY_BUFFER, 0, 48, back);
+    for (uint32_t i = 0; i < 32; ++i) assert(back[i] == (i == 8 ? 0xee : (uint8_t)(i * 3 + 1)));
+    for (uint32_t i = 40; i < 48; ++i) assert(back[i] == (uint8_t)(i * 3 + 1));
+    GLint serialized = 0; glGetBufferParameteriv(GL_ARRAY_BUFFER, GL_BUFFER_SERIALIZED_MODIFY_APPLE, &serialized);
+    assert(serialized == GL_TRUE);                                             // paramètres restaurés
+    assert(glGetError() == GL_NO_ERROR);
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(saved);
+}
+
+static uint32_t new_buffer(uint32_t target, uint32_t size) {
+    W32(DATA, 0); gl("glGenBuffersARB", 2, 1, DATA);
+    uint32_t buffer = R32(DATA);
+    gl("glBindBufferARB", 2, target, buffer);
+    gl("glBufferDataARB", 4, target, size, 0, GL_STREAM_DRAW);
+    return buffer;
+}
+RT_CHECK(gl_stream_unsync_only_beyond_written_data) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    for (uint32_t i = 0; i < 64; ++i) W8(DATA + 0x100 + i, (uint8_t)(i + 7));
+    uint32_t buffer = new_buffer(GL_ARRAY_BUFFER, 64);
+    uint64_t before = rt_gl_stream_unsync_writes();
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == before + 1);                     // ajout dans un stockage neuf
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 16, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == before + 1);                     // réécriture : synchronisé
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 16, 8, DATA + 0x110);
+    assert(rt_gl_stream_unsync_writes() == before + 2);
+    // Échec de glBufferData (taille négative) : état inconnu, chemin synchronisé.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);
+    assert(gl("glGetError", 0) == GL_INVALID_VALUE);              // erreur native, jamais lue par le pont
+    assert(gl("glGetError", 0) == GL_NO_ERROR);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 40, 8, DATA + 0x128);
+    assert(rt_gl_stream_unsync_writes() == before + 2);
+    // Lecture de texture vers ce tampon lié en PACK : le GPU peut y écrire.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);
+    gl("glBindBufferARB", 2, GL_PIXEL_PACK_BUFFER, buffer);
+    GLuint texture; glGenTextures(1, &texture); glBindTexture(GL_TEXTURE_2D, texture);
+    uint32_t pixel = 0x11223344u; glTexImage2D(GL_TEXTURE_2D, 0, GL_RGBA, 1, 1, 0, GL_RGBA, GL_UNSIGNED_BYTE, &pixel);
+    gl("glGetTexImage", 5, GL_TEXTURE_2D, 0, GL_RGBA, GL_UNSIGNED_BYTE, 0);   // le GPU écrit dans le tampon PACK
+    glDeleteTextures(1, &texture);
+    gl("glBindBufferARB", 2, GL_PIXEL_PACK_BUFFER, 0);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 32, 8, DATA + 0x120);
+    assert(rt_gl_stream_unsync_writes() == before + 2);
+    // Suppression puis réutilisation du nom : aucun état hérité.
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
+    uint32_t again = new_buffer(GL_ARRAY_BUFFER, 64);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == before + 3);
+    uint8_t back[8]; glGetBufferSubData(GL_ARRAY_BUFFER, 0, 8, back);
+    for (int i = 0; i < 8; ++i) assert(back[i] == (uint8_t)(i + 7));
+    assert(glGetError() == GL_NO_ERROR);
+    W32(DATA, again); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(saved);
+}
+
+RT_CHECK(gl_stream_conservative_cases) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    for (uint32_t i = 0; i < 64; ++i) W8(DATA + 0x100 + i, (uint8_t)i);
+    // Même taille mais usage invalide : échec, l'ancien stockage reste « inconnu ».
+    uint32_t buffer = new_buffer(GL_ARRAY_BUFFER, 64);
+    uint64_t base = rt_gl_stream_unsync_writes();
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, 0x1234);
+    assert(gl("glGetError", 0) == GL_INVALID_ENUM);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base);
+    // Projection par le jeu : stockage considéré écrit.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);
+    uint32_t mapped = gl("glMapBufferARB", 2, GL_ARRAY_BUFFER, GL_WRITE_ONLY);
+    assert(mapped); gl("glUnmapBuffer", 1, GL_ARRAY_BUFFER);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base);
+    // Copie vers ce tampon (cible COPY_WRITE) : idem, même si l'appel échoue en legacy.
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, GL_STREAM_DRAW);
+    gl("glBindBufferARB", 2, 0x8F37, buffer);
+    GLint copy_write = 0; glGetIntegerv(0x8F37, &copy_write);
+    while (glGetError() != GL_NO_ERROR) {}
+    gl("glCopyBufferSubData", 5, 0x8F36, 0x8F37, 0, 0, 8);
+    while (gl("glGetError", 0) != GL_NO_ERROR) {}
+    gl("glBindBufferARB", 2, 0x8F37, 0);
+    while (gl("glGetError", 0) != GL_NO_ERROR) {}
+    if ((uint32_t)copy_write == buffer) {                       // cible COPY_WRITE disponible (GL 3.1)
+        gl("glBindBufferARB", 2, GL_ARRAY_BUFFER, buffer);
+        gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+        assert(rt_gl_stream_unsync_writes() == base);
+    }   // sinon (legacy 2.1) la copie ne peut rien écrire
+    // Suppression : l'état du nom est oublié.
+    assert(rt_gl_stream_tracked(buffer));
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
+    assert(!rt_gl_stream_tracked(buffer));
+    // Deux contextes non partagés, même nom de tampon : états séparés.
+    CGLPixelFormatAttribute attributes[] = {kCGLPFAOpenGLProfile, (CGLPixelFormatAttribute)kCGLOGLPVersion_Legacy, 0};
+    CGLPixelFormatObj format = NULL; GLint count = 0; CGLContextObj other = NULL;
+    assert(CGLChoosePixelFormat(attributes, &format, &count) == kCGLNoError);
+    assert(CGLCreateContext(format, NULL, &other) == kCGLNoError); CGLDestroyPixelFormat(format);
+    current_context();
+    uint32_t mine = new_buffer(GL_ARRAY_BUFFER, 64);
+    CGLSetCurrentContext(other);
+    uint32_t theirs = new_buffer(GL_ARRAY_BUFFER, 64);
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, DATA + 0x100, GL_STREAM_DRAW);   // initialisé : entièrement écrit
+    base = rt_gl_stream_unsync_writes();
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base);                                   // synchronisé dans l'autre contexte
+    current_context();
+    gl("glBindBufferARB", 2, GL_ARRAY_BUFFER, mine);
+    gl("glBufferSubData", 4, GL_ARRAY_BUFFER, 0, 8, DATA + 0x100);
+    assert(rt_gl_stream_unsync_writes() == base + 1 || mine != theirs);             // état propre au share group
+    W32(DATA, mine); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(other); W32(DATA, theirs); gl("glDeleteBuffersARB", 2, 1, DATA);
+    CGLSetCurrentContext(NULL); CGLDestroyContext(other);
+    CGLSetCurrentContext(saved);
+}
+
+// Le pont ne lit jamais glGetError : erreurs répétées et changement de contexte
+// gardent exactement la sémantique du GL natif.
+RT_CHECK(gl_stream_keeps_native_error_semantics) {
+    CGLContextObj saved = CGLGetCurrentContext();
+    current_context();
+    uint32_t buffer = new_buffer(GL_ARRAY_BUFFER, 64);
+    while (glGetError() != GL_NO_ERROR) {}
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);   // INVALID_VALUE
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 0xffffffffu, 0, GL_STREAM_DRAW);   // même erreur
+    gl("glBufferDataARB", 4, GL_ARRAY_BUFFER, 64, 0, 0x1234);                    // INVALID_ENUM
+    GLenum bridged[4]; int n = 0;
+    for (GLenum e; n < 4 && (e = (GLenum)gl("glGetError", 0)) != GL_NO_ERROR;) bridged[n++] = e;
+    // Même séquence appliquée directement au GL natif pour comparaison.
+    glBufferData(GL_ARRAY_BUFFER, -1, NULL, GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, -1, NULL, GL_STREAM_DRAW);
+    glBufferData(GL_ARRAY_BUFFER, 64, NULL, 0x1234);
+    GLenum native[4]; int m = 0;
+    for (GLenum e; m < 4 && (e = glGetError()) != GL_NO_ERROR;) native[m++] = e;
+    assert(n == m);
+    for (int i = 0; i < n; ++i) assert(bridged[i] == native[i]);
+    W32(DATA, buffer); gl("glDeleteBuffersARB", 2, 1, DATA);
     CGLSetCurrentContext(saved);
 }

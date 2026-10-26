@@ -2,6 +2,7 @@
 // retour de structure par valeur (`ret 4`) et handles de manettes, via des
 // événements synthétiques et un joystick virtuel SDL (aucun matériel requis).
 #include "checks.h"
+#include "sdl_common.h"
 #include <SDL2/SDL.h>
 #include <stdlib.h>
 
@@ -264,4 +265,36 @@ RT_CHECK(sdl_input_hides_sdl3_only_events) {
     assert(rt_sdl_event_is_sdl2(SDL_WINDOWEVENT) && rt_sdl_event_is_sdl2(SDL_KEYDOWN));
     assert(rt_sdl_event_is_sdl2(SDL_USEREVENT + 7) && rt_sdl_event_is_sdl2(SDL_DROPFILE));
     assert(!rt_sdl_event_is_sdl2(0x205) && !rt_sdl_event_is_sdl2(0x202));  // événements fenêtre SDL3
+}
+
+// Retina : positions dans la fenêtre et tailles de fenêtre en pixels (×2),
+// déplacements relatifs inchangés (même sensibilité de visée).
+RT_CHECK(sdl_input_retina_scales_absolute_coordinates) {
+    CPU cpu, *c = &cpu; rt_cpu_reset(c);
+    rt_sdl_force_scales(2, 2);
+    SDL_Event host = {0};
+    host.motion.type = SDL_MOUSEMOTION; host.motion.x = 10; host.motion.y = 20; host.motion.xrel = 3; host.motion.yrel = -4;
+    rt_sdl_event_to_guest(c, &host, EVENT, 0);
+    assert(R32(EVENT + 20) == 20 && R32(EVENT + 24) == 40 && R32(EVENT + 28) == 3 && R32(EVENT + 32) == (uint32_t)-4);
+    memset(&host, 0, sizeof(host));
+    host.button.type = SDL_MOUSEBUTTONDOWN; host.button.button = 1; host.button.x = 7; host.button.y = 9;
+    rt_sdl_event_to_guest(c, &host, EVENT, 0);
+    assert(((uint8_t *)GPTR(EVENT))[16] == 1 && R32(EVENT + 20) == 14 && R32(EVENT + 24) == 18);
+    memset(&host, 0, sizeof(host));
+    host.window.type = SDL_WINDOWEVENT; host.window.event = SDL_WINDOWEVENT_SIZE_CHANGED;
+    host.window.data1 = 1280; host.window.data2 = 720;
+    rt_sdl_event_to_guest(c, &host, EVENT, 0);
+    assert(R32(EVENT + 16) == 2560 && R32(EVENT + 20) == 1440);
+    host.window.event = SDL_WINDOWEVENT_MOVED; host.window.data1 = 100; host.window.data2 = 50;
+    rt_sdl_force_scales(2, 1);   // fenêtre à l'échelle 1 : position à l'écran toujours en pixels
+    rt_sdl_event_to_guest(c, &host, EVENT, 0);
+    assert(R32(EVENT + 16) == 200 && R32(EVENT + 20) == 100);
+    host.window.event = SDL_WINDOWEVENT_FOCUS_GAINED; host.window.data1 = 5;
+    rt_sdl_event_to_guest(c, &host, EVENT, 0);
+    assert(R32(EVENT + 16) == 5);
+    rt_sdl_force_scales(0, 0);
+    memset(&host, 0, sizeof(host));
+    host.motion.type = SDL_MOUSEMOTION; host.motion.x = 10;
+    rt_sdl_event_to_guest(c, &host, EVENT, 0);
+    assert(R32(EVENT + 20) == 10);
 }

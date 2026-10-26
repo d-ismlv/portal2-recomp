@@ -10,6 +10,7 @@
 // SHIMS: SDL_JoystickNameForIndex SDL_JoystickGetDeviceGUID SDL_JoystickGetGUIDString
 // SHIMS: SDL_HapticOpenFromJoystick SDL_HapticClose SDL_HapticRumbleInit SDL_HapticRumblePlay
 #include "modules.h"
+#include "sdl_common.h"
 #include <SDL2/SDL.h>
 #include <TargetConditionals.h>
 #if TARGET_OS_IPHONE
@@ -75,6 +76,7 @@ static int string_event(uint32_t type) {
 // (ex. 0x205, SDL_EVENT_WINDOW_MOVED) : un jeu SDL2 ne les verrait jamais,
 // ils ne lui sont donc pas transmis (ni par observateur ni par PollEvent).
 int rt_sdl_event_is_sdl2(uint32_t type);
+void fps_overlay_toggle(void);
 int rt_sdl_event_is_sdl2(uint32_t type) {
     return plain_event(type) || string_event(type) || (type >= SDL_USEREVENT && type <= SDL_LASTEVENT) ||
            type == SDL_TEXTEDITING_EXT || type == SDL_SENSORUPDATE || type == SDL_CONTROLLERSENSORUPDATE ||
@@ -100,10 +102,33 @@ static uint32_t get32(const uint8_t *in, unsigned offset) { uint32_t v; memcpy(&
 // (propriété de l'application après SDL_PollEvent) est libérée ici.
 void rt_sdl_event_to_guest(CPU *c, const SDL_Event *host, uint32_t guest, int release_host);
 #define event_to_guest rt_sdl_event_to_guest
+// Retina (sdl_video.c) : positions de souris dans la fenêtre et tailles de
+// fenêtre converties de points en pixels du jeu, position de la fenêtre en
+// pixels de l'écran. Les déplacements relatifs (visée) restent en points pour
+// garder la même sensibilité.
+static void scale_to_pixels(SDL_Event *e, int window_scale, int display_scale) {
+    switch (e->type) {
+    case SDL_MOUSEMOTION: e->motion.x *= window_scale; e->motion.y *= window_scale; break;
+    case SDL_MOUSEBUTTONDOWN: case SDL_MOUSEBUTTONUP: e->button.x *= window_scale; e->button.y *= window_scale; break;
+    case SDL_WINDOWEVENT:
+        if (e->window.event == SDL_WINDOWEVENT_RESIZED || e->window.event == SDL_WINDOWEVENT_SIZE_CHANGED) {
+            e->window.data1 *= window_scale; e->window.data2 *= window_scale;
+        } else if (e->window.event == SDL_WINDOWEVENT_MOVED) {
+            e->window.data1 *= display_scale; e->window.data2 *= display_scale;
+        }
+        break;
+    }
+}
+
 void rt_sdl_event_to_guest(CPU *c, const SDL_Event *host, uint32_t guest, int release_host) {
     uint8_t out[GUEST_EVENT_SIZE] = {0};
     uint32_t type = host->type;
-    if (plain_event(type)) memcpy(out, host, GUEST_EVENT_SIZE);
+    int window_scale = rt_sdl_window_scale(), display_scale = rt_sdl_display_scale();
+    if (plain_event(type) && (window_scale != 1 || display_scale != 1)) {
+        SDL_Event scaled = *host;
+        scale_to_pixels(&scaled, window_scale, display_scale);
+        memcpy(out, &scaled, GUEST_EVENT_SIZE);
+    } else if (plain_event(type)) memcpy(out, host, GUEST_EVENT_SIZE);
     else if (type >= SDL_USEREVENT && type <= SDL_LASTEVENT) {
         uintptr_t d1 = (uintptr_t)host->user.data1, d2 = (uintptr_t)host->user.data2;
         if (d1 > UINT32_MAX || d2 > UINT32_MAX)
@@ -279,7 +304,31 @@ static void poll_into(CPU *c, uint32_t guest, int *got) {
         if (*got < 0) *got = 0;
         return;
     }
+    // Diagnostic (fenêtre cachée seulement) : P2_FAKE_FOCUS=1 annonce une fois au
+    // jeu que sa fenêtre a le focus, pour mesurer sans le sommeil de 50 ms que
+    // le moteur s'impose sans focus. Sans effet en fenêtre visible.
+    static int fake_focus = -1;
+    if (fake_focus < 0) {
+        const char *hidden = getenv("P2_HIDDEN_WINDOWS"), *wanted = getenv("P2_FAKE_FOCUS");
+        fake_focus = hidden && *hidden && strcmp(hidden, "0") && wanted && *wanted && strcmp(wanted, "0");
+    }
+    SDL_Window *window = fake_focus == 1 ? SDL_GL_GetCurrentWindow() : NULL;
+    if (window) {
+        fake_focus = 2;
+        memset(&event, 0, sizeof(event));
+        event.type = SDL_WINDOWEVENT;
+        event.window.timestamp = SDL_GetTicks();
+        event.window.windowID = SDL_GetWindowID(window);
+        event.window.event = SDL_WINDOWEVENT_FOCUS_GAINED;
+        event_to_guest(c, &event, guest, 0);
+        *got = 1;
+        return;
+    }
     while ((*got = SDL_PollEvent(&event)) && !rt_sdl_event_is_sdl2(event.type)) {}
+    // F3 : compteur d'images hôte (fps_overlay.c). La touche reste transmise au
+    // jeu, qui ne l'associe à rien par défaut.
+    if (*got && event.type == SDL_KEYDOWN && !event.key.repeat && event.key.keysym.scancode == SDL_SCANCODE_F3)
+        fps_overlay_toggle();
     if (*got) event_to_guest(c, &event, guest, 1);
 }
 
@@ -339,8 +388,8 @@ static int sdl_input_shim(CPU *c, const char *name) {
         uint32_t px = argument(c, 0), py = argument(c, 1);
         int x, y;
         c->eax = SDL_GetMouseState(&x, &y);
-        if (px) W32(px, (uint32_t)x);
-        if (py) W32(py, (uint32_t)y);
+        if (px) W32(px, (uint32_t)(x * rt_sdl_window_scale()));
+        if (py) W32(py, (uint32_t)(y * rt_sdl_window_scale()));
     } else if (!strcmp(n, "SetRelativeMouseMode")) {
         c->eax = (uint32_t)SDL_SetRelativeMouseMode(argument(c, 0) ? SDL_TRUE : SDL_FALSE);
     } else if (!strcmp(n, "SetModState")) {

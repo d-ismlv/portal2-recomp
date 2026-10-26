@@ -2,6 +2,8 @@
 // Layout: glibc sysdeps/unix/sysv/linux/x86/bits/struct_stat.h.
 #include "rt.h"
 #include <errno.h>
+#include <stdio.h>
+#include <stdlib.h>
 #include <sys/stat.h>
 #include <unistd.h>
 
@@ -40,6 +42,8 @@ int rt_stat_shim(CPU *c,const char *name) {
         rt_string_length(c,target);const char *path=rt_read_path(GPTR(target));
         result=path?(link_call?lstat(path,&native):stat(path,&native)):-1;
     }
+    static int trace=-1;if(trace<0)trace=getenv("P2_TRACE_STAT")!=NULL;
+    if(trace&&!fd_call)fprintf(stderr,"[stat] %s %s -> %d\n",name,(const char *)GPTR(target),result);
     if(!result)result=write_stat(c,destination,&native,strstr(name,"64")!=NULL);
     if(result)rt_save_errno(c);
     c->eax=(uint32_t)result;return 1;

@@ -1,4 +1,5 @@
 #include "rt.h"
+#include <stdlib.h>
 #include <time.h>
 
 void rt_cpu_reset(CPU *c) {
@@ -11,6 +12,19 @@ void rt_cpu_reset(CPU *c) {
 // CPUID describes the virtual i386 machine whose code is being recompiled,
 // rather than pretending the ARM host can execute x86 instructions. The AOT
 // lifter still rejects individual instructions it cannot yet lower.
+// Nombre de processeurs logiques invités, source unique pour CPUID, sysconf et
+// /proc/cpuinfo. 1 par défaut ; P2_GUEST_CPUS=N (1..16) pour expérimenter :
+// l'exécution invitée reste sérialisée par le verrou (scheduler.c).
+unsigned rt_guest_cpu_count(void) {
+    static unsigned count;
+    if (!count) {
+        const char *e = getenv("P2_GUEST_CPUS");
+        long n = e ? strtol(e, NULL, 10) : 1;
+        count = n < 1 ? 1 : n > 16 ? 16 : (unsigned)n;
+    }
+    return count;
+}
+
 void rt_cpuid(CPU *c) {
     uint32_t leaf = c->eax;
     c->eax = c->ebx = c->ecx = c->edx = 0;
@@ -19,9 +33,10 @@ void rt_cpuid(CPU *c) {
         c->ebx = 0x756e6547; c->edx = 0x49656e69; c->ecx = 0x6c65746e; // GenuineIntel
     } else if (leaf == 1) {
         c->eax = 0x000006f2;
-        c->ebx = 1u << 16; // one logical guest processor
+        unsigned cpus = rt_guest_cpu_count();
+        c->ebx = cpus << 16; // processeurs logiques invités
         c->edx = (1u << 0) | (1u << 4) | (1u << 8) | (1u << 15) |
-                 (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26);
+                 (1u << 23) | (1u << 24) | (1u << 25) | (1u << 26) | (cpus > 1 ? 1u << 28 : 0u);
     } else if (leaf == 0x80000000u) {
         c->eax = 0x80000004u;
     } else if (leaf >= 0x80000002u && leaf <= 0x80000004u) {

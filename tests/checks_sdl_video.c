@@ -269,3 +269,37 @@ RT_CHECK(sdl_video_traps_instead_of_lying) {
     call("SDL_free", 1, block);
     assert(rt_free(block) == -1);
 }
+
+// Retina (échelle d'écran imposée à 2) : écran annoncé en pixels ; une
+// résolution qui tient à l'écran en points garde une fenêtre à l'échelle 1,
+// une plus grande donne une fenêtre de moitié en points.
+RT_CHECK(sdl_video_retina_window_follows_resolution) {
+    start_dummy_video();
+    rt_sdl_force_scales(2, 1);
+    SDL_Rect usable; assert(!SDL_GetDisplayUsableBounds(0, &usable));
+    int big_w = usable.w * 2, big_h = usable.h * 2;   // ne tient pas en points
+    uint32_t window = call("SDL_CreateWindow", 6, put_string(DATA, "Retina"), SDL_WINDOWPOS_CENTERED,
+                           SDL_WINDOWPOS_CENTERED, big_w, big_h, SDL_WINDOW_HIDDEN);
+    SDL_Window *host = rt_handle_get(window, RT_SDL_WINDOW);
+    int w = 0, h = 0; SDL_GetWindowSize(host, &w, &h);
+    assert(w == usable.w && h == usable.h && rt_sdl_window_scale() == 2);
+    call("SDL_GetWindowSize", 3, window, DATA, DATA + 4);
+    assert((int)R32(DATA) == big_w && (int)R32(DATA + 4) == big_h);
+    // Petite résolution : échelle 1, fenêtre de la même taille en points.
+    call("SDL_SetWindowSize", 3, window, usable.w / 2, usable.h / 2);
+    SDL_GetWindowSize(host, &w, &h);
+    assert(w == usable.w / 2 && h == usable.h / 2 && rt_sdl_window_scale() == 1);
+    call("SDL_GetWindowSize", 3, window, DATA, DATA + 4);
+    assert((int)R32(DATA) == usable.w / 2 && (int)R32(DATA + 4) == usable.h / 2);
+    call("SDL_SetWindowSize", 3, window, big_w, big_h);
+    assert(rt_sdl_window_scale() == 2);
+    SDL_Rect bounds; assert(!SDL_GetDisplayBounds(0, &bounds));
+    assert(call("SDL_GetDisplayBounds", 2, 0, DATA) == 0);
+    assert((int)R32(DATA + 8) == 2 * bounds.w && (int)R32(DATA + 12) == 2 * bounds.h);
+    SDL_DisplayMode desktop; assert(!SDL_GetDesktopDisplayMode(0, &desktop));
+    assert(call("SDL_GetDesktopDisplayMode", 2, 0, DATA) == 0);
+    assert((int)R32(DATA + 4) == 2 * desktop.w && (int)R32(DATA + 8) == 2 * desktop.h);
+    call("SDL_DestroyWindow", 1, window);
+    rt_sdl_force_scales(0, 0);
+    stop_video();
+}

@@ -1,20 +1,83 @@
-# État — 25 octobre 2026, 21 h (reprise Claude)
+# État — 26 octobre 2026, nuit (reprise Claude)
 
-**On entre en jeu.** Le build natif ARM64 charge le menu puis la première
-carte (`sp_a1_intro1`, chambre de repos, « LOOK UP ») et la rend sans
-erreur, en fenêtre cachée (vérifié sur `cc21499`, -O1). En fenêtre cachée le
-moteur dort 50 ms par image faute de focus (~15 fps) ; sans ce sommeil
-(chargement) on mesure 200-250 fps. Pas encore vérifié : contrôles
-clavier/souris, son audible, cadence réelle avec focus, suite de la partie.
+**Le jeu est jouable** (testé par l'utilisateur : menus, clavier/souris, son,
+voix, musique, début de partie, retour au menu, Cmd-Q). Performances
+mesurées en jeu (sp_a1_intro1, focus simulé, fenêtre cachée, M3 Pro) :
+
+| build | 1280×720 | « 2560×1440 » sans Retina (en fait 1512×982) | 2560×1440 Retina |
+|---|---|---|---|
+| `-O1` mémoire contrôlée (25 oct. soir) | ~117 fps | — | — |
+| `--release` (`-O2 --fast-memory`), 26 oct. | 235-255 fps | ~263-280 fps | ~215-230 fps (menu) |
+
+Attention : sans mode Retina, macOS réduit une fenêtre plus grande que
+l'écran (1512×982 points sur ce MacBook) ; les anciennes mesures
+« 2560×1440 » rendaient donc 1512×982 pixels. Le mode Retina rend vraiment
+2560×1440 (2,5 fois plus de pixels) dans une fenêtre de 1280×720 points.
+
+Gains de la nuit du 25 au 26 (mesurés avec `tools/bench_game.py`, moyenne de
+la seconde moitié de plusieurs parties) : `--release` (×1,7), QoS interactive
+(+15 %), caches de fichiers (access/fopen des absents, parents de la racine,
+flux libc indexés), et surtout ajouts `glBufferSubData` non synchronisés dans
+un stockage neuf (+30 %, relu trois fois par Codex, `P2_GL_STREAM_UNSYNC=0`
+pour désactiver). Essais écartés, mesures à l'appui : annoncer 2 ou 4 CPU
+(plus lent), relâcher le verrou invité pendant les appels GL (plus lent),
+forcer l'usage des tampons, `gl_bufmode`.
+
+MSAA (26 oct., sp_a1_intro6, 2560×1440 Retina, machine chargée par le
+simulateur iOS) : togl fait 6 résolutions MSAA par image (3 réduites vers la
+texture de réfraction 1024², 2 pleine taille, 1 vers l'écran), chacune après
+de nouveaux dessins dans la surface MSAA : aucune n'est redondante. MSAA 4x :
+13,4 ms GPU par image ; sans MSAA : 7,0 ms (47 → 75 fps sous charge). En
+Retina, baisser l'antialiasing dans le menu Vidéo est le levier principal.
+Les lancements de diagnostic (sans `--show`) utilisent maintenant une copie
+des données utilisateur (`../work/portal2-userdata-diag`).
+
+Profil CPU fiable (26 oct., `/usr/bin/sample` sur le jeu en régime établi ;
+le profileur SIGPROF intégré surpondère les appels système sous macOS) :
+thread principal ≈ 50 % code du jeu traduit, 16 % runtime, 11 % pilote
+GL/Metal, 8 % présentation (requêtes WindowServer, peut-être dues à la
+fenêtre cachée de diagnostic). Gains du jour, sans MSAA en 2560×1440 (limité
+CPU), A/B alterné : routes directes des imports chauds (`P2_IMPORT_COUNTS`
+pour les compter) 120,9 → 125,6 fps ; cache de cible par site d'appel
+indirect + `rt_return` en macro 117,4 → 124,4 fps (machine chargée). Avec
+MSAA 4x en 1440p le GPU limite (~13 ms/image) : ces gains n'y changent rien.
+Pistes suivantes : ThinLTO/PGO, accès TLS en ligne, présentation en fenêtre
+visible à mesurer.
+
+Le thread principal attend surtout le pilote OpenGL d'Apple (soumissions
+Metal sur glBufferSubData de tampons en vol, compilation GLSL à la volée,
+mise en cache par togl dans `update/glshaders.cfg`). La carte graphique a de
+la marge : la cadence varie peu avec la résolution.
 
 Lancer (depuis ce dossier, client Steam ouvert) :
 
 ```sh
-python3 tools/build_game.py            # tout le jeu, -O1 (≈ 10 min à froid)
+python3 tools/build_game.py --release  # pour jouer : -O2 sans contrôle mémoire (≈ 10 min à froid)
+python3 tools/build_game.py            # diagnostic : -O1, mémoire contrôlée (≈ 20 min à froid)
 SteamAppId=620 python3 tools/run_game.py --show --timeout 3600
 ```
 
-Diagnostics : `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
+Pour jouer sans terminal : `python3 tools/make_app.py` crée
+`~/Applications/Portal 2 Natif.app` (lien vers `build/portal2-native`, chemins
+de `config/local.json`, Steam démarré au besoin, sans `-w/-h` : résolution et
+mode viennent du menu Vidéo, enregistrés dans `update/cfg/video.txt`).
+Journal : `~/Library/Logs/Portal2Natif.log`. À refaire seulement si les
+chemins ou arguments changent ; une recompilation suffit sinon.
+
+Retina (actif par défaut, `P2_RETINA=0` pour revenir à l'ancien
+comportement) : l'écran est annoncé en pixels (3024×1964), donc le menu
+Vidéo propose aussi les grandes résolutions de la table du jeu (jusqu'à
+2560×1600). Une résolution qui tient à l'écran en points donne une fenêtre
+normale (rendu ×1) ; une plus grande donne une fenêtre Retina de moitié en
+points (2560×1440 → fenêtre de 1280×720 points, rendu natif). Bascule à chaud
+de `wantsBestResolutionOpenGLSurface`. Plein écran non vérifié en Retina.
+F3 affiche/masque un compteur d'images hôte (`P2_FPS=1` : visible dès le
+départ).
+
+Diagnostics : `P2_GPU_TIMING=1` (temps GPU par image, requêtes
+GL_TIME_ELAPSED), `P2_BLIT_TRACE=<n>` (300 copies glBlitFramebuffer à partir
+de la n-ième, avec les dessins faits dans la surface source depuis la copie
+précédente), `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
 (capture du tampon arrière), `P2_WATCH_CALL=0x<adresse>` (arguments d'un
 appel invité), fautes hôtes traduites en adresse invitée + pile invitée.
 Sans `--show`, la fenêtre est cachée et la synchro verticale désactivée.

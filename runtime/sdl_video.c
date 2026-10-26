@@ -25,6 +25,9 @@
 // SHIMS: SDL_GetClipboardText SDL_SetClipboardText SDL_HasClipboardText
 #include "rt.h"
 #include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
+#include <mach/mach_time.h>
+void rt_gl_timing_add(const char *label, uint64_t ticks);
+void fps_overlay_frame(int drawable_width, int drawable_height);
 #include "sdl_common.h"
 #define SDL_MAIN_HANDLED
 #include <SDL2/SDL.h>
@@ -230,6 +233,7 @@ static const char *gl_attribute_name(uint32_t attribute) {
 // Diagnostic hôte (sans effet sur le jeu) : P2_FRAME_LOG=1 journalise le
 // nombre d'images et leur cadence ; P2_FRAME_DUMP=/chemin.ppm y écrit le
 // tampon arrière toutes les 120 images, avant l'échange (fenêtre cachée).
+static void drawable_size(SDL_Window *window, int *w, int *h);
 static void diagnose_frame(SDL_Window *w) {
     static uint64_t frames, last_ticks;
     static int log = -1; static const char *dump;
@@ -243,7 +247,7 @@ static void diagnose_frame(SDL_Window *w) {
     }
     if (!dump || frames % 120 != 1 || !w) return;
     int width = 0, height = 0;
-    SDL_GL_GetDrawableSize(w, &width, &height);
+    drawable_size(w, &width, &height);
     if (width <= 0 || height <= 0 || width > 8192 || height > 8192) return;
     unsigned char *pixels = malloc((size_t)width * (size_t)height * 3);
     if (!pixels) return;
@@ -268,10 +272,154 @@ static void diagnose_frame(SDL_Window *w) {
     fprintf(stderr, "[diag] frame %llu dumped to %s (%dx%d)\n", (unsigned long long)frames, dump, width, height);
 }
 
+// Diagnostic P2_GPU_TIMING=1 : temps GPU par image (GL_TIME_ELAPSED autour de
+// chaque image, résultats lus avec quelques images de retard), journalisé
+// toutes les 120 images avec le temps CPU entre deux échanges.
+static void gpu_timing_frame(void) {
+#if TARGET_OS_IPHONE
+    return;   // gl4es : pas de GL_TIME_ELAPSED (requêtes d'occlusion seulement)
+#endif
+    static int enabled = -1, active;
+    static GLuint queries[8];
+    static unsigned issued, read;
+    static double gpu_ms, cpu_ms; static unsigned samples; static uint64_t last;
+    if (enabled < 0) enabled = getenv("P2_GPU_TIMING") != NULL;
+    if (!enabled) return;
+    static mach_timebase_info_data_t base;
+    if (!base.denom) { mach_timebase_info(&base); glGenQueries(8, queries); }
+    if (active) { glEndQuery(GL_TIME_ELAPSED_EXT); ++issued; active = 0; }
+    while (read < issued) {
+        GLint ready = 0; glGetQueryObjectiv(queries[read % 8], GL_QUERY_RESULT_AVAILABLE, &ready);
+        if (!ready && issued - read < 7) break;
+        GLuint64EXT ns = 0;
+#if !TARGET_OS_IPHONE
+        glGetQueryObjectui64vEXT(queries[read % 8], GL_QUERY_RESULT, &ns);
+#endif
+        gpu_ms += (double)ns / 1e6; ++samples; ++read;
+    }
+    uint64_t now = mach_absolute_time();
+    if (last) cpu_ms += (double)(now - last) * base.numer / base.denom / 1e6;
+    last = now;
+    if (samples >= 120) {
+        fprintf(stderr, "[gpu] %.2f ms GPU par image, %.2f ms entre deux échanges\n", gpu_ms / samples, cpu_ms / samples);
+        gpu_ms = cpu_ms = 0; samples = 0;
+    }
+    glBeginQuery(GL_TIME_ELAPSED_EXT, queries[issued % 8]); active = 1;
+}
+
 static int hidden_windows(void) {
     static int value = -1;
     if (value < 0) { const char *e = getenv("P2_HIDDEN_WINDOWS"); value = e && *e && strcmp(e, "0"); }
     return value;
+}
+
+// --- Retina ------------------------------------------------------------------
+// Le jeu raisonne en pixels : taille de fenêtre = taille du tampon arrière, et
+// le menu Vidéo propose les résolutions de sa table qui tiennent dans l'écran
+// annoncé. L'écran est donc annoncé en pixels (3024×1964 sur un MacBook Pro
+// 14 pouces) et la fenêtre suit la résolution choisie :
+// - si elle tient à l'écran en points, fenêtre de cette taille en points,
+//   rendu à l'échelle 1 (comme avant) ;
+// - sinon, fenêtre Retina : moitié de la taille en points, rendu natif.
+// La propriété Retina de la vue Cocoa (wantsBestResolutionOpenGLSurface) est
+// basculée à chaud ; tailles, positions et coordonnées de souris vues par le
+// jeu sont converties. P2_RETINA=0 désactive tout (comportement d'origine).
+#include <SDL2/SDL_syswm.h>
+#include <objc/message.h>
+static int display_scale_value, display_scale_forced, window_scale_value = 1;
+
+static int retina_enabled(void) {
+#if TARGET_OS_IPHONE
+    return 0;   // iOS : échelle de rendu gérée par ios/sdl_ios.m
+#endif
+    const char *e = getenv("P2_RETINA");
+    return !e || !*e || strcmp(e, "0");
+}
+
+// Échelle de l'écran principal, mesurée une fois sur une petite fenêtre cachée.
+int rt_sdl_display_scale(void) {
+    if (display_scale_value) return display_scale_value;
+    if (!retina_enabled() || !SDL_WasInit(SDL_INIT_VIDEO) || !pthread_main_np()) return 1;
+    int scale = 1;
+    SDL_Window *probe = SDL_CreateWindow("", 0, 0, 64, 64, SDL_WINDOW_HIDDEN | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (probe) {
+        int pixels = 0;
+        SDL_GetWindowSizeInPixels(probe, &pixels, NULL);
+        if (pixels >= 96) scale = (pixels + 32) / 64;
+        SDL_DestroyWindow(probe);
+    }
+    display_scale_value = scale;
+    fprintf(stderr, "[sdl] Retina: display scale %d\n", scale);
+    return scale;
+}
+// Pixels par point de la fenêtre du jeu (1 ou l'échelle de l'écran).
+int rt_sdl_window_scale(void) { return window_scale_value; }
+// Tests : impose les échelles sans fenêtre de mesure ni vue Cocoa (0 = recalculer).
+void rt_sdl_force_scales(int display, int window) {
+    display_scale_value = display; display_scale_forced = display != 0; window_scale_value = window ? window : 1;
+}
+
+// Écran : pixels ↔ points.
+static int screen_points(int pixels) { return pixels / rt_sdl_display_scale(); }
+static int screen_pixels(int points) { return points * rt_sdl_display_scale(); }
+static int position_to_points(int value) {
+    return SDL_WINDOWPOS_ISUNDEFINED(value) || SDL_WINDOWPOS_ISCENTERED(value) ? value : screen_points(value);
+}
+static void scale_mode(SDL_DisplayMode *mode, int pixels) {
+    mode->w = pixels ? screen_pixels(mode->w) : screen_points(mode->w);
+    mode->h = pixels ? screen_pixels(mode->h) : screen_points(mode->h);
+}
+
+// Échelle d'une fenêtre de w×h pixels : 1 si elle tient dans la zone utile de
+// l'écran (barre de titre comprise), l'échelle de l'écran sinon.
+enum { TITLE_BAR_POINTS = 28 };
+static int scale_for(int w, int h) {
+    int scale = rt_sdl_display_scale();
+    if (scale == 1) return 1;
+    SDL_Rect usable;
+    if (SDL_GetDisplayUsableBounds(0, &usable)) return scale;
+    return w <= usable.w && h + TITLE_BAR_POINTS <= usable.h ? 1 : scale;
+}
+
+// Bascule la surface GL de la fenêtre en résolution native (Retina) ou non.
+static void set_backing(SDL_Window *window, int scale) {
+    if (scale == window_scale_value) return;
+    window_scale_value = scale;
+    fprintf(stderr, "[sdl] Retina: window scale %d\n", scale);
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+#if TARGET_OS_IPHONE
+    (void)window;
+#else
+    if (display_scale_forced || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_COCOA) return;
+    id view = ((id (*)(id, SEL))objc_msgSend)((id)info.info.cocoa.window, sel_registerName("contentView"));
+    ((void (*)(id, SEL, BOOL))objc_msgSend)(view, sel_registerName("setWantsBestResolutionOpenGLSurface:"), scale > 1);
+    id context = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSOpenGLContext"), sel_registerName("currentContext"));
+    if (context) ((void (*)(id, SEL))objc_msgSend)(context, sel_registerName("update"));
+#endif
+}
+
+// Taille de la fenêtre en pixels du jeu (= surface GL), pour les diagnostics.
+static void drawable_size(SDL_Window *window, int *w, int *h) {
+    SDL_GetWindowSize(window, w, h);
+    *w *= window_scale_value; *h *= window_scale_value;
+}
+
+static void resize_window(SDL_Window *window, int w, int h) {
+    int scale = scale_for(w, h);
+    set_backing(window, scale);
+    SDL_SetWindowSize(window, w / scale, h / scale);
+}
+
+static SDL_Window *create_window(const char *title, int x, int y, int w, int h, uint32_t flags) {
+    if (rt_sdl_display_scale() == 1) return SDL_CreateWindow(title, x, y, w, h, flags);
+    int scale = scale_for(w, h);
+    SDL_Window *window = SDL_CreateWindow(title, position_to_points(x), position_to_points(y), w / scale, h / scale,
+                                          flags | SDL_WINDOW_ALLOW_HIGHDPI);
+    if (!window) return NULL;
+    window_scale_value = rt_sdl_display_scale();   // surface créée en Retina
+    set_backing(window, scale);
+    return window;
 }
 
 static int sdl_video(CPU *c, const char *name) {
@@ -297,8 +445,8 @@ static int sdl_video(CPU *c, const char *name) {
         // Mode diagnostic P2_HIDDEN_WINDOWS=1 : la fenêtre existe (contexte GL
         // réel) mais n'est jamais montrée ; le jeu n'en voit aucune différence.
         uint32_t flags = arg(c, 5) | (hidden_windows() ? SDL_WINDOW_HIDDEN : 0);
-        SDL_Window *w = SDL_CreateWindow(guest_string(c, arg(c, 0)), (int)arg(c, 1), (int)arg(c, 2),
-                                         (int)arg(c, 3), (int)arg(c, 4), flags);
+        SDL_Window *w = create_window(guest_string(c, arg(c, 0)), (int)arg(c, 1), (int)arg(c, 2),
+                                      (int)arg(c, 3), (int)arg(c, 4), flags);
         if (w && !(r = rt_handle_new(w, RT_SDL_WINDOW))) { SDL_DestroyWindow(w); rt_trap(c, c->eip, "SDL: handle table full"); }
     } else if (!strcmp(n, "DestroyWindow")) {
         SDL_Window *w = WINDOW(0);
@@ -313,28 +461,31 @@ static int sdl_video(CPU *c, const char *name) {
         SDL_Window *w = WINDOW(0);
         SDL_SetWindowIcon(w, rt_sdl_surface_sync(c, arg(c, 1)));
     }
-    else if (!strcmp(n, "SetWindowPosition")) SDL_SetWindowPosition(WINDOW(0), (int)arg(c, 1), (int)arg(c, 2));
-    else if (!strcmp(n, "SetWindowSize")) SDL_SetWindowSize(WINDOW(0), (int)arg(c, 1), (int)arg(c, 2));
+    else if (!strcmp(n, "SetWindowPosition"))
+        SDL_SetWindowPosition(WINDOW(0), position_to_points((int)arg(c, 1)), position_to_points((int)arg(c, 2)));
+    else if (!strcmp(n, "SetWindowSize")) resize_window(WINDOW(0), (int)arg(c, 1), (int)arg(c, 2));
     else if (!strcmp(n, "GetWindowSize")) {
         int w = 0, h = 0; uint32_t pw = arg(c, 1), ph = arg(c, 2);
         if (pw) rt_write_span(c, pw, 4);
         if (ph) rt_write_span(c, ph, 4);
         SDL_GetWindowSize(WINDOW(0), pw ? &w : NULL, ph ? &h : NULL);
-        if (pw) W32(pw, (uint32_t)w);
-        if (ph) W32(ph, (uint32_t)h);
+        if (pw) W32(pw, (uint32_t)(w * window_scale_value));
+        if (ph) W32(ph, (uint32_t)(h * window_scale_value));
     }
     else if (!strcmp(n, "SetWindowBordered")) SDL_SetWindowBordered(WINDOW(0), arg(c, 1) ? SDL_TRUE : SDL_FALSE);
     else if (!strcmp(n, "SetWindowFullscreen")) r = (uint32_t)SDL_SetWindowFullscreen(WINDOW(0), arg(c, 1));
     else if (!strcmp(n, "SetWindowDisplayMode")) {
         SDL_Window *w = WINDOW(0); uint32_t address = arg(c, 1);
         SDL_DisplayMode mode;
-        if (address) mode = get_mode(c, address);
+        if (address) { mode = get_mode(c, address); scale_mode(&mode, 0); }
         r = (uint32_t)SDL_SetWindowDisplayMode(w, address ? &mode : NULL);
     } else if (!strcmp(n, "GetWindowDisplayMode")) {
         SDL_Window *w = WINDOW(0); uint32_t address = arg(c, 1);
         SDL_DisplayMode mode = {0};
         if (address) rt_write_span(c, address, RT_SDL_DISPLAYMODE_SIZE);
-        r = (uint32_t)mode_result(c, SDL_GetWindowDisplayMode(w, address ? &mode : NULL), address, &mode);
+        int result = SDL_GetWindowDisplayMode(w, address ? &mode : NULL);
+        scale_mode(&mode, 1);
+        r = (uint32_t)mode_result(c, result, address, &mode);
     }
     else if (!strcmp(n, "GetWindowDisplayIndex")) r = (uint32_t)SDL_GetWindowDisplayIndex(WINDOW(0));
     else if (!strcmp(n, "GetWindowID")) r = SDL_GetWindowID(WINDOW(0));
@@ -345,7 +496,7 @@ static int sdl_video(CPU *c, const char *name) {
         const Uint16 *ramp[3];
         for (unsigned i = 0; i < 3; ++i) ramp[i] = arg(c, 1 + i) ? rt_span(c, arg(c, 1 + i), 512) : NULL;
         r = (uint32_t)SDL_SetWindowGammaRamp(w, ramp[0], ramp[1], ramp[2]);
-    } else if (!strcmp(n, "WarpMouseInWindow")) SDL_WarpMouseInWindow(WINDOW(0), (int)arg(c, 1), (int)arg(c, 2));
+    } else if (!strcmp(n, "WarpMouseInWindow")) SDL_WarpMouseInWindow(WINDOW(0), (int)arg(c, 1) / window_scale_value, (int)arg(c, 2) / window_scale_value);
     // Écrans
     else if (!strcmp(n, "GetNumVideoDisplays")) r = (uint32_t)SDL_GetNumVideoDisplays();
     else if (!strcmp(n, "GetDisplayBounds")) {
@@ -355,8 +506,8 @@ static int sdl_video(CPU *c, const char *name) {
         else {
             rt_write_span(c, address, RT_SDL_RECT_SIZE);
             if (!(r = (uint32_t)SDL_GetDisplayBounds((int)arg(c, 0), &rect))) {
-                W32(address, (uint32_t)rect.x); W32(address + 4, (uint32_t)rect.y);
-                W32(address + 8, (uint32_t)rect.w); W32(address + 12, (uint32_t)rect.h);
+                W32(address, (uint32_t)screen_pixels(rect.x)); W32(address + 4, (uint32_t)screen_pixels(rect.y));
+                W32(address + 8, (uint32_t)screen_pixels(rect.w)); W32(address + 12, (uint32_t)screen_pixels(rect.h));
             }
         }
     } else if (!strcmp(n, "GetCurrentDisplayMode") || !strcmp(n, "GetDesktopDisplayMode")) {
@@ -366,6 +517,7 @@ static int sdl_video(CPU *c, const char *name) {
         int index = (int)arg(c, 0);
         int result = n[3] == 'C' ? SDL_GetCurrentDisplayMode(index, address ? &mode : NULL)
                                  : SDL_GetDesktopDisplayMode(index, address ? &mode : NULL);
+        scale_mode(&mode, 1);
         r = (uint32_t)mode_result(c, result, address, &mode);
     }
     else if (!strcmp(n, "GetCurrentVideoDriver")) r = const_string(c, SDL_GetCurrentVideoDriver());
@@ -403,9 +555,13 @@ static int sdl_video(CPU *c, const char *name) {
     }
     else if (!strcmp(n, "GL_SwapWindow")) {
         SDL_Window *w = WINDOW(0);
+        if (w) { int dw = 0, dh = 0; drawable_size(w, &dw, &dh); fps_overlay_frame(dw, dh); }
         diagnose_frame(w);
+        gpu_timing_frame();
         unsigned saved = rt_guest_suspend();   // la synchronisation verticale peut bloquer
+        uint64_t start = mach_absolute_time();
         SDL_GL_SwapWindow(w);
+        rt_gl_timing_add("SwapWindow", mach_absolute_time() - start);
         rt_guest_resume(saved);
     } else if (!strcmp(n, "GL_GetProcAddress")) {
         const char *proc = guest_string(c, arg(c, 0));

@@ -38,10 +38,14 @@ def main():
     ap.add_argument('--target', choices=sorted(TARGETS), default='sim')
     ap.add_argument('--opt', default='1', choices=['0', '1', '2', '3'])
     ap.add_argument('--fast-memory', action='store_true', help='-DRT_FAST_MEMORY (voir docs/fast-path.md)')
+    ap.add_argument('--release', action='store_true',
+                    help='version pour jouer : --opt 2 --fast-memory, comme build_game.py --release')
     ap.add_argument('--deps', type=Path, help='préfixe des dépendances (défaut ../work/ios-deps/<cible>)')
     ap.add_argument('--layout', type=Path, default=Path('build/game/prep/layout.json'))
     ap.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     args = ap.parse_args()
+    if args.release:
+        args.opt, args.fast_memory = '2', True
     os.chdir(ROOT)
     target = TARGETS[args.target]
     deps = (args.deps or ROOT.parent / 'work/ios-deps' / args.target).resolve()

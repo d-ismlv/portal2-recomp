@@ -24,9 +24,68 @@ typedef struct Stream {
     size_t entry_count, position;
     uint32_t dirent, dirent64;
     int standard;
-    struct Stream *next;
+    struct Stream *next, *prev;
 } Stream;
 static Stream *streams;
+static uint32_t *free_handles; static size_t free_count, free_capacity;
+// Index des flux ouverts par handle (adressage ouvert, suppression par décalage
+// arrière). Les flux fermés sont retirés : la liste ne grandit plus avec
+// chaque fopen (des milliers en jeu), et un handle fermé reste inconnu.
+static Stream **stream_index; static uint32_t index_capacity, index_count;
+static uint32_t index_slot(uint32_t handle) { return (handle >> 8) * 2654435761u; }
+static void index_put(Stream *s) {
+    if ((index_count + 1) * 2 > index_capacity) {
+        uint32_t capacity = index_capacity ? index_capacity * 2 : 256;
+        Stream **grown = calloc(capacity, sizeof(*grown));
+        if (!grown) abort();
+        for (uint32_t i = 0; i < index_capacity; ++i) if (stream_index[i]) {
+            uint32_t h = index_slot(stream_index[i]->handle) & (capacity - 1);
+            while (grown[h]) h = (h + 1) & (capacity - 1);
+            grown[h] = stream_index[i];
+        }
+        free(stream_index); stream_index = grown; index_capacity = capacity;
+    }
+    uint32_t h = index_slot(s->handle) & (index_capacity - 1);
+    while (stream_index[h]) h = (h + 1) & (index_capacity - 1);
+    stream_index[h] = s; ++index_count;
+}
+static Stream *index_get(uint32_t handle) {
+    if (!index_capacity) return NULL;
+    for (uint32_t h = index_slot(handle) & (index_capacity - 1); stream_index[h]; h = (h + 1) & (index_capacity - 1))
+        if (stream_index[h]->handle == handle) return stream_index[h];
+    return NULL;
+}
+static void index_remove(uint32_t handle) {
+    if (!index_capacity) return;
+    uint32_t mask = index_capacity - 1, h = index_slot(handle) & mask;
+    while (stream_index[h] && stream_index[h]->handle != handle) h = (h + 1) & mask;
+    if (!stream_index[h]) return;
+    stream_index[h] = NULL; --index_count;
+    for (uint32_t j = (h + 1) & mask; stream_index[j]; j = (j + 1) & mask) {   // décalage arrière
+        Stream *moved = stream_index[j]; stream_index[j] = NULL;
+        uint32_t k = index_slot(moved->handle) & mask;
+        while (stream_index[k]) k = (k + 1) & mask;
+        stream_index[k] = moved;
+    }
+}
+static void link_stream(Stream *s) {
+    s->prev = NULL; s->next = streams; if (streams) streams->prev = s; streams = s; index_put(s);
+}
+// Retire un flux qui n'a plus ni FILE ni liste de répertoire.
+static void release_if_unused(Stream *s) {
+    if (s->file || s->directory || s->standard) return;
+    if (s->prev) s->prev->next = s->next; else streams = s->next;
+    if (s->next) s->next->prev = s->prev;
+    index_remove(s->handle);
+    if (free_count == free_capacity) {
+        size_t capacity = free_capacity ? free_capacity * 2 : 256;
+        uint32_t *grown = realloc(free_handles, capacity * sizeof(*grown));
+        if (!grown) abort();
+        free_handles = grown; free_capacity = capacity;
+    }
+    free_handles[free_count++] = s->handle;
+    free(s);
+}
 static uint32_t next_handle = 0xd0000100u;
 static _Thread_local uint32_t errno_address;
 typedef struct Environment { char *name; uint32_t value; struct Environment *next; } Environment;
@@ -84,16 +143,26 @@ void rt_save_errno(CPU *c) { rt_set_errno(c, linux_errno(errno)); }
 #define save_errno rt_save_errno
 static const char *string(CPU *c, uint32_t address) { rt_string_length(c, address); return GPTR(address); }
 static Stream *lookup(CPU *c, uint32_t handle, int directory) {
-    for (Stream *s = streams; s; s = s->next)
-        if (s->handle == handle && (directory ? s->directory : s->file != NULL)) return s;
+    Stream *s = index_get(handle);
+    if (s && (directory ? s->directory : s->file != NULL)) return s;
     rt_trap(c, c->eip, directory ? "unknown guest DIR handle" : "unknown guest FILE handle");
 }
 void *rt_stream_file(CPU *c, uint32_t handle) { return lookup(c, handle, 0)->file; }
+// Handles des flux libérés, réutilisés : la plage 0xd0000100-0xd0ffff00 (65 535
+// handles, 0xd1000000 = flux standard) s'épuisait en deux minutes de jeu (le
+// correcteur de casse ouvre ~400 dossiers par seconde) et le compteur
+// atteignait le handle de stdin.
 static Stream *new_stream_record(void) {
+    uint32_t handle;
+    if (free_count) handle = free_handles[--free_count];
+    else {
+        if (next_handle >= 0xd1000000u) { fputs("guest stream handles exhausted\n", stderr); abort(); }
+        handle = next_handle; next_handle += 0x100;
+    }
     Stream *s = calloc(1, sizeof(*s));
-    if (!s) return NULL;
-    s->handle = next_handle; next_handle += 0x100;
-    s->next = streams; streams = s;
+    if (!s) { free_handles[free_count++] = handle; return NULL; }
+    s->handle = handle;
+    link_stream(s);
     return s;
 }
 static uint32_t new_stream(FILE *file) {
@@ -107,6 +176,7 @@ FILE *rt_stream_take(CPU *c, uint32_t handle) {
     Stream *s = lookup(c, handle, 0);
     if (s->standard) rt_trap(c, c->eip, "standard stream cannot be detached");
     FILE *file = s->file; s->file = NULL;
+    release_if_unused(s);
     return file;
 }
 
@@ -267,11 +337,11 @@ fail:;
 }
 uint32_t rt_standard_stream(int index) {
     uint32_t handle = 0xd1000000u + (uint32_t)index * 0x100;
-    for (Stream *s = streams; s; s = s->next) if (s->handle == handle) return handle;
+    if (index_get(handle)) return handle;
     Stream *s = calloc(1, sizeof(*s));
     if (!s) return 0;
     s->handle = handle; s->file = index == 0 ? stdin : index == 1 ? stdout : stderr;
-    s->standard = 1; s->next = streams; streams = s;
+    s->standard = 1; link_stream(s);
     return handle;
 }
 void rt_libc_destroy(void) {
@@ -281,20 +351,35 @@ void rt_libc_destroy(void) {
         rt_dir_entries_free(streams->entries, streams->entry_count);
         free(streams); streams = next;
     }
+    free(stream_index); stream_index = NULL; index_capacity = index_count = 0;
+    free(free_handles); free_handles = NULL; free_count = free_capacity = 0;
     while (environment) { Environment *next = environment->next; free(environment->name); free(environment); environment = next; }
     next_handle = 0xd0000100u; errno_address = 0; environ_slot_count = 0;
 }
 
-static FILE *virtual_cpuinfo(void) {
-    FILE *file = tmpfile();
-    if (!file) return NULL;
-    // Linux system view of the same one-core, 1 GHz virtual CPU as CPUID/RDTSC.
-    fputs("processor\t: 0\nvendor_id\t: GenuineIntel\ncpu family\t: 6\nmodel\t\t: 15\n"
-          "model name\t: Portal 2 AOT virtual CPU (Apple Silicon)\nstepping\t: 2\n"
-          "cpu MHz\t\t: 1000.000\nphysical id\t: 0\nsiblings\t: 1\ncore id\t\t: 0\ncpu cores\t: 1\n"
-          "flags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2\n\n", file);
-    rewind(file);
-    return file;
+
+// Imports fréquents en jeu (P2_IMPORT_COUNTS) : corps partagés par
+// rt_libc_shim et par leurs routes directes (rt_libc_resolve).
+static void libc_case(CPU *c, int lower) {
+    int value = (int32_t)argument(c, 0);
+    if (value < -1 || value > 255) rt_trap(c, c->eip, "invalid ctype input");
+    c->eax = (uint32_t)(lower ? tolower(value) : toupper(value));
+}
+static void libc_casecmp(CPU *c, int whole) {
+    const char *lhs = string(c, argument(c, 0)), *rhs = string(c, argument(c, 1));
+    c->eax = (uint32_t)(whole ? strcasecmp(lhs, rhs) : strncasecmp(lhs, rhs, argument(c, 2)));
+}
+static int tolower_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_case(c, 1); return 1; }
+static int toupper_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_case(c, 0); return 1; }
+static int strcasecmp_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_casecmp(c, 1); return 1; }
+static int strncasecmp_handler(CPU *c, const char *n, void *d) { (void)n; (void)d; libc_casecmp(c, 0); return 1; }
+int rt_libc_resolve(const char *name, RtShimRoute *route) {
+    if (!strcmp(name, "tolower")) route->handler = tolower_handler;
+    else if (!strcmp(name, "toupper")) route->handler = toupper_handler;
+    else if (!strcmp(name, "strcasecmp")) route->handler = strcasecmp_handler;
+    else if (!strcmp(name, "strncasecmp")) route->handler = strncasecmp_handler;
+    else return 0;
+    return 1;
 }
 
 int rt_libc_shim(CPU *c, const char *name) {
@@ -369,7 +454,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         case 2: result = sysconf(_SC_CLK_TCK); break;
         case 4: result = sysconf(_SC_OPEN_MAX); break;
         case 30: result = 4096; break; // virtual i386/Linux page size
-        case 83: case 84: result = 1; break; // same topology as CPUID/proc
+        case 83: case 84: result = (long)rt_guest_cpu_count(); break; // même topologie que CPUID et /proc
         case 85: case 86: {
             uint64_t memory = 0; size_t size = sizeof(memory);
             if (sysctlbyname("hw.memsize", &memory, &size, NULL, 0)) result = -1;
@@ -409,13 +494,15 @@ int rt_libc_shim(CPU *c, const char *name) {
     } else if (!strcmp(name, "fopen") || !strcmp(name, "fopen64")) {
         const char *path = string(c, argument(c, 0)), *mode = string(c, argument(c, 1));
         FILE *file;
-        if (!strcmp(path, "/proc/cpuinfo")) {
-            if (strcmp(mode, "r") && strcmp(mode, "rb")) { errno = EACCES; file = NULL; }
-            else file = virtual_cpuinfo();
-        } else {
+        {   // /proc/cpuinfo et les autres fichiers /proc viennent de procfs.c (rt_read_path)
             int writing = mode[0]=='w' || mode[0]=='a' || strchr(mode,'+');
-            const char *resolved=writing?rt_write_path(path,mode[0]!='w'):rt_read_path(path);
-            file=resolved?fopen(resolved,mode):NULL;
+            // Lecture d'un fichier que le cache sait absent : ENOENT sans fopen
+            // hôte (le moteur sonde chaque dossier de recherche, ~110 fois/s).
+            if (!writing && rt_access_cached(path, F_OK) == -1 && errno == ENOENT) file = NULL;
+            else {
+                const char *resolved=writing?rt_write_path(path,mode[0]!='w'):rt_read_path(path);
+                file=resolved?fopen(resolved,mode):NULL;
+            }
         }
         if (!file) { save_errno(c); c->eax = 0; }
         else {
@@ -427,6 +514,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         int result = s->standard ? fflush(s->file) : fclose(s->file);
         s->file = NULL;
         if (result) save_errno(c);
+        release_if_unused(s);
         c->eax = (uint32_t)result;
     } else if (!strcmp(name, "fgets")) {
         a = argument(c, 0); n = argument(c, 1);
@@ -493,6 +581,9 @@ int rt_libc_shim(CPU *c, const char *name) {
         if (flags & 0x80000) native |= O_CLOEXEC;
         uint32_t supported = 3u|0x40|0x80|0x100|0x200|0x400|0x800|0x1000|0x8000|0x10000|0x20000|0x80000|0x100000;
         if (flags & ~supported) { errno = ENOTSUP; save_errno(c); c->eax = UINT32_MAX; return 1; }
+        if (!(flags & (3u | 0x40)) && rt_access_cached(path, F_OK) == -1 && errno == ENOENT) {
+            save_errno(c); c->eax = UINT32_MAX; return 1;   // lecture d'un absent connu : ENOENT direct
+        }
         if ((flags & 0x40) && strstr(name, "_2")) rt_trap(c,c->eip,"invalid fortified open flags");
         mode_t mode = flags & 0x40 ? (mode_t)argument(c, 2) : 0;
         if((flags & 0xc0)==0xc0) {
@@ -553,8 +644,9 @@ int rt_libc_shim(CPU *c, const char *name) {
     } else if (!strcmp(name, "access")) {
         const char *path = string(c, argument(c, 0));
         int result;
-        if (!strcmp(path, "/proc/cpuinfo")) { result = (argument(c, 1) & 3) ? -1 : 0; if (result) errno = EACCES; }
-        else { const char *resolved=rt_read_path(path); result=resolved?access(resolved,(int)argument(c,1)):-1; }
+        if ((result = rt_access_cached(path, (int)argument(c, 1))) == -2) {
+            const char *resolved=rt_read_path(path); result=resolved?access(resolved,(int)argument(c,1)):-1;
+        }
         if (result) save_errno(c);
         c->eax = (uint32_t)result;
     } else if (!strcmp(name, "opendir")) {
@@ -572,6 +664,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         if (s->dirent64) rt_free(s->dirent64);
         s->dirent = s->dirent64 = 0;
         c->eax = 0;
+        release_if_unused(s);
     } else if (!strcmp(name, "readdir") || !strcmp(name, "readdir64")) {
         // glibc i386 : dirent {ino32, off32, reclen16, type8, name[256]} (268 octets),
         // dirent64 {ino64, off64, reclen16, type8, name[256]} (280 octets).
@@ -604,8 +697,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         }
         c->eax = result ? a + (uint32_t)(result - source) : 0;
     } else if (!strcmp(name, "strcasecmp") || !strcmp(name, "strncasecmp")) {
-        const char *lhs = string(c, argument(c, 0)), *rhs = string(c, argument(c, 1));
-        c->eax = (uint32_t)(!strcmp(name, "strcasecmp") ? strcasecmp(lhs, rhs) : strncasecmp(lhs, rhs, argument(c, 2)));
+        libc_casecmp(c, name[3] == 'c');
     } else if (!strcmp(name, "strdup")) {
         a = argument(c, 0); n = rt_string_length(c, a);
         c->eax = rt_alloc(n + 1);
@@ -637,9 +729,7 @@ int rt_libc_shim(CPU *c, const char *name) {
         c->eax = rt_alloc((uint32_t)size);
         if (c->eax) memcpy(GPTR(c->eax), message, size);
     } else if (!strcmp(name, "tolower") || !strcmp(name, "toupper")) {
-        int value = (int32_t)argument(c, 0);
-        if (value < -1 || value > 255) rt_trap(c, c->eip, "invalid ctype input");
-        c->eax = (uint32_t)(!strcmp(name, "tolower") ? tolower(value) : toupper(value));
+        libc_case(c, name[2] == 'l');
     } else if (!strcmp(name, "getppid")) {
         c->eax = (uint32_t)getppid();
     } else if (!strcmp(name, "strtol") || !strcmp(name, "strtoul")) {

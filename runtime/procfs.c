@@ -61,30 +61,32 @@ static int write_meminfo(FILE *out) {
 static int write_cpuinfo(FILE *out) {
     uint64_t l2 = sysctl_u64("hw.perflevel0.l2cachesize");
     if (!l2) l2 = sysctl_u64("hw.l2cachesize");
-    fprintf(out,
-            "processor\t: 0\n"
-            "vendor_id\t: GenuineIntel\n"
-            "cpu family\t: 6\n"
-            "model\t\t: 15\n"
-            "model name\t: Portal 2 AOT virtual CPU (Apple Silicon)\n"
-            "stepping\t: 2\n"
-            "cpu MHz\t\t: 1000.000\n"
-            "cache size\t: %llu KB\n"
-            "physical id\t: 0\n"
-            "siblings\t: 1\n"
-            "core id\t\t: 0\n"
-            "cpu cores\t: 1\n"
-            "fpu\t\t: yes\n"
-            "fpu_exception\t: yes\n"
-            "cpuid level\t: 1\n"
-            "wp\t\t: yes\n"
-            "flags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2\n"
-            "bogomips\t: 2000.00\n"
-            "clflush size\t: 64\n"
-            "cache_alignment\t: 64\n"
-            "address sizes\t: 32 bits physical, 32 bits virtual\n"
-            "power management:\n\n",
-            (unsigned long long)(l2 / 1024));
+    unsigned cpus = rt_guest_cpu_count();
+    for (unsigned i = 0; i < cpus; ++i)
+        fprintf(out,
+                "processor\t: %u\n"
+                "vendor_id\t: GenuineIntel\n"
+                "cpu family\t: 6\n"
+                "model\t\t: 15\n"
+                "model name\t: Portal 2 AOT virtual CPU (Apple Silicon)\n"
+                "stepping\t: 2\n"
+                "cpu MHz\t\t: 1000.000\n"
+                "cache size\t: %llu KB\n"
+                "physical id\t: 0\n"
+                "siblings\t: %u\n"
+                "core id\t\t: %u\n"
+                "cpu cores\t: %u\n"
+                "fpu\t\t: yes\n"
+                "fpu_exception\t: yes\n"
+                "cpuid level\t: 1\n"
+                "wp\t\t: yes\n"
+                "flags\t\t: fpu tsc cx8 cmov mmx fxsr sse sse2%s\n"
+                "bogomips\t: 2000.00\n"
+                "clflush size\t: 64\n"
+                "cache_alignment\t: 64\n"
+                "address sizes\t: 32 bits physical, 32 bits virtual\n"
+                "power management:\n\n",
+                i, (unsigned long long)(l2 / 1024), cpus, i, cpus, cpus > 1 ? " ht" : "");
     return 0;
 }
 

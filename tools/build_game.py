@@ -27,7 +27,7 @@ import peprep
 HOST_CFLAGS = ['-I/opt/homebrew/include', '-I/opt/homebrew/include/freetype2', '-DGL_SILENCE_DEPRECATION',
                '-DOPENAL_DEPRECATED=', '-DAL_SILENCE_DEPRECATION']
 HOST_LIBS = ['-L/opt/homebrew/lib', '-lSDL2', '-lfreetype', '-lfontconfig', '-liconv',
-             '-framework', 'OpenGL', '-framework', 'OpenAL']
+             '-framework', 'OpenGL', '-framework', 'OpenAL', '-lobjc']
 WARNINGS = ['-Wall', '-Wextra', '-Werror']
 DEBUG = {'full': '-g', 'lines': '-gline-tables-only', 'none': '-g0'}
 TOOLS = ['tools/lift.py', 'tools/float_lift.py', 'tools/registry.py', 'tools/build_game.py', 'tools/peprep.py']
@@ -240,11 +240,16 @@ def main():
     parser.add_argument('--traced-calls', '--debug-traces', dest='traced_calls', action='store_true',
                         help='tous les appels invités par rt_call : pile invitée complète dans les '
                              'diagnostics et P2_WATCH_CALL (par défaut, appels directs, voir rt.h)')
+    parser.add_argument('--release', action='store_true',
+                        help='version pour jouer : --opt 2 --fast-memory (mesuré ~200 fps en jeu contre '
+                             '~117 en -O1 contrôlé) ; garder la version contrôlée pour diagnostiquer')
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     parser.add_argument('--stats', type=Path, default=Path('build/game/build-stats.json'))
     parser.add_argument('--config', type=Path, default=Path('config/local.json'),
                         help='game_root : copie du jeu contenant bin/linux32/*.asi (greffons PE)')
     args = parser.parse_args()
+    if args.release:
+        args.opt, args.fast_memory = '2', True
     sys.stdout.reconfigure(line_buffering=True)
     started = time.time()
     layout = json.loads(args.layout.read_text())

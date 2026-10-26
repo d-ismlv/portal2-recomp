@@ -4,6 +4,7 @@
 // générées fn_<adresse invitée>, shims, bibliothèques). Rien n'est actif
 // sans la variable d'environnement.
 #include "rt.h"
+#include <TargetConditionals.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
@@ -14,7 +15,8 @@
 #include <unistd.h>
 
 #define SLOTS 65536u
-typedef struct { uintptr_t pc, caller, caller2; int main; } Key;
+#define DEPTH 24
+typedef struct { uintptr_t pc, caller, caller2; int main; uintptr_t chain[DEPTH]; } Key;
 static Key keys[SLOTS];
 static uint32_t used[SLOTS];   // 0 libre, 1 en cours, 2 prêt (accès __atomic)
 static _Atomic uint32_t hits[SLOTS];
@@ -38,6 +40,15 @@ static void tick(int signal, siginfo_t *info, void *context) {
 #else
     (void)context;
 #endif
+    // Chaîne de cadres (pointeur de cadre) pour retrouver le premier cadre de
+    // l'exécutable (pont GL/libc, fonction générée) sous une bibliothèque.
+    uintptr_t frame = (uintptr_t)uc->uc_mcontext->__ss.__fp;
+    for (int d = 0; d < DEPTH && frame && !(frame & 7); ++d) {
+        uintptr_t next = ((uintptr_t *)frame)[0];
+        key.chain[d] = ((uintptr_t *)frame)[1];
+        if (next <= frame || next - frame > (1u << 24)) break;
+        frame = next;
+    }
     key.main = pthread_main_np();
     ++total;
     uint32_t h = (uint32_t)(((key.pc >> 2) ^ (key.caller * 31) ^ (key.caller2 * 7) ^ (uintptr_t)key.main) * 2654435761u) & (SLOTS - 1);
@@ -75,7 +86,17 @@ static void dump_section(FILE *out, int main_only, int with_callers) {
         if (main_only && !keys[i].main) continue;
         section += hits[i];
         char name[512];
-        if (with_callers) snprintf(name, sizeof(name), "%s <- %s <- %s", symbol(keys[i].pc), symbol(keys[i].caller), symbol(keys[i].caller2));
+        if (with_callers == 2) {
+            // Feuille, puis premier cadre de l'exécutable principal dans la chaîne.
+            const char *own = "?";
+            Dl_info self, where;
+            dladdr((void *)&dump_section, &self);
+            for (int d = 0; d < DEPTH && keys[i].chain[d]; ++d)
+                if (dladdr((void *)keys[i].chain[d], &where) && where.dli_fbase == self.dli_fbase && where.dli_sname) {
+                    own = where.dli_sname; break;
+                }
+            snprintf(name, sizeof(name), "%s ... %s", symbol(keys[i].pc), own);
+        } else if (with_callers) snprintf(name, sizeof(name), "%s <- %s <- %s", symbol(keys[i].pc), symbol(keys[i].caller), symbol(keys[i].caller2));
         else snprintf(name, sizeof(name), "%s", symbol(keys[i].pc));
         size_t k = 0;
         while (k < n && strcmp(names[k], name)) ++k;
@@ -84,10 +105,31 @@ static void dump_section(FILE *out, int main_only, int with_callers) {
     }
     qsort(entries, n, sizeof(*entries), by_count);
     fprintf(out, "== %s, %s : %llu échantillons\n", main_only ? "thread principal" : "tous threads",
-            with_callers ? "avec appelants" : "par symbole", (unsigned long long)section);
+            with_callers == 2 ? "feuille ... premier cadre de l'exécutable" : with_callers ? "avec appelants" : "par symbole", (unsigned long long)section);
     for (size_t k = 0; k < n && k < 60; ++k)
         fprintf(out, "%6.2f%% %s\n", 100.0 * (double)entries[k].count / (double)(section ? section : 1), entries[k].name);
     free(entries); free(names);
+}
+
+// Chaînes complètes des clés les plus fréquentes du thread principal.
+static void dump_chains(FILE *out) {
+    uint32_t best[8] = {0}; uint32_t counts[8] = {0};
+    for (uint32_t i = 0; i < SLOTS; ++i) {
+        if (__atomic_load_n(&used[i], __ATOMIC_ACQUIRE) != 2 || !keys[i].main) continue;
+        uint32_t h = hits[i];
+        for (int k = 0; k < 8; ++k) if (h > counts[k]) {
+            memmove(&counts[k + 1], &counts[k], (7 - k) * sizeof(*counts));
+            memmove(&best[k + 1], &best[k], (7 - k) * sizeof(*best));
+            counts[k] = h; best[k] = i; break;
+        }
+    }
+    fprintf(out, "== piles complètes du thread principal (8 plus fréquentes)\n");
+    for (int k = 0; k < 8 && counts[k]; ++k) {
+        const Key *key = &keys[best[k]];
+        fprintf(out, "%u : %s", counts[k], symbol(key->pc));
+        for (int d = 0; d < DEPTH && key->chain[d]; ++d) fprintf(out, " <- %s", symbol(key->chain[d]));
+        fputc('\n', out);
+    }
 }
 
 static void dump(void) {
@@ -98,21 +140,40 @@ static void dump(void) {
     fprintf(out, "samples %llu (dropped %llu)\n", (unsigned long long)total, (unsigned long long)dropped);
     dump_section(out, 1, 0);
     dump_section(out, 1, 1);
+    dump_section(out, 1, 2);
+    dump_chains(out);
     dump_section(out, 0, 0);
     dump_section(out, 0, 1);
     fclose(out);
     rename(temporary, output);
 }
 
+// P2_PROFILE_DELAY=<s> : l'échantillonnage ne commence qu'après s secondes
+// (régime établi, sans le chargement de la carte).
+static int wall_mode;
+static pthread_t main_thread;
+static void *wall_sampler(void *unused);
+static void start_sampling(void) {
+    if (wall_mode) {
+        pthread_t thread;
+        pthread_create(&thread, NULL, wall_sampler, NULL);
+        pthread_detach(thread);
+    } else {
+        struct itimerval timer = {{0, 1000}, {0, 1000}};
+        setitimer(ITIMER_PROF, &timer, NULL);
+    }
+}
+
 static void *writer(void *unused) {
     (void)unused;
+    const char *delay = getenv("P2_PROFILE_DELAY");
+    if (delay && atoi(delay) > 0) { sleep((unsigned)atoi(delay)); start_sampling(); }
     for (;;) { sleep(5); dump(); }
     return NULL;
 }
 
 // P2_PROFILE_WALL=1 : échantillonne le thread principal en temps réel (même
 // bloqué) en lui envoyant SIGPROF toutes les millisecondes ; montre où il attend.
-static pthread_t main_thread;
 static void *wall_sampler(void *unused) {
     (void)unused;
     struct timespec period = {0, 1000000};
@@ -123,20 +184,21 @@ static void *wall_sampler(void *unused) {
 __attribute__((constructor)) static void start_profiler(void) {
     output = getenv("P2_PROFILE");
     if (!output || !*output) return;
+#if TARGET_OS_IPHONE
+    // iOS : chemin relatif au conteneur de l'app (HOME), comme P2_LOG_FILE.
+    static char path[1024];
+    if (*output != '/' && getenv("HOME")) { snprintf(path, sizeof(path), "%s/%s", getenv("HOME"), output); output = path; }
+#endif
     struct sigaction action = {0};
     action.sa_sigaction = tick;
     action.sa_flags = SA_SIGINFO | SA_RESTART;
     sigemptyset(&action.sa_mask);
     sigaction(SIGPROF, &action, NULL);
+    wall_mode = getenv("P2_PROFILE_WALL") != NULL;
+    main_thread = pthread_self();   // constructeur : thread principal
+    const char *delay = getenv("P2_PROFILE_DELAY");
+    if (!delay || atoi(delay) <= 0) start_sampling();
     pthread_t thread;
-    if (getenv("P2_PROFILE_WALL")) {
-        main_thread = pthread_self();   // constructeur : thread principal
-        pthread_create(&thread, NULL, wall_sampler, NULL);
-        pthread_detach(thread);
-    } else {
-        struct itimerval timer = {{0, 1000}, {0, 1000}};
-        setitimer(ITIMER_PROF, &timer, NULL);
-    }
     pthread_create(&thread, NULL, writer, NULL);
     pthread_detach(thread);
 }
