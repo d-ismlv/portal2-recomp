@@ -50,6 +50,7 @@ int rt_ios_game_ui_visible(void);   // game_state.c
 extern unsigned long rt_ios_frames;  // gl_ios.m : images présentées
 void rt_ios_move_response_linear(int on);
 int rt_ios_move_response(void);
+void rt_ios_console_command(const char *name);   // game_state.c
 
 typedef enum { ROLE_MOVE, ROLE_LOOK, ROLE_BUTTON } Role;
 typedef enum { KEY_SPACE, KEY_CTRL, KEY_E, KEY_ESCAPE, MOUSE_LEFT, MOUSE_RIGHT, LOOK_MODE, ACTION_COUNT } Action;
@@ -613,6 +614,12 @@ static Sint16 axis_value(CGFloat speed, int response) {
     for (UITouch *t in touches) {
         P2Finger *f = [P2Finger new];
         f.start = f.at = [t locationInView:self];
+        // Toucher du compteur d'images : position du joueur au journal (getpos),
+        // pour rejouer la même vue dans le banc (tools/ios_bench.py).
+        if (fps > 0 && CGRectContainsPoint(CGRectInset([self fpsBox:[NSString stringWithFormat:@"%d i/s", fps]], -12, -12), f.start)) {
+            rt_ios_console_command("getpos");
+            continue;
+        }
         int button = [self buttonAt:f.start];
         BOOL left = f.start.x < CGRectGetMidX(self.bounds);
         if (button >= 0) { f.role = ROLE_BUTTON; f.action = (Action)button; [self action:f.action down:YES]; }
@@ -680,16 +687,22 @@ static Sint16 axis_value(CGFloat speed, int response) {
     fpsAt = now; fpsFrames = rt_ios_frames;
     if (value != fps) { fps = value; redraw(self); }
 }
+static NSDictionary *fps_style(void) {
+    return @{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold],
+             NSForegroundColorAttributeName: UIColor.whiteColor};
+}
+// En haut, à droite du bouton pause (centre), dans la zone sûre.
+- (CGRect)fpsBox:(NSString *)text {
+    CGRect a = self.area;
+    CGSize size = [text sizeWithAttributes:fps_style()];
+    return CGRectMake(CGRectGetMidX(a) + kButtonSize * .55, CGRectGetMinY(a) + a.size.height * .08 - size.height / 2 - 3,
+                      size.width + 12, size.height + 6);
+}
 - (void)drawFPS {
     if (fps <= 0) return;
-    CGRect a = self.area;
     NSString *text = [NSString stringWithFormat:@"%d i/s", fps];
-    NSDictionary *style = @{NSFontAttributeName: [UIFont monospacedDigitSystemFontOfSize:15 weight:UIFontWeightSemibold],
-                            NSForegroundColorAttributeName: UIColor.whiteColor};
-    CGSize size = [text sizeWithAttributes:style];
-    // En haut, à droite du bouton pause (centre), dans la zone sûre.
-    CGRect box = CGRectMake(CGRectGetMidX(a) + kButtonSize * .55, CGRectGetMinY(a) + a.size.height * .08 - size.height / 2 - 3,
-                            size.width + 12, size.height + 6);
+    NSDictionary *style = fps_style();
+    CGRect box = [self fpsBox:text];
     [[UIColor colorWithWhite:0 alpha:.45] setFill];
     [[UIBezierPath bezierPathWithRoundedRect:box cornerRadius:box.size.height / 2] fill];
     [text drawAtPoint:CGPointMake(box.origin.x + 6, box.origin.y + 3) withAttributes:style];

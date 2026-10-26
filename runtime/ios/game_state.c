@@ -120,6 +120,42 @@ static void update_move_response(CPU *c) {
     response = now[0] ? (int)strtol(now, NULL, 10) : -1;
 }
 
+// ---- Commande console sans argument, exécutée au prochain relevé ----------
+// Trouvée par ICvar (FindCommandBase, comme les variables), puis son rappel
+// appelé directement avec un CCommand invité : ConCommand garde le rappel à
+// +24 et ses drapeaux à +32 (bit 1 : rappel à arguments, bit 2 : interface) ;
+// CCommand = argc, taille d'argv[0], deux tampons de 512 octets, 64 pointeurs.
+// Le rappel ne passe pas par le contrôle sv_cheats du moteur : réservé aux
+// diagnostics (getpos).
+static char pending_command[32];
+void rt_ios_console_command(const char *name) { snprintf(pending_command, sizeof(pending_command), "%s", name); }
+static void run_console_command(CPU *c, const char *name) {
+    if (!icvar) find_convar(c, "joy_response_move");   // initialise icvar
+    if (icvar <= 1) return;
+    uint32_t text = guest_text(name);
+    if (!text) return;
+    uint32_t args[2] = {icvar, text};
+    uint32_t base = rt_invoke(c, R32(R32(icvar) + 13 * 4), args, 2);
+    rt_free(text);
+    if (!plausible(base) || !plausible(R32(base + 12)) || strcmp(GPTR(R32(base + 12)), name)) {
+        fprintf(stderr, "[ios] commande %s introuvable\n", name); return;
+    }
+    uint32_t callback = R32(base + 24); uint8_t bits = *(uint8_t *)GPTR(base + 32);
+    if (!plausible(callback) || (bits & 4)) { fprintf(stderr, "[ios] commande %s : rappel inattendu\n", name); return; }
+    enum { ARGV = 64, LENGTH = 512, SIZE = 8 + 2 * LENGTH + 4 * ARGV };
+    uint32_t command = rt_alloc(SIZE);
+    if (!command) return;
+    memset(GPTR(command), 0, SIZE);
+    size_t n = strlen(name);
+    W32(command, 1); W32(command + 4, (uint32_t)n);
+    memcpy(GPTR(command + 8), name, n + 1);                 // m_pArgSBuffer
+    memcpy(GPTR(command + 8 + LENGTH), name, n + 1);        // m_pArgvBuffer
+    W32(command + 8 + 2 * LENGTH, command + 8 + LENGTH);    // m_ppArgv[0]
+    fprintf(stderr, "[ios] commande %s\n", name);
+    if (bits & 2) rt_invoke(c, callback, &command, 1); else rt_invoke(c, callback, NULL, 0);
+    rt_free(command);
+}
+
 void rt_ios_game_state_poll(void) {
     uint64_t now = SDL_GetTicks64();
     if (now < next_query) return;
@@ -144,5 +180,6 @@ void rt_ios_game_state_poll(void) {
     if (visible != ui_visible) fprintf(stderr, "[ios] interface du jeu %s\n", visible ? "affichée" : "masquée");
     ui_visible = visible;
     if (linear_wanted || saved_response[0]) update_move_response(c);
+    if (pending_command[0]) { char name[32]; snprintf(name, sizeof(name), "%s", pending_command); pending_command[0] = 0; run_console_command(c, name); }
 }
 #endif
