@@ -64,6 +64,17 @@ binaire de l'app est la version PGO ; l'ancien reste en
 `--pgo-generate --out build/portal2-native-pgogen`, parties avec
 `LLVM_PROFILE_FILE=…-%p.profraw`, `xcrun llvm-profdata merge`.
 Prochain plafond en 1440p : le GPU (120 fps demandera d'alléger le rendu).
+
+Coût GPU en 1440p (27 oct., laser_over_goo, A/B alternés, machine calme,
+`bench_game.py --extra "+convar valeur"`) : le filtrage anisotrope 8x
+(menu Vidéo, « Mode de filtrage ») coûte le plus. Base ~100-110 fps ;
+`mat_forceaniso 4` 132-149 ; 2 : 120-158 ; 1 : 123-124 ; rendu 1080p
+132-134. Sans effet : `mat_reducefillrate 1`, `gl_nullqueries 1`. Les
+mesures varient de ±15 % d'un lancement à l'autre (même vue de départ) :
+ne conclure que sur des écarts nets. Image tracée (`P2_PASS_TRACE=<s>`) :
+~280 dessins, rendu principal en 2560×1440 coupé par 3 copies (réfraction
+1024², deux copies pleine taille), post-traitement 640×360, copie finale
+retournée vers la fenêtre ; ces copies sont nécessaires au jeu.
 Comparer deux binaires : `bench_game.py --binary build/<copie>` (la copie doit
 rester dans `build/`, le chemin de libsteam_api est relatif à l'exécutable).
 

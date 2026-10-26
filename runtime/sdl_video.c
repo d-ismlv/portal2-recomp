@@ -28,6 +28,7 @@
 #include <OpenGL/glext.h>
 #include <mach/mach_time.h>
 void rt_gl_timing_add(const char *label, uint64_t ticks);
+void rt_gl_pass_frame(void);
 void fps_overlay_frame(int drawable_width, int drawable_height);
 #include "sdl_common.h"
 #define SDL_MAIN_HANDLED
@@ -594,6 +595,7 @@ static int sdl_video(CPU *c, const char *name) {
         uint64_t start = mach_absolute_time();
         SDL_GL_SwapWindow(w);
         rt_gl_timing_add("SwapWindow", mach_absolute_time() - start);
+        rt_gl_pass_frame();
         rt_guest_resume(saved);
     } else if (!strcmp(n, "GL_GetProcAddress")) {
         const char *proc = guest_string(c, arg(c, 0));

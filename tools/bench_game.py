@@ -20,13 +20,14 @@ parser.add_argument('--map', default='sp_a1_intro1')
 parser.add_argument('--size', default='1280x720')
 parser.add_argument('--label', default='')
 parser.add_argument('--binary', default='build/portal2-native')
+parser.add_argument('--extra', default='', help='arguments du jeu ajoutés (convars : "+mat_forceaniso 1")')
 args = parser.parse_args()
 width, height = args.size.split('x')
 results = []
 for run in range(args.runs):
     env = dict(os.environ, SteamAppId='620', P2_FAKE_FOCUS='1', P2_FRAME_LOG='1')
     subprocess.run([sys.executable, 'tools/run_game.py', '--binary', args.binary, '--timeout', str(args.timeout), '--',
-                    '-game', 'portal2', '-novid', '-windowed', '-w', width, '-h', height, '+map', args.map],
+                    '-game', 'portal2', '-novid', '-windowed', '-w', width, '-h', height, *args.extra.split(), '+map', args.map],
                    env=env, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
     log = Path('build/game/launch.log').read_text(errors='replace')
     if re.search(r'guest trap|host SIG', log):
