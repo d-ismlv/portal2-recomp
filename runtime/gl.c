@@ -639,7 +639,7 @@ int rt_gl_manual_glGetTexParameterPointervAPPLE(CPU *c, void *fn) {
     return 1;
 }
 
-// ---- Écritures en flux sans synchronisation (P2_GL_STREAM_UNSYNC=1 pour activer) ----
+// ---- Écritures en flux sans synchronisation (actif par défaut ; P2_GL_STREAM_UNSYNC=0 pour désactiver) ----
 // togl remplit ses tampons dynamiques par ajouts croissants (glBufferSubData) et
 // les réalloue (glBufferData) une fois pleins ; le pilote d'Apple synchronise
 // chaque ajout avec le GPU (~26 µs). Une écriture entièrement au-delà de tout
@@ -691,7 +691,7 @@ static Stream *stream_state(uint32_t name, int create) {
 }
 static int stream_enabled(void) {
     static int value = -1;
-    if (value < 0) { const char *e = getenv("P2_GL_STREAM_UNSYNC"); value = e && strcmp(e, "0"); }
+    if (value < 0) { const char *e = getenv("P2_GL_STREAM_UNSYNC"); value = !e || strcmp(e, "0"); }   // actif par défaut
     return value;
 }
 void rt_gl_stream_serialized(uint32_t name, int serialized) {
@@ -719,14 +719,18 @@ static int stream_subdata(CPU *c, uint32_t target, uint32_t offset, uint32_t siz
     if (was_serialized) glBufferParameteriAPPLE(target, GL_BUFFER_SERIALIZED_MODIFY_APPLE, GL_FALSE);
     if (flush_unmap) glBufferParameteriAPPLE(target, GL_BUFFER_FLUSHING_UNMAP_APPLE, GL_FALSE);
     uint8_t *host = glMapBuffer(target, GL_WRITE_ONLY);
+    GLboolean intact = GL_FALSE;
     if (host) {
         memcpy(host + offset, source, size);
         glFlushMappedBufferRangeAPPLE(target, (GLintptr)offset, (GLsizeiptr)size);
-        glUnmapBuffer(target);
+        intact = glUnmapBuffer(target);
     }
     if (flush_unmap) glBufferParameteriAPPLE(target, GL_BUFFER_FLUSHING_UNMAP_APPLE, GL_TRUE);
     if (was_serialized) glBufferParameteriAPPLE(target, GL_BUFFER_SERIALIZED_MODIFY_APPLE, GL_TRUE);
-    if (!host) return 0;
+    // GL_FALSE au démappage : contenu du stockage perdu. Le glBufferSubData normal
+    // réécrit la plage, et le stockage n'est plus suivi jusqu'à sa réallocation.
+    if (host && !intact) st->known = 0;
+    if (!host || !intact) return 0;
     st->written_end = offset + size;
     ++stream_unsync_writes;
     return 1;
