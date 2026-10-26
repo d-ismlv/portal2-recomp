@@ -62,6 +62,7 @@ void rt_backtap_defaults(rt_backtap_params *p) {
     p->accel_min = 0.10f;     // 20 fois le bruit, sous une tape légère
     p->jerk_min = 6.0f;       // 0,06 g en 10 ms : un geste de la main monte 10 fois moins vite
     p->rot_min = 0.08f;       // 8 fois le bruit du gyroscope
+    p->side_x_weight = 0.5f;  // 79/79 tapes étiquetées (x seul : 72/79)
     p->gyro_accel_min = 0.06f; // au-dessus du bruit en jeu (0,02-0,05 g en moyenne quadratique), secousse jerk_min exigée aussi
     p->gyro_rot_min = 0.30f;   // tapes à gauche manquées : 0,44 à 0,74 rad/s ; tapes retenues : 0,10 à 1,3
     p->gyro_jerk_min = 15.0f;  // 0,15 rad/s en 10 ms : le poignet tourne bien plus lentement
@@ -179,11 +180,16 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     if (!r->orient && g_now && fabsf(g_now->g[0]) >= 0.3f) r->orient = g_now->g[0] > 0 ? 1 : -1;
 
     // Côté, dans le repère de l'appareil (+1 : vers +y), puis de l'écran.
-    if (fabsf(r->rot[0]) >= p->rot_min) {
-        // Écart maximal : 30/30 en calibration ; l'intégrale du premier lobe ou
-        // l'écart à la rotation juste avant l'impact inversaient des séries
-        // entières à gauche (rejeu du 26/10).
-        r->side = r->rot[0] > 0 ? 1 : -1; r->method = "rotation";
+    // Rotation autour de x (couple de la poussée) pondérée par side_x_weight,
+    // et autour de z, rapportée à l'écran : la main qui tape fait pivoter le
+    // téléphone dans son plan, vers la gauche (z > 0) ou la droite, quelle que
+    // soit l'orientation. Sur 79 tapes étiquetées (26/10) : x seul 72, z seul
+    // 79, 0,5 x + z 79 ; x seul se trompait sur les tapes près d'un coin.
+    // Écarts maximaux : l'intégrale du premier lobe ou l'écart à la rotation
+    // juste avant l'impact inversaient des séries entières.
+    r->side_score = p->side_x_weight * r->rot[0] - (float)r->orient * r->rot[2];
+    if (fabsf(r->side_score) >= p->rot_min) {
+        r->side = r->side_score > 0 ? 1 : -1; r->method = "rotation";
     } else if (p->lateral_sign && r->peak > 0 && fabsf(r->acc[1]) >= p->lateral_ratio * r->peak) {
         // Poussée physique vers +y (a_y CoreMotion < 0) : tape venue du côté -y.
         r->side = (r->acc[1] > 0 ? 1 : -1) * p->lateral_sign; r->method = "latéral";

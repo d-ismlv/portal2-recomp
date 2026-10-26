@@ -202,6 +202,7 @@ static void backtap_start(void) {
     p.accel_min = env_float("P2_BACKTAP_ACCEL", p.accel_min, 0.001f);
     p.jerk_min = env_float("P2_BACKTAP_JERK", p.jerk_min, 0);
     p.rot_min = env_float("P2_BACKTAP_ROT", p.rot_min, 0.001f);
+    p.side_x_weight = env_float("P2_BACKTAP_SIDE_X", p.side_x_weight, 0);
     p.gyro_accel_min = env_float("P2_BACKTAP_GYRO_ACCEL", p.gyro_accel_min, 0.001f);
     p.gyro_rot_min = env_float("P2_BACKTAP_GYRO_ROT", p.gyro_rot_min, 0.001f);
     p.gyro_jerk_min = env_float("P2_BACKTAP_GYRO_JERK", p.gyro_jerk_min, 0);

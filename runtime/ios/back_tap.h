@@ -8,7 +8,8 @@
 typedef struct {
     float accel_min;     // g : accélération utilisateur minimale au pic
     float jerk_min;      // g/s : secousse minimale (variation d'un échantillon au suivant)
-    float rot_min;       // rad/s : rotation minimale autour de l'axe x pour décider le côté
+    float rot_min;       // rad/s : score de rotation minimal (voir side_x_weight) pour décider le côté
+    float side_x_weight; // poids de la rotation autour de x face à celle autour de z dans le score de côté
     // Voie gyroscope : tape légère (surtout à gauche) qui fait tourner le
     // téléphone sans l'accélérer assez pour accel_min. gyro_rot_min > 10 la coupe.
     float gyro_accel_min; // g : pic minimal d'accélération
@@ -42,6 +43,7 @@ typedef struct {
     float jerk;            // g/s : secousse maximale
     float acc[3];          // g : vecteur a au pic
     float rot[3];          // rad/s : écart de rotation maximal (signé) par axe
+    float side_score;      // rad/s : side_x_weight·rot x - orientation·rot z (> 0 : vers +y)
     float width;           // s : durée du pic
     float rise;            // s : du début du pic à son maximum (journal)
     float grav[3];         // g : gravité juste avant le pic (téléphone à plat : z ≈ ±1)

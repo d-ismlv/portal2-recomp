@@ -72,8 +72,12 @@ variation brusque de la rotation autour de x ; jugé 100 ms plus tard aux seuils
 entiers. Deux voies : accélération (0,10 g, 6 g/s) ou gyroscope (0,06 g,
 6 g/s, rotation de 0,30 rad/s, téléphone immobile juste avant) ; à gauche l'index fait tourner le téléphone
 (0,4 à 0,7 rad/s) en l'accélérant peu (0,07 à 0,10 g).
-Côté : signe de la rotation brève autour de l'axe x de l'appareil (vertical en
-paysage), rapporté à l'orientation de l'écran (gravité à défaut) ; repli
+Côté : score 0,5 × rotation brève autour de l'axe x de l'appareil (vertical en
+paysage, rapportée à l'orientation de l'écran, gravité à défaut) + rotation
+autour de z rapportée à l'écran (la main qui tape fait pivoter le téléphone dans
+son plan : vers la gauche, z > 0, pour une tape à gauche, dans les deux
+paysages) ; 79/79 tapes étiquetées, contre 72/79 avec x seul (tapes près d'un
+coin, téléphone retourné) ; repli
 « latéral » (tape sur la tranche) par le signe de l'accélération selon y.
 Rejets : menu ou surcouche masquée (jusqu'à 80 ms avant le pic), toucher qui commence ou finit à ±80 ms,
 agitation ou gravité qui change avant le pic (300 ms pris en remontant jusqu'à 600 ms, hors des 250 ms qui suivent les deux candidats d'avant ; dans les 50 ms d'avant, leur vibration doit être retombée sous 25 % du pic, sinon c'est une secousse), téléphone posé à plat écran vers le haut (gravité z < -0,95). Clic :
@@ -96,7 +100,8 @@ Enregistrement brut pour régler les seuils sur le Mac :
 |---|---|---|
 | `P2_BACKTAP_ACCEL` | 0.10 g | pic minimal d'accélération |
 | `P2_BACKTAP_JERK` | 6 g/s | secousse minimale |
-| `P2_BACKTAP_ROT` | 0.08 rad/s | rotation minimale (axe x) pour décider le côté |
+| `P2_BACKTAP_ROT` | 0.08 rad/s | score de rotation minimal pour décider le côté |
+| `P2_BACKTAP_SIDE_X` | 0.5 | poids de la rotation autour de x face à celle autour de z (`100` : x seul, l'ancienne règle) |
 | `P2_BACKTAP_GYRO_ACCEL` | 0.06 g | voie gyroscope : pic minimal d'accélération |
 | `P2_BACKTAP_GYRO_ROT` | 0.30 rad/s | voie gyroscope : rotation minimale autour de x (`99` la coupe) |
 | `P2_BACKTAP_GYRO_JERK` | 15 rad/s² | voie gyroscope : variation de rotation qui ouvre un candidat |

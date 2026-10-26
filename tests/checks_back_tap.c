@@ -11,7 +11,9 @@
 // ring : vibration de la main qui suit la tape (g ; 30 Hz, amortie en
 // ring_tau, 100 ms par défaut), mesurée sur l'iPhone : le pic reste au-dessus
 // de 35 % de son maximum 50 à 100 ms.
-typedef struct { double t; int ry; int axis; float accel, rot, ring, ring_tau; } Tap;
+// rot_z : rotation autour de z (rad/s), dans le repère de l'écran (> 0 : vers la
+// gauche) ; la main qui tape fait pivoter le téléphone dans son plan.
+typedef struct { double t; int ry; int axis; float accel, rot, ring, ring_tau, rot_z; } Tap;
 typedef struct {
     double rate, length;
     Tap taps[4]; int ntaps;
@@ -52,7 +54,9 @@ static Outcome play(const Scene *sc) {
             double tau = p->ring_tau > 0 ? p->ring_tau : 0.100;
             if (x > 0.020) push += p->ring * (float)(exp(-(x - 0.020) / tau) * sin(2 * M_PI * 30 * (x - 0.020)));
             s.a[p->axis] -= push;
-            if (x >= 0) s.w[0] += p->ry * p->rot * (float)(x < 0.005 ? x / 0.005 : exp(-(x - 0.005) / 0.030));
+            float shape = x < 0 ? 0 : (float)(x < 0.005 ? x / 0.005 : exp(-(x - 0.005) / 0.030));
+            s.w[0] += p->ry * p->rot * shape;
+            s.w[2] += p->rot_z * shape;
         }
         double u = t - 100;
         if (u >= sc->shake_from && u < sc->shake_to) {
@@ -93,7 +97,7 @@ static Scene scene(double rate) {
 // Tape au dos du côté gauche (-1) ou droit (+1) de l'écran ; orient : +1 si
 // l'axe y de l'appareil pointe vers la droite de l'écran.
 static void back_tap(Scene *sc, double t, int screen_side) {
-    sc->taps[sc->ntaps++] = (Tap){t, screen_side * sc->orient, 2, 0.3f, 0.4f, 0, 0};
+    sc->taps[sc->ntaps++] = (Tap){t, screen_side * sc->orient, 2, 0.3f, 0.4f, 0, 0, 0};
 }
 static const double kRates[] = {100, 200};
 
@@ -106,6 +110,22 @@ RT_CHECK(backtap_left_and_right_back_taps_pick_their_side) {
                 Outcome o = play(&sc);
                 assert(o.reports == 1 && o.accepted == 1);
                 assert(o.side[0] == side && !strcmp(o.method[0], "rotation"));
+            }
+}
+
+// Tape près d'un coin (26/10, téléphone retourné) : la rotation autour de x
+// est faible et de signe trompeur, celle autour de z (la main qui tape fait
+// pivoter le téléphone) donne le côté.
+RT_CHECK(backtap_corner_tap_side_from_screen_plane_rotation) {
+    for (int r = 0; r < 2; ++r)
+        for (int orient = -1; orient <= 1; orient += 2)
+            for (int side = -1; side <= 1; side += 2) {
+                Scene sc = scene(kRates[r]); sc.orient = orient;
+                back_tap(&sc, 1.0, side);
+                sc.taps[0].rot = -0.12f;                 // signe opposé au côté
+                sc.taps[0].rot_z = -0.2f * (float)side;  // gauche : z > 0
+                Outcome o = play(&sc);
+                assert(o.accepted == 1 && o.side[0] == side);
             }
 }
 
@@ -129,7 +149,7 @@ RT_CHECK(backtap_side_tap_uses_lateral_acceleration) {
     for (int r = 0; r < 2; ++r) {
         // Tape sur la tranche gauche : poussée physique vers la droite (+y si orient = 1).
         Scene sc = scene(kRates[r]);
-        sc.taps[sc.ntaps++] = (Tap){1.0, 0, 1, 0.3f, 0, 0, 0};
+        sc.taps[sc.ntaps++] = (Tap){1.0, 0, 1, 0.3f, 0, 0, 0, 0};
         Outcome o = play(&sc);
         assert(o.accepted == 1 && o.side[0] == -1 && !strcmp(o.method[0], "latéral"));
         sc.params.lateral_sign = 0;
@@ -172,7 +192,7 @@ RT_CHECK(backtap_tap_after_weak_blip_is_not_hidden) {
     for (int r = 0; r < 2; ++r)
         for (int side = -1; side <= 1; side += 2) {
             Scene sc = scene(kRates[r]);
-            sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, 0.06f, 0, 0, 0};   // sous accel_min, au-dessus de sa moitié
+            sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, 0.06f, 0, 0, 0, 0};   // sous accel_min, au-dessus de sa moitié
             back_tap(&sc, 1.06, side);
             Outcome o = play(&sc);
             assert(o.accepted == 1 && o.side[o.reports - 1] == side);
@@ -229,7 +249,7 @@ RT_CHECK(backtap_screen_touch_rejects_nearby_peak) {
     for (int r = 0; r < 2; ++r)
         for (int i = 0; i < 4; ++i) {
             Scene sc = scene(kRates[r]);
-            sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, -0.3f, 0.4f, 0, 0};   // écran : poussée vers l'arrière
+            sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, -0.3f, 0.4f, 0, 0, 0};   // écran : poussée vers l'arrière
             sc.touches[sc.ntouch++] = 1.0 + offsets[i];
             Outcome o = play(&sc);
             assert(o.reports == 1 && o.accepted == 0 && !strcmp(o.reject[0], "toucher à l'écran"));
@@ -317,7 +337,7 @@ RT_CHECK(backtap_motion_rejects) {
 // Candidats sous les seuils : signalés (journal), sans période réfractaire.
 RT_CHECK(backtap_weak_candidates_only_logged) {
     Scene sc = scene(200);
-    sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, 0.04f, 0.4f, 0, 0};
+    sc.taps[sc.ntaps++] = (Tap){1.0, 1, 2, 0.04f, 0.4f, 0, 0, 0};
     sc.params.onset_factor = 1;
     Outcome o = play(&sc);
     assert(o.reports == 0);

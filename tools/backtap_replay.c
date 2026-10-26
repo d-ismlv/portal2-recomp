@@ -21,6 +21,7 @@ int main(int argc, char **argv) {
     p.accel_min = env("P2_BACKTAP_ACCEL", p.accel_min);
     p.jerk_min = env("P2_BACKTAP_JERK", p.jerk_min);
     p.rot_min = env("P2_BACKTAP_ROT", p.rot_min);
+    p.side_x_weight = env("P2_BACKTAP_SIDE_X", p.side_x_weight);
     p.gyro_accel_min = env("P2_BACKTAP_GYRO_ACCEL", p.gyro_accel_min);
     p.gyro_rot_min = env("P2_BACKTAP_GYRO_ROT", p.gyro_rot_min);
     p.gyro_jerk_min = env("P2_BACKTAP_GYRO_JERK", p.gyro_jerk_min);
@@ -51,8 +52,8 @@ int main(int argc, char **argv) {
         if (!r.reject) ++taps[r.side > 0];
         else ++rejects;
         char touch[16]; if (fabs(r.touch_dt) < 10) snprintf(touch, sizeof(touch), "%+.0fms", r.touch_dt * 1000); else snprintf(touch, sizeof(touch), "aucun");
-        printf("%8.2f s  pic %.2f g  secousse %3.0f  rot x %+.2f  montée %2.0f ms  avant %.3f  fin %.3f  grav z %+.2f  toucher %s  -> %s\n",
-               r.t - origin, r.peak, r.jerk, r.rot[0], r.rise * 1000, r.pre_rms, r.tail_rms, r.grav[2],
+        printf("%8.2f s  pic %.2f g  secousse %3.0f  rot x %+.2f z %+.2f  o %+d  montée %2.0f ms  avant %.3f  fin %.3f  grav z %+.2f  toucher %s  -> %s\n",
+               r.t - origin, r.peak, r.jerk, r.rot[0], r.rot[2], r.orient, r.rise * 1000, r.pre_rms, r.tail_rms, r.grav[2],
                touch,
                r.reject ? r.reject : r.side < 0 ? (r.gyro ? "GAUCHE (gyro)" : "GAUCHE") : (r.gyro ? "DROITE (gyro)" : "DROITE"));
     }
