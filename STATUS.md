@@ -44,6 +44,26 @@ MSAA 4x en 1440p le GPU limite (~13 ms/image) : ces gains n'y changent rien.
 Pistes suivantes : ThinLTO/PGO, accès TLS en ligne, présentation en fenêtre
 visible à mesurer.
 
+Grandes salles (26 oct. soir, 2560×1440 Retina, fenêtre cachée) :
+sp_a2_laser_over_goo et sp_a2_column_blocker ≈ 95 fps machine calme sans
+MSAA (GPU ~9 ms/image, donc plafond GPU ~110 fps en 1440p), ~50 fps quand
+un autre jeu et une compilation tournent, ~38-40 fps avec MSAA 4x en plus :
+c'était la situation de l'utilisateur (30 fps). Les mesures n'ont de sens que
+machine calme (vérifier `uptime`). Essai écarté : regrouper les fonctions
+chaudes (`P2_PROFILE_WALL=1 P2_PROFILE_ORDER=…`, `tools/hot_order.py`,
+`build_game.py --order-file`) : pas de gain visible (78,7 → 78,9 fps).
+Préparé, pas encore exécuté : PGO (`build_game.py --pgo-generate` puis
+`--pgo-use`, profil écrit toutes les 20 s ; demande ~5 Go de disque).
+Comparer deux binaires : `bench_game.py --binary build/<copie>` (la copie doit
+rester dans `build/`, le chemin de libsteam_api est relatif à l'exécutable).
+
+Plein écran : la souris vise ~0,5 cm trop haut d'après l'utilisateur ; la zone
+sûre sous l'encoche fait 32 points sur ce MacBook. Le journal écrit maintenant
+la géométrie réelle (`[sdl] géométrie …`) à la création, aux changements de
+taille et de plein écran : un lancement en plein écran donnera les chiffres.
+Le SIGBUS de fn_17eabcc0 (3 fois le 26 oct.) survient à la fermeture du jeu
+(CPortal_Player, écouteur d'inventaire GC orphelin probable), pas en jeu.
+
 Le thread principal attend surtout le pilote OpenGL d'Apple (soumissions
 Metal sur glBufferSubData de tampons en vol, compilation GLSL à la volée,
 mise en cache par togl dans `update/glshaders.cfg`). La carte graphique a de
