@@ -10,8 +10,11 @@
 // accel_min et que sa variation d'un échantillon au suivant (secousse)
 // dépasse jerk_min. Il est jugé DELAY plus tard, une fois connus son pic, sa
 // durée et les touchers qui l'entourent :
-// - durée : temps passé au-dessus de max(accel_min, 35 % du pic) ; une tape
-//   dure 10 à 30 ms, une secousse de la main bien plus ;
+// - montée : délai du début du pic à son maximum (fenêtre de 40 ms) ; une
+//   tape culmine en 10 ou 20 ms, un geste brusque monte encore au bout de 40 ;
+// - durée : temps passé au-dessus de max(accel_min, 35 % du pic) ; la main
+//   fait vibrer le téléphone 50 à 100 ms après une tape (calibration) : la
+//   limite par défaut est au-delà de la fenêtre de mesure, donc inactive ;
 // - agitation : moyenne quadratique de |a| dans les 300 ms qui précèdent ; un
 //   pic au milieu d'un mouvement n'est pas une tape ;
 // - gravité : sa variation dans les 200 ms qui précèdent (téléphone qu'on
@@ -52,7 +55,8 @@ void rt_backtap_defaults(rt_backtap_params *p) {
     p->z_sign = 0;            // à fixer après calibration : dos et écran poussent en sens opposés
     p->refractory = 0.25f;    // 4 tapes/s au plus ; couvre les rebonds de la main
     p->touch_guard = 0.08f;   // ±80 ms autour d'un début ou d'une fin de toucher
-    p->max_width = 0.06f;     // 2 à 6 fois une tape
+    p->max_width = 0.12f;     // inactive : tapes mesurées de 50 à 100 ms (vibration de la main), fenêtre de 100 ms
+    p->max_rise = 0.025f;     // à 100 Hz : maximum au 1er, 2e ou 3e échantillon du pic
     p->pre_rms_max = 0.05f;   // téléphone tenu immobile : ~0,01 g ; marche : 0,1 g et plus
     p->gravity_max = 0.12f;   // ~7° de rotation en 200 ms
     p->log_factor = 1.0f;
@@ -105,6 +109,7 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
         float dg[3] = {g_now->g[0] - g_then->g[0], g_now->g[1] - g_then->g[1], g_now->g[2] - g_then->g[2]};
         r->gravity = norm3(dg);
     }
+    if (g_now) memcpy(r->grav, g_now->g, sizeof(r->grav));
 
     // Pic (40 ms) : amplitude, secousse, rotation ; la rotation peut précéder
     // l'accélération d'un échantillon.
@@ -118,7 +123,7 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
         }
         if (i < onset) continue;
         float m = norm3(s->a);
-        if (m > r->peak) { r->peak = m; memcpy(r->acc, s->a, sizeof(r->acc)); }
+        if (m > r->peak) { r->peak = m; memcpy(r->acc, s->a, sizeof(r->acc)); r->rise = (float)(s->t - t0); }
         const rt_backtap_sample *q = i > first ? at(d, i - 1) : NULL;
         if (q && s->t > q->t) {
             float da[3] = {s->a[0] - q->a[0], s->a[1] - q->a[1], s->a[2] - q->a[2]};
@@ -163,6 +168,7 @@ static void judge(rt_backtap *d, int orient, int active, rt_backtap_report *r) {
     else if (n < 3) r->reject = "historique insuffisant";
     else if (r->pre_rms > p->pre_rms_max) r->reject = "agitation avant le pic";
     else if (r->gravity > p->gravity_max) r->reject = "gravité qui change";
+    else if (r->rise > p->max_rise) r->reject = "montée trop lente";
     else if (r->width > p->max_width) r->reject = "pic trop long";
     else if (p->z_sign && (onset_az > 0 ? 1 : -1) != p->z_sign) r->reject = "sens z";
     else if (!r->orient) r->reject = "orientation inconnue";

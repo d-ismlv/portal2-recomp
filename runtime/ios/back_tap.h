@@ -16,6 +16,7 @@ typedef struct {
     float refractory;    // s : rien après un candidat pendant ce délai
     float touch_guard;   // s : rien à moins de ce délai d'un début ou d'une fin de toucher
     float max_width;     // s : durée maximale du pic (une secousse dure plus longtemps)
+    float max_rise;      // s : délai maximal entre le début du pic et son maximum (un geste monte lentement)
     float pre_rms_max;   // g : agitation maximale (moyenne quadratique) avant le pic
     float gravity_max;   // g : variation maximale de la gravité dans les 200 ms avant le pic
     float log_factor;    // seuils de candidature multipliés par ce facteur (journal : < 1)
@@ -36,6 +37,8 @@ typedef struct {
     float acc[3];          // g : vecteur a au pic
     float rot[3];          // rad/s : écart de rotation maximal (signé) par axe
     float width;           // s : durée du pic
+    float rise;            // s : du début du pic à son maximum
+    float grav[3];         // g : gravité juste avant le pic (téléphone à plat : z ≈ ±1)
     float pre_rms;         // g : agitation avant le pic
     float gravity;         // g : variation de la gravité avant le pic
     double touch_dt;       // s : toucher le plus proche (t_toucher - t), 1e9 si aucun

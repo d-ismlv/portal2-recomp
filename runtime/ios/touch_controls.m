@@ -156,10 +156,12 @@ static void backtap_log_report(const rt_backtap_report *r, double origin) {
     else snprintf(verdict, sizeof(verdict), "%s (%s)", r->side < 0 ? "GAUCHE, portail bleu" : "DROITE, portail orange",
                   r->method);
     fprintf(stderr, "[ios] tape %.3f s : pic %.2f g (x %+.2f y %+.2f z %+.2f), secousse %.0f g/s, "
-            "rotation x %+.2f y %+.2f z %+.2f rad/s, durée %.0f ms, avant %.3f g, gravité %.2f g, "
+            "rotation x %+.2f y %+.2f z %+.2f rad/s, montée %.0f ms, durée %.0f ms, avant %.3f g, "
+            "gravité %.2f g (x %+.2f y %+.2f z %+.2f), "
             "toucher %s, orientation %+d -> %s\n",
             r->t - origin, r->peak, r->acc[0], r->acc[1], r->acc[2], r->jerk, r->rot[0], r->rot[1], r->rot[2],
-            r->width * 1000, r->pre_rms, r->gravity, touch, r->orient, verdict);
+            r->rise * 1000, r->width * 1000, r->pre_rms, r->gravity, r->grav[0], r->grav[1], r->grav[2], touch,
+            r->orient, verdict);
 }
 
 // Mode journal : chaque candidat jugé, et toutes les 5 s le bruit de fond
@@ -200,6 +202,7 @@ static void backtap_start(void) {
     p.refractory = env_float("P2_BACKTAP_REFRACTORY", p.refractory, 0);
     p.touch_guard = env_float("P2_BACKTAP_TOUCH_GUARD", p.touch_guard, 0);
     p.max_width = env_float("P2_BACKTAP_WIDTH", p.max_width, 0.001f);
+    p.max_rise = env_float("P2_BACKTAP_RISE", p.max_rise, 0);
     p.pre_rms_max = env_float("P2_BACKTAP_AGITATION", p.pre_rms_max, 0.001f);
     p.gravity_max = env_float("P2_BACKTAP_GRAVITY", p.gravity_max, 0.001f);
     p.lateral_sign = env_sign("P2_BACKTAP_LATERAL", p.lateral_sign);
@@ -217,9 +220,9 @@ static void backtap_start(void) {
     backtap_queue.qualityOfService = NSQualityOfServiceUserInteractive;
     motion.deviceMotionUpdateInterval = 1.0 / hz;
     fprintf(stderr, "[ios] tapes au dos : %g Hz demandés ; seuils %.3g g, %.3g g/s, rotation %.3g rad/s ; "
-            "réfractaire %.0f ms, toucher ±%.0f ms, durée %.0f ms, agitation %.3g g, gravité %.3g g ; "
+            "réfractaire %.0f ms, toucher ±%.0f ms, montée %.0f ms, durée %.0f ms, agitation %.3g g, gravité %.3g g ; "
             "latéral %+d, z %+d, inversé %d, appui %.0f ms%s\n",
-            hz, p.accel_min, p.jerk_min, p.rot_min, p.refractory * 1e3, p.touch_guard * 1e3, p.max_width * 1e3,
+            hz, p.accel_min, p.jerk_min, p.rot_min, p.refractory * 1e3, p.touch_guard * 1e3, p.max_rise * 1e3, p.max_width * 1e3,
             p.pre_rms_max, p.gravity_max, p.lateral_sign, p.z_sign, p.invert, backtap_hold * 1e3,
             backtap_log ? ", journal" : "");
     [motion startDeviceMotionUpdatesToQueue:backtap_queue withHandler:^(CMDeviceMotion *m, NSError *error) {
