@@ -4,11 +4,13 @@
 // générées fn_<adresse invitée>, shims, bibliothèques). Rien n'est actif
 // sans la variable d'environnement.
 #include "rt.h"
+#include <TargetConditionals.h>
 #include <dlfcn.h>
 #include <pthread.h>
 #include <signal.h>
 #include <stdio.h>
 #include <stdlib.h>
+#include <string.h>
 #include <sys/time.h>
 #include <time.h>
 #include <unistd.h>
@@ -64,10 +66,35 @@ static void tick(int signal, siginfo_t *info, void *context) {
     ++dropped;
 }
 
+// Nom d'une adresse, mémorisé : dladdr est lent sur le cache partagé d'iOS
+// (une écriture du profil brut prenait plus d'une minute). Sur iOS, les
+// symboles du cache partagé y sont masqués (« <redacted> ») : on écrit
+// « bibliothèque+décalage », résolu sur le Mac par tools/ios_symbolize.py avec
+// les symboles de l'appareil (Xcode, iOS DeviceSupport). Appelé par le seul
+// thread d'écriture.
+#define NAMES 65536u
 static const char *symbol(uintptr_t pc) {
+    static const char *names[NAMES]; static uintptr_t pcs[NAMES];
+    unsigned h = (unsigned)((pc >> 2) * 2654435761u) & (NAMES - 1);
+    unsigned probe = 0;
+    for (; probe < 32; ++probe, h = (h + 1) & (NAMES - 1)) {
+        if (names[h] && pcs[h] == pc) return names[h];
+        if (!names[h]) break;
+    }
+    const char *name = "?";
     Dl_info where;
-    if (pc && dladdr((void *)pc, &where)) return where.dli_sname ? where.dli_sname : where.dli_fname;
-    return "?";
+    if (pc && dladdr((void *)pc, &where)) {
+        name = where.dli_sname ? where.dli_sname : where.dli_fname;
+#if TARGET_OS_IPHONE
+        if (!where.dli_sname || !strcmp(where.dli_sname, "<redacted>")) {
+            const char *base = strrchr(where.dli_fname, '/'); base = base ? base + 1 : where.dli_fname;
+            char text[256]; snprintf(text, sizeof(text), "%s+%#lx", base, (unsigned long)(pc - (uintptr_t)where.dli_fbase));
+            char *copy = strdup(text); if (copy) name = copy;
+        }
+#endif
+    }
+    if (probe < 32) { names[h] = name; pcs[h] = pc; }
+    return name;
 }
 typedef struct { const char *name; uint64_t count; } Entry;
 static int by_count(const void *a, const void *b) {
