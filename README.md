@@ -1,5 +1,14 @@
 # Portal 2, statically recompiled for Apple silicon (macOS and iPhone)
 
+[![Portal 2 running natively on iPhone (video)](https://img.youtube.com/vi/YWX2BeMnlQI/maxresdefault.jpg)](https://youtu.be/YWX2BeMnlQI)
+
+*Video: Portal 2 running natively on an iPhone 15 Pro Max.*
+
+<p>
+  <img src="docs/images/iphone-menu.jpg" alt="Portal 2 main menu on iPhone, 60 fps" width="49%">
+  <img src="docs/images/iphone-ingame.jpg" alt="Portal 2 in game on iPhone with touch controls" width="49%">
+</p>
+
 This project translates the **x86 (i386) machine code of Portal 2's Linux
 release into C**, then compiles it into a native ARM64 executable for macOS
 and iOS. No emulator, no Wine, no Rosetta, no interpreter: every function of
