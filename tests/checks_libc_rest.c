@@ -114,3 +114,13 @@ RT_CHECK(libc_rest_fscanf_on_guest_stream) {
     assert(call("fclose", 1, stream) == 0);
     unlink(path);
 }
+
+// Filtre de P2_TRACE_FILES : vide ou « 0 » éteint, « 1 » trace tout, sinon
+// sous-chaîne du chemin invité, sans casse.
+int rt_trace_files_match(const char *filter, const char *path);
+RT_CHECK(libc_rest_trace_files_filter) {
+    const char *path = "/game/portal2/SAVE/autosave.sav";
+    assert(!rt_trace_files_match(NULL, path) && !rt_trace_files_match("", path) && !rt_trace_files_match("0", path));
+    assert(rt_trace_files_match("1", path) && rt_trace_files_match("save/auto", path));
+    assert(!rt_trace_files_match("maps", path) && !rt_trace_files_match("1", NULL));
+}
