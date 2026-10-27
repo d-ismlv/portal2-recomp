@@ -1,4 +1,8 @@
 #include "posix.h"
+#include <TargetConditionals.h>
+#if TARGET_OS_IPHONE
+const char *rt_ios_case_path(const char *canonical, size_t trusted);
+#endif
 #include <errno.h>
 #include <limits.h>
 #include <pthread.h>
@@ -89,6 +93,12 @@ int rt_paths_init(const char *game,const char *linux,const char *user) {
     if(mkdir(user_root,0755) && errno!=EEXIST)return -1;
     const char *roots[3]={game_root,linux_root,user_root};
     for(int i=0;i<3;++i)insensitive[i]=pathconf(roots[i],_PC_CASE_SENSITIVE)==0;
+#if TARGET_OS_IPHONE
+    // iOS compare la casse même sur un volume insensible (bac à sable) : les
+    // variantes du correcteur de casse de Source sont résolues ici et par
+    // rt_ios_case_path (runtime/ios/case_path.c).
+    for(int i=0;i<3;++i)insensitive[i]=1;
+#endif
     return 0;
 }
 // Le répertoire des marques de suppression n'existe pas dans la vue invitée.
@@ -118,7 +128,14 @@ const char *rt_read_path(const char *path) {
     if(rt_is_proc_path(path))return rt_proc_path(path);   // fichiers /proc générés (procfs.c)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
-    if(!within(canonical,game_root))return path;
+    if(!within(canonical,game_root)) {
+#if TARGET_OS_IPHONE
+        // iOS compare la casse : chemin résolu composant par composant (case_path.c).
+        if(within(canonical,linux_root))return rt_ios_case_path(canonical,strlen(linux_root));
+        if(within(canonical,user_root))return rt_ios_case_path(canonical,strlen(user_root));
+#endif
+        return path;
+    }
     unsigned long now=generation; unsigned slot=read_slot(canonical);
     pthread_mutex_lock(&read_lock);
     if(!read_cache)read_cache=calloc(READ_CACHE,sizeof(*read_cache));
@@ -185,12 +202,19 @@ static const char *read_path_uncached(const char *path) {
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
     const char *linked;
     if(*relative && overlay_link(result,relative,-1,1,&linked))return linked;
+#if TARGET_OS_IPHONE
+    // Chaque couche est sondée dans sa casse réelle, pas dans celle demandée.
+    {const char *c=rt_ios_case_path(result,strlen(user_root)); if(c && c!=result)strcpy(result,c);}
+#endif
     struct stat info;
     if(!stat(result,&info) && (!S_ISDIR(info.st_mode) || access(canonical,F_OK)))return result;
     // Supprimé par l'invité : la copie utilisateur absente donne ENOENT.
     if(lstat(result,&info) && rt_path_is_whiteout(relative)==1)return result;
     count=snprintf(result,PATH_MAX,"%s/%s",linux_root,relative);
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
+#if TARGET_OS_IPHONE
+    {const char *c=rt_ios_case_path(result,strlen(linux_root)); if(c && c!=result)strcpy(result,c);}
+#endif
     if(!stat(result,&info) && (!S_ISDIR(info.st_mode) || access(canonical,F_OK)))return result;
     const char *base=strrchr(relative,'/');
     if(base && strstr(relative,"bin/")) {
@@ -199,7 +223,11 @@ static const char *read_path_uncached(const char *path) {
         if(count>=0 && count<PATH_MAX && !stat(result,&info))return result;
     }
     if(rt_path_windows_binary(relative)){errno=ENOENT;return NULL;}   // binaire Windows : absent sous Linux
+#if TARGET_OS_IPHONE
+    return rt_ios_case_path(canonical,strlen(game_root));
+#else
     return path;
+#endif
 }
 #define WHITEOUTS RT_WHITEOUTS
 static _Thread_local char parent_buffer[PATH_MAX];
@@ -212,7 +240,15 @@ static int lower_directory(const char *relative) {
     if(rt_path_is_whiteout(relative)==1)return 0;
     char lower[2][PATH_MAX];int count=rt_path_lower(relative,lower);
     struct stat info;
-    for(int i=0;i<count;++i)if(!stat(lower[i],&info) && S_ISDIR(info.st_mode))return 1;
+    for(int i=0;i<count;++i){
+        const char *candidate=lower[i];
+#if TARGET_OS_IPHONE
+        // iOS compare la casse : « portal2/save » désigne le dossier « SAVE » du jeu.
+        size_t trusted=within(candidate,game_root)?strlen(game_root):within(candidate,linux_root)?strlen(linux_root):0;
+        const char *real=rt_ios_case_path(candidate,trusted); if(real)candidate=real;
+#endif
+        if(!stat(candidate,&info) && S_ISDIR(info.st_mode))return 1;
+    }
     return 0;
 }
 int rt_path_relative(const char *path,char relative[PATH_MAX]) {
@@ -227,7 +263,14 @@ static int join(char out[PATH_MAX],const char *root,const char *relative) {
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return -1;}
     return 0;
 }
-int rt_path_overlay(const char *relative,char out[PATH_MAX]) { return join(out,user_root,relative); }
+int rt_path_overlay(const char *relative,char out[PATH_MAX]) {
+    if(join(out,user_root,relative))return -1;
+#if TARGET_OS_IPHONE
+    // Casse réelle des composants existants (suppressions, renommages : posix.c).
+    {const char *c=rt_ios_case_path(out,strlen(user_root)); if(c && c!=out)strcpy(out,c);}
+#endif
+    return 0;
+}
 int rt_path_absolute(const char *path,char out[PATH_MAX]) { return absolute_path(path,out); }
 static int join(char out[PATH_MAX],const char *root,const char *relative);
 // Greffon Miles de bin/linux32 traduit d'avance (pe.c) : visible seulement si
@@ -350,11 +393,23 @@ static const char *write_path(const char *path,int preserve_existing,int follow_
     ++generation;   // toute écriture invalide les caches de lecture (listes de dossiers)
     if(!game_root[0])return path;
     char canonical[PATH_MAX]; if(absolute_path(path,canonical))return NULL;
-    if(!within(canonical,game_root))return path;
+    if(!within(canonical,game_root)) {
+#if TARGET_OS_IPHONE
+        if(within(canonical,linux_root))return rt_ios_case_path(canonical,strlen(linux_root));
+        if(within(canonical,user_root))return rt_ios_case_path(canonical,strlen(user_root));
+#endif
+        return path;
+    }
     const char *relative=canonical+strlen(game_root); while(*relative=='/')++relative;
     if(reserved(relative)){errno=ENOENT;return NULL;}
     char *result=buffer(); int count=snprintf(result,PATH_MAX,"%s/%s",user_root,relative);
     if(count<0 || count>=PATH_MAX){errno=ENAMETOOLONG;return NULL;}
+#if TARGET_OS_IPHONE
+    // Le moteur écrit en minuscules (« portal2/save/… ») : composants existants
+    // de la copie utilisateur repris dans leur casse réelle (« SAVE »), sinon
+    // ils seraient recréés ou introuvables sur un système sensible à la casse.
+    {const char *c=rt_ios_case_path(result,strlen(user_root)); if(c && c!=result)strcpy(result,c);}
+#endif
     const char *linked;
     if(*relative && overlay_link(result,relative,preserve_existing,follow_final,&linked))return linked;
     // Ne recrée dans la copie utilisateur que les répertoires parents visibles

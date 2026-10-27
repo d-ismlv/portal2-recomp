@@ -1,0 +1,253 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>PreferenceSpecifiers</key>
+	<array>
+		<dict>
+			<key>FooterText</key>
+			<string>Les changements s'appliquent au prochain lancement du jeu (fermez-le depuis le sélecteur d'apps). Une résolution plus basse donne plus d'images par seconde.</string>
+			<key>Title</key>
+			<string>Affichage</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>2</string>
+			<key>Key</key>
+			<string>P2ResolutionScale</string>
+			<key>Title</key>
+			<string>Résolution</string>
+			<key>Titles</key>
+			<array>
+				<string>Native (×3)</string>
+				<string>×2 (recommandé)</string>
+				<string>×1,5</string>
+				<string>×1</string>
+			</array>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Values</key>
+			<array>
+				<string>native</string>
+				<string>2</string>
+				<string>1.5</string>
+				<string>1</string>
+			</array>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>60</string>
+			<key>Key</key>
+			<string>P2MaxFPS</string>
+			<key>Title</key>
+			<string>Images par seconde</string>
+			<key>Titles</key>
+			<array>
+				<string>60 (recommandé)</string>
+				<string>120 (ProMotion)</string>
+			</array>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Values</key>
+			<array>
+				<string>60</string>
+				<string>120</string>
+			</array>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<true/>
+			<key>Key</key>
+			<string>P2ShowFPS</string>
+			<key>Title</key>
+			<string>Compteur d’images</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>FooterText</key>
+			<string>Le mode trackpad fait tourner la caméra en glissant le doigt sur la moitié droite de l'écran ; le bouton en bas à gauche bascule aussi ce réglage en jeu.</string>
+			<key>Title</key>
+			<string>Commandes tactiles</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>auto</string>
+			<key>Key</key>
+			<string>P2TouchControls</string>
+			<key>Title</key>
+			<string>Commandes à l’écran</string>
+			<key>Titles</key>
+			<array>
+				<string>Automatique</string>
+				<string>Toujours</string>
+				<string>Jamais</string>
+			</array>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Values</key>
+			<array>
+				<string>auto</string>
+				<string>1</string>
+				<string>0</string>
+			</array>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<false/>
+			<key>Key</key>
+			<string>P2TouchTrackpad</string>
+			<key>Title</key>
+			<string>Caméra en trackpad</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>1</string>
+			<key>Key</key>
+			<string>P2TouchLook</string>
+			<key>Title</key>
+			<string>Vitesse de la caméra</string>
+			<key>Titles</key>
+			<array>
+				<string>Très lente (×0,5)</string>
+				<string>Lente (×0,75)</string>
+				<string>Normale</string>
+				<string>Rapide (×1,5)</string>
+				<string>Très rapide (×2)</string>
+				<string>Extrême (×3)</string>
+			</array>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Values</key>
+			<array>
+				<string>0.5</string>
+				<string>0.75</string>
+				<string>1</string>
+				<string>1.5</string>
+				<string>2</string>
+				<string>3</string>
+			</array>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>2.5</string>
+			<key>Key</key>
+			<string>P2TouchAccel</string>
+			<key>Title</key>
+			<string>Accélération du trackpad</string>
+			<key>Titles</key>
+			<array>
+				<string>Aucune</string>
+				<string>Légère</string>
+				<string>Normale</string>
+				<string>Forte</string>
+			</array>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Values</key>
+			<array>
+				<string>1</string>
+				<string>1.75</string>
+				<string>2.5</string>
+				<string>4</string>
+			</array>
+		</dict>
+		<dict>
+			<key>FooterText</key>
+			<string>Tapez le dos du téléphone près du bord gauche pour le portail bleu, près du bord droit pour l'orange. Sans tapes au dos, des boutons de portail s'affichent en haut de l'écran.</string>
+			<key>Title</key>
+			<string>Portails</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<true/>
+			<key>Key</key>
+			<string>P2BackTap</string>
+			<key>Title</key>
+			<string>Tapes au dos</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>1</string>
+			<key>Key</key>
+			<string>P2BackTapSensitivity</string>
+			<key>Title</key>
+			<string>Sensibilité des tapes</string>
+			<key>Titles</key>
+			<array>
+				<string>Faible</string>
+				<string>Normale</string>
+				<string>Élevée</string>
+			</array>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Values</key>
+			<array>
+				<string>0.75</string>
+				<string>1</string>
+				<string>1.33</string>
+			</array>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<false/>
+			<key>Key</key>
+			<string>P2BackTapInvert</string>
+			<key>Title</key>
+			<string>Inverser gauche et droite</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<string>auto</string>
+			<key>Key</key>
+			<string>P2PortalButtons</string>
+			<key>Title</key>
+			<string>Boutons de portail</string>
+			<key>Titles</key>
+			<array>
+				<string>Automatique</string>
+				<string>Toujours</string>
+				<string>Jamais</string>
+			</array>
+			<key>Type</key>
+			<string>PSMultiValueSpecifier</string>
+			<key>Values</key>
+			<array>
+				<string>auto</string>
+				<string>1</string>
+				<string>0</string>
+			</array>
+		</dict>
+		<dict>
+			<key>FooterText</key>
+			<string>Écrit le journal du jeu dans Documents/game.log (visible dans l'app Fichiers).</string>
+			<key>Title</key>
+			<string>Diagnostic</string>
+			<key>Type</key>
+			<string>PSGroupSpecifier</string>
+		</dict>
+		<dict>
+			<key>DefaultValue</key>
+			<false/>
+			<key>Key</key>
+			<string>P2Log</string>
+			<key>Title</key>
+			<string>Journal</string>
+			<key>Type</key>
+			<string>PSToggleSwitchSpecifier</string>
+		</dict>
+	</array>
+</dict>
+</plist>

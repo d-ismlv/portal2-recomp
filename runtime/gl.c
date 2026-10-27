@@ -18,9 +18,7 @@
 #include <mach/mach_time.h>
 #include "rt.h"
 #include <stdarg.h>
-#include <OpenGL/OpenGL.h>
-#include <OpenGL/gl.h>
-#include <OpenGL/glext.h>
+#include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
 #include <dlfcn.h>
 #include <pthread.h>
 #include <stdlib.h>
@@ -44,7 +42,7 @@ static void *library;
 static void **hosts;  // pointeur hôte par entrée, résolu à la demande
 
 static void open_library(void) {
-    library = dlopen("/System/Library/Frameworks/OpenGL.framework/OpenGL", RTLD_LAZY | RTLD_LOCAL);
+    library = rt_host_gl_open();
     hosts = calloc(rt_gl_entry_count, sizeof(*hosts));
 }
 
@@ -61,7 +59,7 @@ static void *host_function(const RtGlEntry *entry) {
     size_t index = (size_t)(entry - rt_gl_entries);
     void *fn = __atomic_load_n(&hosts[index], __ATOMIC_ACQUIRE);
     if (!fn) {
-        fn = dlsym(library, entry->name);
+        fn = rt_host_gl_symbol(library, entry->name);
         __atomic_store_n(&hosts[index], fn, __ATOMIC_RELEASE);
     }
     return fn;
@@ -851,6 +849,23 @@ static void stream_unknown(uint32_t target) {   // stockage considéré entière
 // Renvoie 1 si l'écriture a été faite sans synchronisation.
 static int stream_subdata(CPU *c, uint32_t target, uint32_t offset, uint32_t size, uint32_t data) {
     if (target != GL_ARRAY_BUFFER && target != GL_ELEMENT_ARRAY_BUFFER) return 0;
+#if TARGET_OS_IPHONE
+    // gl4es copie dans son double en mémoire puis appelle glBufferSubData d'ES,
+    // que ios/gl_ios.m fait passer par une projection non synchronisée.
+    {
+        uint32_t name = bound_buffer(target);
+        Stream *st = stream_state(name, 0);
+        if (!st || !st->known || !size || !data || offset < st->written_end || (uint64_t)offset + size > st->size) return 0;
+        Mirror *m = find_mirror(current_share(), name, 0);
+        if (m && m->mapped) return 0;
+        rt_ios_gl_unsync_next = 1;
+        glBufferSubData(target, (GLintptr)offset, (GLsizeiptr)size, rt_span(c, data, size));
+        rt_ios_gl_unsync_next = 0;
+        st->written_end = offset + size;
+        ++stream_unsync_writes;
+        return 1;
+    }
+#else
     uint32_t name = bound_buffer(target);
     Stream *st = stream_state(name, 0);
     if (!st || !st->known || !size || !data || offset < st->written_end || (uint64_t)offset + size > st->size) return 0;
@@ -876,6 +891,7 @@ static int stream_subdata(CPU *c, uint32_t target, uint32_t offset, uint32_t siz
     st->written_end = offset + size;
     ++stream_unsync_writes;
     return 1;
+#endif
 }
 static int valid_usage(uint32_t usage) {
     switch (usage) {

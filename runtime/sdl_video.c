@@ -24,8 +24,7 @@
 // SHIMS: SDL_CreateColorCursor SDL_CreateSystemCursor SDL_SetCursor SDL_FreeCursor SDL_ShowCursor
 // SHIMS: SDL_GetClipboardText SDL_SetClipboardText SDL_HasClipboardText
 #include "rt.h"
-#include <OpenGL/gl.h>
-#include <OpenGL/glext.h>
+#include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
 #include <mach/mach_time.h>
 void rt_gl_timing_add(const char *label, uint64_t ticks);
 void rt_gl_pass_frame(void);
@@ -278,6 +277,9 @@ static void diagnose_frame(SDL_Window *w) {
 // chaque image, résultats lus avec quelques images de retard), journalisé
 // toutes les 120 images avec le temps CPU entre deux échanges.
 static void gpu_timing_frame(void) {
+#if TARGET_OS_IPHONE
+    return;   // gl4es : pas de GL_TIME_ELAPSED (requêtes d'occlusion seulement)
+#endif
     static int enabled = -1, active;
     static GLuint queries[8];
     static unsigned issued, read;
@@ -290,7 +292,10 @@ static void gpu_timing_frame(void) {
     while (read < issued) {
         GLint ready = 0; glGetQueryObjectiv(queries[read % 8], GL_QUERY_RESULT_AVAILABLE, &ready);
         if (!ready && issued - read < 7) break;
-        GLuint64EXT ns = 0; glGetQueryObjectui64vEXT(queries[read % 8], GL_QUERY_RESULT, &ns);
+        GLuint64EXT ns = 0;
+#if !TARGET_OS_IPHONE
+        glGetQueryObjectui64vEXT(queries[read % 8], GL_QUERY_RESULT, &ns);
+#endif
         gpu_ms += (double)ns / 1e6; ++samples; ++read;
     }
     uint64_t now = mach_absolute_time();
@@ -325,6 +330,9 @@ static int hidden_windows(void) {
 static int display_scale_value, display_scale_forced, window_scale_value = 1;
 
 static int retina_enabled(void) {
+#if TARGET_OS_IPHONE
+    return 0;   // iOS : échelle de rendu gérée par ios/sdl_ios.m
+#endif
     const char *e = getenv("P2_RETINA");
     return !e || !*e || strcmp(e, "0");
 }
@@ -381,11 +389,15 @@ static void set_backing(SDL_Window *window, int scale) {
     fprintf(stderr, "[sdl] Retina: window scale %d\n", scale);
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
+#if TARGET_OS_IPHONE
+    (void)window;
+#else
     if (display_scale_forced || !SDL_GetWindowWMInfo(window, &info) || info.subsystem != SDL_SYSWM_COCOA) return;
     id view = ((id (*)(id, SEL))objc_msgSend)((id)info.info.cocoa.window, sel_registerName("contentView"));
     ((void (*)(id, SEL, BOOL))objc_msgSend)(view, sel_registerName("setWantsBestResolutionOpenGLSurface:"), scale > 1);
     id context = ((id (*)(id, SEL))objc_msgSend)((id)objc_getClass("NSOpenGLContext"), sel_registerName("currentContext"));
     if (context) ((void (*)(id, SEL))objc_msgSend)(context, sel_registerName("update"));
+#endif
 }
 
 // Taille de la fenêtre en pixels du jeu (= surface GL), pour les diagnostics.
@@ -412,6 +424,7 @@ static void log_geometry(SDL_Window *window, const char *why) {
     SDL_GetDisplayBounds(0, &bounds);
     SDL_GetDisplayUsableBounds(0, &usable);
     double inset[4] = {0};
+#if !TARGET_OS_IPHONE   // iOS : pas de fenêtre Cocoa (zone sûre gérée par ios/sdl_ios.m)
     SDL_SysWMinfo info;
     SDL_VERSION(&info.version);
     if (!display_scale_forced && SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_COCOA) {
@@ -423,6 +436,7 @@ static void log_geometry(SDL_Window *window, const char *why) {
             inset[0] = s.top; inset[1] = s.left; inset[2] = s.bottom; inset[3] = s.right;
         }
     }
+#endif
     fprintf(stderr, "[sdl] géométrie (%s) : fenêtre %dx%d points en (%d,%d), surface %dx%d pixels, échelle %d, "
             "plein écran 0x%x, écran %dx%d, zone utile %dx%d+%d+%d, zone sûre haut %.0f bas %.0f\n",
             why, w, h, x, y, pw, ph, window_scale_value, flags & SDL_WINDOW_FULLSCREEN_DESKTOP,

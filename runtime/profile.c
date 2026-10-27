@@ -158,6 +158,26 @@ static void dump_chains(FILE *out) {
     }
 }
 
+// Tous les échantillons, une ligne par clé : « coups, principal, feuille, pile… » séparés par des tabulations
+// (P2_PROFILE_RAW=1, fichier <P2_PROFILE>.raw), pour une agrégation hors ligne
+// (tools/ios_symbolize.py résout les « bibliothèque+décalage » d'iOS).
+static void dump_raw(void) {
+    char path[1100], temporary[1110];
+    snprintf(path, sizeof(path), "%s.raw", output);
+    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+    FILE *out = fopen(temporary, "w");
+    if (!out) return;
+    for (uint32_t i = 0; i < SLOTS; ++i) {
+        if (__atomic_load_n(&used[i], __ATOMIC_ACQUIRE) != 2 || !hits[i]) continue;
+        const Key *key = &keys[i];
+        fprintf(out, "%u\t%d\t%s", (unsigned)hits[i], key->main, symbol(key->pc));
+        for (int d = 0; d < DEPTH && key->chain[d]; ++d) fprintf(out, "\t%s", symbol(key->chain[d]));
+        fputc('\n', out);
+    }
+    fclose(out);
+    rename(temporary, path);
+}
+
 // P2_PROFILE_ORDER=/chemin.txt : chaque adresse de l'exécutable vue dans les
 // échantillons (feuille ou pile), « décalage propre inclusif » par ligne
 // (décalage depuis le début de l'image, en hexadécimal), à résoudre hors ligne
@@ -199,6 +219,9 @@ static void dump_order(const char *path) {
 }
 
 static void dump(void) {
+    static int raw = -1;
+    if (raw < 0) raw = getenv("P2_PROFILE_RAW") != NULL;
+    if (raw) dump_raw();
     // Liste brute d'abord (linéaire) : en mode temps réel, les sections
     // ci-dessous peuvent prendre très longtemps (dédoublonnage quadratique).
     const char *order = getenv("P2_PROFILE_ORDER");
@@ -254,6 +277,11 @@ static void *wall_sampler(void *unused) {
 __attribute__((constructor)) static void start_profiler(void) {
     output = getenv("P2_PROFILE");
     if (!output || !*output) return;
+#if TARGET_OS_IPHONE
+    // iOS : chemin relatif au conteneur de l'app (HOME), comme P2_LOG_FILE.
+    static char path[1024];
+    if (*output != '/' && getenv("HOME")) { snprintf(path, sizeof(path), "%s/%s", getenv("HOME"), output); output = path; }
+#endif
     struct sigaction action = {0};
     action.sa_sigaction = tick;
     action.sa_flags = SA_SIGINFO | SA_RESTART;

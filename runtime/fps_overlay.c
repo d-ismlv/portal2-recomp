@@ -3,8 +3,11 @@
 // framebuffer par défaut, avec sauvegarde et restauration de l'état GL : le
 // rendu du jeu n'est pas modifié. P2_FPS=1 l'active dès le lancement.
 #include "rt.h"
-#include <OpenGL/gl.h>
-#include <OpenGL/glext.h>
+#include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
+#if TARGET_OS_IPHONE
+#undef glBindFramebufferEXT
+#define glBindFramebufferEXT glBindFramebuffer   // gl4es : sans le nom EXT ; 0 = son tampon principal
+#endif
 #include <mach/mach_time.h>
 #include <stdatomic.h>
 #include <stdio.h>

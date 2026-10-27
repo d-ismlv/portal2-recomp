@@ -1,0 +1,38 @@
+# Projet Xcode minimal servant seulement à obtenir les profils de
+# provisionnement (signature automatique, équipe personnelle ou payante) des
+# deux paquets iOS : le jeu et la sonde. Les vrais binaires sont construits par
+# tools/build_ios.py puis signés avec ces profils (voir ios/signing/sign.py).
+# extended-virtual-addressing est refusé aux équipes personnelles (gratuites) :
+# à ajouter aux deux cibles avec un compte payant.
+#   xcodegen && xcodebuild -project P2Signing.xcodeproj -scheme Portal2 \
+#     -destination generic/platform=iOS -allowProvisioningUpdates DEVELOPMENT_TEAM=<équipe> build
+name: P2Signing
+options:
+  deploymentTarget: {iOS: "17.0"}
+settings:
+  base:
+    CODE_SIGN_STYLE: Automatic
+    GENERATE_INFOPLIST_FILE: YES
+    CURRENT_PROJECT_VERSION: 1
+    MARKETING_VERSION: "0.1"
+targets:
+  Portal2:
+    type: application
+    platform: iOS
+    sources: [Stub]
+    entitlements:
+      path: Portal2.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+    settings:
+      base: {PRODUCT_BUNDLE_IDENTIFIER: fr.kanapitsas.portal2}
+  Probe:
+    type: application
+    platform: iOS
+    sources: [Stub]
+    entitlements:
+      path: Probe.entitlements
+      properties:
+        com.apple.developer.kernel.increased-memory-limit: true
+    settings:
+      base: {PRODUCT_BUNDLE_IDENTIFIER: fr.kanapitsas.p2probe}

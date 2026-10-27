@@ -1,0 +1,394 @@
+diff --git a/src/gl/directstate.c b/src/gl/directstate.c
+index a2c7edb..05d1309 100644
+--- a/src/gl/directstate.c
++++ b/src/gl/directstate.c
+@@ -366,7 +366,11 @@ void APIENTRY_GL4ES gl4es_glEnableClientStateIndexed(GLenum array, GLuint index)
+         errorShim(GL_INVALID_ENUM);
+     }
+ }
++#ifdef __APPLE__   /* pas d'alias sur Darwin */
++void APIENTRY_GL4ES gl4es_glEnableClientStatei(GLenum array, GLuint index) { gl4es_glEnableClientStateIndexed(array, index); }
++#else
+ AliasDecl(void,gl4es_glEnableClientStatei,(GLenum array, GLuint index),gl4es_glEnableClientStateIndexed);
++#endif
+ 
+ void APIENTRY_GL4ES gl4es_glDisableClientStateIndexed(GLenum array, GLuint index) {
+     DBG(printf("glDisableClientStateIndexed(%s, %d)\n", PrintEnum(array), index);)
+@@ -380,7 +384,11 @@ void APIENTRY_GL4ES gl4es_glDisableClientStateIndexed(GLenum array, GLuint index
+         errorShim(GL_INVALID_ENUM);
+     }
+ }
++#ifdef __APPLE__   /* pas d'alias sur Darwin */
++void APIENTRY_GL4ES gl4es_glDisableClientStatei(GLenum array, GLuint index) { gl4es_glDisableClientStateIndexed(array, index); }
++#else
+ AliasDecl(void,gl4es_glDisableClientStatei,(GLenum array, GLuint index),gl4es_glDisableClientStateIndexed);
++#endif
+ 
+ void APIENTRY_GL4ES gl4es_glEnableVertexArray(GLuint vaobj, GLenum array) {
+     DBG(printf("glEnableVertexArray(%d, %s)\n", vaobj, PrintEnum(array));)
+diff --git a/src/gl/drawing.c b/src/gl/drawing.c
+index 498ecc5..8652abf 100644
+--- a/src/gl/drawing.c
++++ b/src/gl/drawing.c
+@@ -1064,7 +1064,7 @@ void APIENTRY_GL4ES gl4es_glMultiDrawElementsBaseVertex( GLenum mode, GLsizei *c
+         GLushort *sindices = NULL;
+         GLuint *iindices = NULL;
+ 
+-        if(type==GL_UNSIGNED_INT && hardext.elementuint && !compiling && !intercept)
++        if((type==GL_UNSIGNED_INT || basevertex[i]>0) && hardext.elementuint && !compiling && !intercept)
+             iindices = copy_gl_array((glstate->vao->elements)?(void*)((char*)glstate->vao->elements->data + (uintptr_t)indices):indices,
+                 type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
+         else
+@@ -1108,10 +1108,11 @@ void APIENTRY_GL4ES gl4es_glMultiDrawElementsBaseVertex( GLenum mode, GLsizei *c
+             list->indice_cap = count;
+             continue;
+         } else {
++            const GLint base = basevertex[i];   // iOS : l'indice interne masquait celui du tracé
+             if(iindices)
+-                for(int i=0; i<count; i++) iindices[i]+=basevertex[i];
++                for(int j=0; j<count; j++) iindices[j]+=base;
+             else
+-                for(int i=0; i<count; i++) sindices[i]+=basevertex[i];
++                for(int j=0; j<count; j++) sindices[j]+=base;
+             GLuint old_index = wantBufferIndex(0);
+             glDrawElementsCommon(mode, 0, count, 0, sindices, iindices, 1);
+             if(iindices)
+@@ -1165,7 +1166,7 @@ void APIENTRY_GL4ES gl4es_glDrawElementsBaseVertex(GLenum mode, GLsizei count, G
+         GLushort *sindices = NULL;
+         GLuint *iindices = NULL;
+ 
+-        if(type==GL_UNSIGNED_INT && hardext.elementuint && !compiling && !intercept)
++        if((type==GL_UNSIGNED_INT || basevertex>0) &&  /* iOS : indices + basevertex > 65535 */ hardext.elementuint && !compiling && !intercept)
+             iindices = copy_gl_array((glstate->vao->elements)?(void*)((char*)glstate->vao->elements->data + (uintptr_t)indices):indices,
+                 type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
+         else
+@@ -1260,7 +1261,7 @@ void APIENTRY_GL4ES gl4es_glDrawRangeElementsBaseVertex(GLenum mode, GLuint star
+         noerrorShim();
+         GLushort *sindices = NULL;
+         GLuint *iindices = NULL;
+-        if(type==GL_UNSIGNED_INT && hardext.elementuint && !compiling && !intercept)
++        if((type==GL_UNSIGNED_INT || basevertex>0) &&  /* iOS : indices + basevertex > 65535 */ hardext.elementuint && !compiling && !intercept)
+             iindices = copy_gl_array((glstate->vao->elements)?(void*)((char*)glstate->vao->elements->data + (uintptr_t)indices):indices,
+                 type, 1, 0, GL_UNSIGNED_INT, 1, 0, count, NULL);
+         else
+diff --git a/src/gl/fpe.c b/src/gl/fpe.c
+index c21bcf1..bb46381 100644
+--- a/src/gl/fpe.c
++++ b/src/gl/fpe.c
+@@ -462,6 +462,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+     // state is not empty and glprogram already has some cache (it may be empty, but kh'thingy is initialized)
+     // TODO: what if program is composed of more then 1 vertex or fragment shader?
+     fpe_fpe_t *fpe = fpe_GetCache((fpe_cache_t*)glprogram->fpe_cache, state, 0);
++    if(fpe->failed) return glprogram;   // échec mémorisé : sinon recompilé à chaque dessin
+     if(fpe->glprogram==NULL) {
+         GLint status;
+         fpe->vert = gl4es_glCreateShader(GL_VERTEX_SHADER);
+@@ -472,7 +473,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->vert, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Vertex shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->frag = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
+         gl4es_glShaderSource(fpe->frag, 1, fpe_CustomFragmentShader(glprogram->last_frag->source, state), NULL);
+@@ -482,7 +483,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->frag, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Fragment shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->prog = gl4es_glCreateProgram();
+         gl4es_glAttachShader(fpe->prog, fpe->vert);
+@@ -501,7 +502,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader(program_t* glprogram, fpe_state_t* st
+             char buff[1000];
+             gl4es_glGetProgramInfoLog(fpe->prog, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Program link failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         // now find the program
+         khint_t k_program;
+@@ -539,6 +540,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+     // state is not empty and glprogram already has some cache (it may be empty, but kh'thingy is initialized)
+     // TODO: what if program is composed of more then 1 vertex or fragment shader?
+     fpe_fpe_t *fpe = fpe_GetCache((fpe_cache_t*)glprogram->fpe_cache, state_vertex, 0);
++    if(fpe->failed) return glprogram;   // échec mémorisé : sinon recompilé à chaque dessin
+     if(fpe->glprogram==NULL) {
+         GLint status;
+         fpe->vert = gl4es_glCreateShader(GL_VERTEX_SHADER);
+@@ -549,7 +551,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->vert, 1000, NULL, buff);
+             printf("LIBGL: FPE Default Vertex shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->frag = gl4es_glCreateShader(GL_FRAGMENT_SHADER);
+         gl4es_glShaderSource(fpe->frag, 1, fpe_CustomFragmentShader(glprogram->last_frag->source, state_vertex), NULL);
+@@ -559,7 +561,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+             char buff[1000];
+             gl4es_glGetShaderInfoLog(fpe->frag, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Fragment shader compile failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         fpe->prog = gl4es_glCreateProgram();
+         gl4es_glAttachShader(fpe->prog, fpe->vert);
+@@ -578,7 +580,7 @@ program_t* APIENTRY_GL4ES fpe_CustomShader_DefaultVertex(program_t* glprogram, f
+             char buff[1000];
+             gl4es_glGetProgramInfoLog(fpe->prog, 1000, NULL, buff);
+             printf("LIBGL: FPE Custom Program with Default Vertex link failed: %s\n", buff);
+-            return glprogram;   // fallback to non-customized custom program..
++            fpe->failed = 1; return glprogram;   // fallback to non-customized custom program..
+         }
+         // now find the program
+         khint_t k_program;
+@@ -1051,6 +1053,13 @@ int fpe_gettexture(int TMU) {
+     return target;
+ }
+ 
++// Portal 2 iOS (runtime/ios/gl_ios.m) : un attribut GL_BGRA d'octets lu dans
++// un tampon est passé tel quel (RGBA normalisé) et permuté par le nuanceur de
++// sommets (uniforme p2_bgra, bit i : attribut i), au lieu d'être converti en
++// flottants sur le CPU à chaque dessin, ce qui forçait aussi le chemin
++// « mode immédiat » du pilote (recopie de tous les sommets).
++extern int gl4es_p2_bgra_program(GLuint program) __attribute__((weak));
++extern void gl4es_p2_bgra_mask(GLuint program, unsigned mask) __attribute__((weak));
+ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* indices, scratch_t* scratch) {
+     // the handling of GL_BGRA size of GL_DOUBLE using 1 scratch in not ideal, and a waste when dealing with Buffers
+     // TODO: have the scratch buffer part of the VBO, and tag it dirty when buffer is changed (or always dirty for VBO 0)
+@@ -1105,15 +1114,27 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+                 glprogram->fpe_cache = fpe_NewCache();
+             glprogram = fpe_CustomShader_DefaultVertex(glprogram, &vertex_state);    // fetch from cache if exist or create it
+             program = glprogram->id;
+-        } else if(!fpe_IsEmpty(&state))
+-        {
+-            // need to create a new program for that...
+-            DBG(printf("GLSL program %d need customization => ", program);)
+-            if(!glprogram->fpe_cache)
+-                glprogram->fpe_cache = fpe_NewCache();
+-            glprogram = fpe_CustomShader(glprogram, &state);    // fetch from cache if exist or create it
+-            program = glprogram->id;
+-            DBG(printf("%d\n", program);)
++        } else {
++            // Plans de découpe : seul un nuanceur qui écrit gl_ClipVertex sait quoi découper. Les
++            // autres (copies d'écran, celles de gl4es) ne doivent pas l'être, et leur variante
++            // utiliserait gl_Vertex, dont l'emplacement 0 est déjà pris : l'édition échoue.
++            if(state.plane && glprogram->last_vert) {
++                if(glprogram->clip_checked_src != glprogram->last_vert->source) {
++                    glprogram->clip_checked_src = glprogram->last_vert->source;
++                    glprogram->clipvertex = glprogram->last_vert->source && strstr(glprogram->last_vert->source, "gl4es_ClipVertex");
++                }
++                if(!glprogram->clipvertex) state.plane = 0;
++            }
++            if(!fpe_IsEmpty(&state))
++            {
++                // need to create a new program for that...
++                DBG(printf("GLSL program %d need customization => ", program);)
++                if(!glprogram->fpe_cache)
++                    glprogram->fpe_cache = fpe_NewCache();
++                glprogram = fpe_CustomShader(glprogram, &state);    // fetch from cache if exist or create it
++                program = glprogram->id;
++                DBG(printf("%d\n", program);)
++            }
+         }
+         if(glstate->gleshard->program != program)
+         {
+@@ -1440,6 +1461,18 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+         #undef GO
+     }
+     // set VertexAttrib if needed
++    int p2_bgra_program = gl4es_p2_bgra_program ? gl4es_p2_bgra_program(glstate->gleshard->program) : 0;
++    // Seulement si tous les attributs du dessin sont dans des tampons : avec un
++    // tableau en mémoire client, le pilote ES passe en « mode immédiat », qui
++    // ne sait pas lire ces octets dans un tampon (appel nul dans GLEngine,
++    // gleSetVertexArrayFunc, au changement de niveau). Conversion CPU alors.
++    int p2_bgra_ok = p2_bgra_program;
++    for(int i=0; p2_bgra_ok && i<hardext.maxvattrib; i++) {
++        vertexattrib_t *w = &glstate->vao->vertexattrib[i];
++        if(glprogram->va_size[i] && w->enabled && !w->divisor && (w->buffer || w->pointer) && !w->real_buffer)
++            p2_bgra_ok = 0;
++    }
++    unsigned p2_bgra = 0;
+     for(int i=0; i<hardext.maxvattrib; i++) 
+     if(glprogram->va_size[i])   // only check used VA...
+     {
+@@ -1461,6 +1494,8 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+             else
+                 gles_glDisableVertexAttribArray(i);
+         }
++        if(p2_bgra_ok && v->enabled && w->size==GL_BGRA && w->type==GL_UNSIGNED_BYTE && w->real_buffer)
++            p2_bgra |= 1u<<i;
+         // check if new value has to be sent to hardware
+         if(v->enabled) {
+             // array case
+@@ -1469,7 +1504,17 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+                 || v->stride!=w->stride || v->buffer!=w->buffer || (w->real_buffer==0 && v->pointer!=ptr)
+                 || v->real_buffer!=w->real_buffer || (w->real_buffer!=0 && v->real_pointer != w->real_pointer) 
+                 || w->real_buffer!=glstate->bind_buffer.array) {
+-                if((w->size==GL_BGRA || w->type==GL_DOUBLE) && scratch->size<8) { 
++                if(p2_bgra_ok && w->size==GL_BGRA && w->type==GL_UNSIGNED_BYTE && w->real_buffer) {
++                    v->size = 4;
++                    v->type = GL_UNSIGNED_BYTE;
++                    v->normalized = GL_TRUE;
++                    v->integer = 0;
++                    v->stride = w->stride;
++                    v->real_buffer = w->real_buffer;
++                    v->real_pointer = w->real_pointer;
++                    v->pointer = v->real_pointer;
++                    v->buffer = w->buffer;
++                } else if((w->size==GL_BGRA || w->type==GL_DOUBLE) && scratch->size<8) { 
+                     // need to adjust, so first need the min/max (a shame as I already must have that somewhere)
+                     int imin, imax;
+                     if(type==0) {
+@@ -1571,6 +1616,7 @@ void realize_glenv(int ispoint, int first, int count, GLenum type, const void* i
+             gles_glDisableVertexAttribArray(i);
+         }
+     }
++    if(p2_bgra_program) gl4es_p2_bgra_mask(glstate->gleshard->program, p2_bgra);   // 0 si conversion CPU
+ }
+ 
+ void realize_blitenv(int alpha) {
+diff --git a/src/gl/fpe.h b/src/gl/fpe.h
+index 4c51179..9bdaf3c 100644
+--- a/src/gl/fpe.h
++++ b/src/gl/fpe.h
+@@ -227,6 +227,7 @@ typedef struct fpe_fpe_s {
+   GLuint  frag, vert, prog;   // shader info
+   fpe_state_t state;          // state relevant to the current fpe program
+   program_t *glprogram;
++  int failed;                 // échec de compilation ou d'édition : ne pas réessayer
+ } fpe_fpe_t;
+ 
+ #ifndef kh_fpecachelist_t
+diff --git a/src/gl/framebuffers.c b/src/gl/framebuffers.c
+index b0f0299..3929400 100644
+--- a/src/gl/framebuffers.c
++++ b/src/gl/framebuffers.c
+@@ -153,14 +153,15 @@ void APIENTRY_GL4ES gl4es_glDeleteFramebuffers(GLsizei n, GLuint *framebuffers)
+                                 tex->renderstencil = 0;
+                             }
+                         }
++                        /* GL : supprimer le FBO lié revient au framebuffer 0 (pas NULL) */
+                         if (glstate->fbo.current_fb == fb) {
+-                            glstate->fbo.current_fb = 0;
++                            glstate->fbo.current_fb = glstate->fbo.fbo_0;
+                         }
+                         if (glstate->fbo.fbo_read == fb) {
+-                            glstate->fbo.fbo_read = 0;
++                            glstate->fbo.fbo_read = glstate->fbo.fbo_0;
+                         }
+                         if (glstate->fbo.fbo_draw == fb) {
+-                            glstate->fbo.fbo_draw = 0;
++                            glstate->fbo.fbo_draw = glstate->fbo.fbo_0;
+                         }
+                         free(fb);
+                         kh_del(framebufferlist_t, glstate->fbo.framebufferlist, k);                        
+diff --git a/src/gl/pixel.c b/src/gl/pixel.c
+index 34f00db..ba56cdd 100644
+--- a/src/gl/pixel.c
++++ b/src/gl/pixel.c
+@@ -494,6 +494,7 @@ bool half_pixel(const GLvoid *src0, const GLvoid *src1,
+         type_case(GL_DOUBLE, GLdouble, read_each(,,))
+         type_case(GL_FLOAT, GLfloat, read_each(,,))
+         type_case(GL_HALF_FLOAT_OES, halffloat_t, read_each(,,float_h2f))
++        type_case(GL_HALF_FLOAT, halffloat_t, read_each(,,float_h2f))   /* GL_HALF_FLOAT de bureau (togl) */
+         case GL_INT8_REV:
+         type_case(GL_UNSIGNED_BYTE, GLubyte, read_each(, / 255.0f,))
+         type_case(GL_UNSIGNED_SHORT, GLushort, read_each(, / 65535.0f,))
+@@ -544,6 +545,7 @@ bool half_pixel(const GLvoid *src0, const GLvoid *src1,
+     switch (src_type) {
+         type_case(GL_FLOAT, GLfloat, write_each(,,))
+         type_case(GL_HALF_FLOAT_OES, halffloat_t, write_each(,,float_f2h))
++        type_case(GL_HALF_FLOAT, halffloat_t, write_each(,,float_f2h))
+         type_case(GL_UNSIGNED_BYTE, GLubyte, write_each(, * 255.0,))
+         type_case(GL_UNSIGNED_SHORT, GLushort, write_each(, / 65535.0f,))
+         type_case(GL_INT8_REV, GLubyte, write_each(, * 255.0,))
+diff --git a/src/gl/program.h b/src/gl/program.h
+index a788da4..e0dcd0c 100644
+--- a/src/gl/program.h
++++ b/src/gl/program.h
+@@ -214,6 +214,8 @@ typedef struct {
+     GLuint          *attach;
+     struct shader_s        *last_vert;
+     struct shader_s        *last_frag;
++    const char      *clip_checked_src;  // source déjà examinée pour gl4es_ClipVertex
++    int             clipvertex;         // le nuanceur de sommets écrit gl_ClipVertex
+     int             default_vertex;
+     int             default_fragment;
+     shaderconv_need_t *default_need;    // filled only if default_vertex or default_fragment is used
+diff --git a/src/gl/raster.c b/src/gl/raster.c
+index b006721..13eb2ca 100644
+--- a/src/gl/raster.c
++++ b/src/gl/raster.c
+@@ -1,3 +1,4 @@
++#include <stdio.h>
+ #include "raster.h"
+ 
+ #include <math.h>
+@@ -79,9 +80,15 @@ void APIENTRY_GL4ES gl4es_glWindowPos3f(GLfloat x, GLfloat y, GLfloat z) {
+ }
+ 
+ void APIENTRY_GL4ES gl4es_glViewport(GLint x, GLint y, GLsizei width, GLsizei height) {
++	if (!glstate->fbo.current_fb) {   /* diagnostic iOS */
++		fprintf(stderr, "[gl4es] glViewport: current_fb NULL (glstate=%p fbo_0=%p read=%p draw=%p list=%p)\n",
++			(void*)glstate, (void*)glstate->fbo.fbo_0, (void*)glstate->fbo.fbo_read, (void*)glstate->fbo.fbo_draw,
++			(void*)glstate->fbo.framebufferlist);
++		glstate->fbo.current_fb = glstate->fbo.fbo_0;
++	}
+ 	if (glstate->fbo.current_fb->id != 0) {
+     	gltexture_t *tex = gl4es_getTexture(glstate->fbo.current_fb->t_color[0], glstate->fbo.current_fb->color[0]);
+-		if (tex->fbtex_ratio > 0.0f) {
++		if (tex && tex->fbtex_ratio > 0.0f) {   /* FBO sans couleur : pas de texture */
+ 			width *= tex->fbtex_ratio;
+ 			height *= tex->fbtex_ratio;
+ 			x *= tex->fbtex_ratio;
+@@ -119,7 +126,7 @@ void APIENTRY_GL4ES gl4es_glViewport(GLint x, GLint y, GLsizei width, GLsizei he
+ void APIENTRY_GL4ES gl4es_glScissor(GLint x, GLint y, GLsizei width, GLsizei height) {
+ 	if (glstate->fbo.current_fb->id != 0) {
+     	gltexture_t *tex = gl4es_getTexture(glstate->fbo.current_fb->t_color[0], glstate->fbo.current_fb->color[0]);
+-		if (tex->fbtex_ratio > 0.0f) {
++		if (tex && tex->fbtex_ratio > 0.0f) {   /* FBO sans couleur : pas de texture */
+ 			width *= tex->fbtex_ratio;
+ 			height *= tex->fbtex_ratio;
+ 			x *= tex->fbtex_ratio;
+diff --git a/src/gl/texture_compressed.c b/src/gl/texture_compressed.c
+index 25d2d74..5d9e309 100644
+--- a/src/gl/texture_compressed.c
++++ b/src/gl/texture_compressed.c
+@@ -248,8 +248,8 @@ void APIENTRY_GL4ES gl4es_glCompressedTexImage2D(GLenum target, GLint level, GLe
+             } else {
+                 pixels = uncompressDXTc(width, height, internalformat, imageSize, transparent0, &simpleAlpha, &complexAlpha, datab);
+             }
+-            if(srgb)
+-                pixel_srgb_inplace(pixels, width, height);
++            // iOS (Portal 2) : texels sRGB gardés tels quels, décodés par le shader
++            (void)srgb;
+             // automaticaly reduce the pixel size
+             half=pixels;
+             if(!globals4es.nodownsampling && !globals4es.avoid16bits) {
+@@ -387,8 +387,7 @@ void APIENTRY_GL4ES gl4es_glCompressedTexSubImage2D(GLenum target, GLint level,
+         } else {
+             pixels = uncompressDXTc(width, height, format, imageSize, transparent0, &simpleAlpha, &complexAlpha, datab);
+         }
+-        if(srgb)
+-            pixel_srgb_inplace(pixels, width, height);
++        (void)srgb;   // iOS (Portal 2) : texels sRGB gardés tels quels
+         GLvoid *half=pixels;
+         #if 0
+         pixel_thirdscale(pixels, &half, width, height, GL_RGBA, GL_UNSIGNED_BYTE);
+diff --git a/src/gl/texture_params.c b/src/gl/texture_params.c
+index 96e0720..7eade69 100644
+--- a/src/gl/texture_params.c
++++ b/src/gl/texture_params.c
+@@ -861,7 +861,7 @@ void realize_textures(int drawing) {
+ #endif
+     for (int i=0; i<glstate->bound_changed; i++) {
+         // get highest priority texture unit
+-        int tmp = glstate->enable.texture[glstate->texture.active];
++        int tmp = glstate->enable.texture[i];   /* cible propre à chaque unité */
+         int tgt = ENABLED_TEX2D; // default to TEX2D
+         if(IS_TEX3D(tmp))
+             tgt = ENABLED_TEX3D;
