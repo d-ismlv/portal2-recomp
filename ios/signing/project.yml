@@ -4,6 +4,8 @@
 # tools/build_ios.py puis signés avec ces profils (voir ios/signing/sign.py).
 # extended-virtual-addressing est refusé aux équipes personnelles (gratuites) :
 # à ajouter aux deux cibles avec un compte payant.
+# Identifiant : celui de tools/ios_bundle_id.py (P2_BUNDLE_ID ou config/local.json).
+#   export P2_BUNDLE_ID=$(python3 ../../tools/ios_bundle_id.py)
 #   xcodegen && xcodebuild -project P2Signing.xcodeproj -scheme Portal2 \
 #     -destination generic/platform=iOS -allowProvisioningUpdates DEVELOPMENT_TEAM=<équipe> build
 name: P2Signing
@@ -25,7 +27,7 @@ targets:
       properties:
         com.apple.developer.kernel.increased-memory-limit: true
     settings:
-      base: {PRODUCT_BUNDLE_IDENTIFIER: fr.kanapitsas.portal2}
+      base: {PRODUCT_BUNDLE_IDENTIFIER: "${P2_BUNDLE_ID}"}
   Probe:
     type: application
     platform: iOS
@@ -35,4 +37,4 @@ targets:
       properties:
         com.apple.developer.kernel.increased-memory-limit: true
     settings:
-      base: {PRODUCT_BUNDLE_IDENTIFIER: fr.kanapitsas.p2probe}
+      base: {PRODUCT_BUNDLE_IDENTIFIER: "${P2_BUNDLE_ID}.probe"}

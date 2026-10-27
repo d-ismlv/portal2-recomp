@@ -21,6 +21,8 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
+from ios_bundle_id import bundle_id
+
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 import build_game
 
@@ -92,7 +94,7 @@ def main():
             '-o', str(app / 'portal2')]
     subprocess.run(link, check=True)
     plist = (ROOT / 'ios/Info.plist.in').read_text()
-    for key, value in dict(EXECUTABLE='portal2', IDENTIFIER='fr.kanapitsas.portal2', NAME='Portal 2',
+    for key, value in dict(EXECUTABLE='portal2', IDENTIFIER=bundle_id(), NAME='Portal 2',
                            PLATFORM=target['plist']).items():
         plist = plist.replace(f'@{key}@', value)
     (app / 'Info.plist').write_text(plist)

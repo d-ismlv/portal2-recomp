@@ -20,7 +20,7 @@ xcrun --sdk $SDK clang -target $TRIPLE -isysroot "$(xcrun --sdk $SDK --show-sdk-
   $(for f in UIKit Foundation CoreGraphics QuartzCore OpenGLES Metal AVFoundation AudioToolbox CoreAudio CoreMotion \
              GameController CoreHaptics CoreBluetooth; do echo -framework $f; done) \
   -Wl,-platform_version,$PLATFORM,17.0,18.0 -o "$APP/probe"
-sed -e 's/@EXECUTABLE@/probe/' -e 's/@IDENTIFIER@/fr.kanapitsas.p2probe/' -e 's/@NAME@/P2 Probe/' \
+sed -e 's/@EXECUTABLE@/probe/' -e 's/@IDENTIFIER@/$(python3 tools/ios_bundle_id.py --probe)/' -e 's/@NAME@/P2 Probe/' \
     -e "s/@PLATFORM@/$PLIST/" ios/Info.plist.in > "$APP/Info.plist"
 if [ "$TARGET" = sim ]; then codesign -s - -f "$APP" >/dev/null 2>&1; else python3 ios/signing/sign.py "$APP"; fi
 echo "$APP"

@@ -10,7 +10,8 @@ cd "$(dirname "$0")/.."
 DEVICE=${P2_DEVICE:-$(xcrun devicectl list devices 2>/dev/null |
   awk '/physical/ && / connected|available \(paired\)/ {for (i = 1; i <= NF; ++i) if ($i ~ /^[0-9A-F]{8}-[0-9A-F]{16}$/) {print $i; exit}}')}
 [ -n "$DEVICE" ] || { echo "aucun appareil connecté (câble, appareil déverrouillé, mode développeur)"; exit 1; }
-APP_ID=fr.kanapitsas.portal2
+APP_ID=$(python3 tools/ios_bundle_id.py)
+PROBE_ID=$(python3 tools/ios_bundle_id.py --probe)
 GAME_ROOT=$(python3 -c "import json;print(json.load(open('config/local.json'))['game_root'])")
 LINUX_ROOT=$(python3 -c "import json;print(json.load(open('config/local.json'))['linux_root'])")
 dc() {  # sous-commande de trois mots, --device, puis le reste (options et arguments)
@@ -28,10 +29,10 @@ probe)
   shift
   dc device install app build/ios/device/probe.app >/dev/null
   dc device process launch --terminate-existing --environment-variables "$(env_json P2_PROBE_LOG=1 "$@")" \
-    fr.kanapitsas.p2probe >/dev/null
+    "$PROBE_ID" >/dev/null
   sleep "${PROBE_SECONDS:-20}"
   mkdir -p build/ios/device
-  dc device copy from --domain-type appDataContainer --domain-identifier fr.kanapitsas.p2probe \
+  dc device copy from --domain-type appDataContainer --domain-identifier "$PROBE_ID" \
     --source Documents/probe.log --destination build/ios/device/probe.log >/dev/null
   cat build/ios/device/probe.log
   ;;
