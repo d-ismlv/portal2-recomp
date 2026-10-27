@@ -27,6 +27,7 @@
 #include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
 #include <mach/mach_time.h>
 void rt_gl_timing_add(const char *label, uint64_t ticks);
+void rt_gl_pass_frame(void);
 void fps_overlay_frame(int drawable_width, int drawable_height);
 #include "sdl_common.h"
 #define SDL_MAIN_HANDLED
@@ -405,10 +406,48 @@ static void drawable_size(SDL_Window *window, int *w, int *h) {
     *w *= window_scale_value; *h *= window_scale_value;
 }
 
+// Journal de la géométrie réelle de la fenêtre (points, pixels de la surface,
+// position, plein écran, zone sûre sous l'encoche), écrit à chaque changement :
+// sert à diagnostiquer les décalages souris/image en plein écran.
+static void log_geometry(SDL_Window *window, const char *why) {
+    if (!window) return;
+    int w = 0, h = 0, pw = 0, ph = 0, x = 0, y = 0;
+    SDL_GetWindowSize(window, &w, &h);
+    SDL_GL_GetDrawableSize(window, &pw, &ph);
+    SDL_GetWindowPosition(window, &x, &y);
+    static int last[5];
+    uint32_t flags = SDL_GetWindowFlags(window);
+    int now[5] = {w, h, pw, ph, (int)(flags & SDL_WINDOW_FULLSCREEN_DESKTOP)};
+    if (!strcmp(why, "swap") && !memcmp(now, last, sizeof(now))) return;
+    memcpy(last, now, sizeof(now));
+    SDL_Rect bounds = {0}, usable = {0};
+    SDL_GetDisplayBounds(0, &bounds);
+    SDL_GetDisplayUsableBounds(0, &usable);
+    double inset[4] = {0};
+#if !TARGET_OS_IPHONE   // iOS : pas de fenêtre Cocoa (zone sûre gérée par ios/sdl_ios.m)
+    SDL_SysWMinfo info;
+    SDL_VERSION(&info.version);
+    if (!display_scale_forced && SDL_GetWindowWMInfo(window, &info) && info.subsystem == SDL_SYSWM_COCOA) {
+        id screen = ((id (*)(id, SEL))objc_msgSend)((id)info.info.cocoa.window, sel_registerName("screen"));
+        typedef struct { double top, left, bottom, right; } Insets;
+        if (screen && ((BOOL (*)(id, SEL, SEL))objc_msgSend)(screen, sel_registerName("respondsToSelector:"),
+                                                             sel_registerName("safeAreaInsets"))) {
+            Insets s = ((Insets (*)(id, SEL))objc_msgSend)(screen, sel_registerName("safeAreaInsets"));
+            inset[0] = s.top; inset[1] = s.left; inset[2] = s.bottom; inset[3] = s.right;
+        }
+    }
+#endif
+    fprintf(stderr, "[sdl] géométrie (%s) : fenêtre %dx%d points en (%d,%d), surface %dx%d pixels, échelle %d, "
+            "plein écran 0x%x, écran %dx%d, zone utile %dx%d+%d+%d, zone sûre haut %.0f bas %.0f\n",
+            why, w, h, x, y, pw, ph, window_scale_value, flags & SDL_WINDOW_FULLSCREEN_DESKTOP,
+            bounds.w, bounds.h, usable.w, usable.h, usable.x, usable.y, inset[0], inset[2]);
+}
+
 static void resize_window(SDL_Window *window, int w, int h) {
     int scale = scale_for(w, h);
     set_backing(window, scale);
     SDL_SetWindowSize(window, w / scale, h / scale);
+    log_geometry(window, "taille demandée");
 }
 
 static SDL_Window *create_window(const char *title, int x, int y, int w, int h, uint32_t flags) {
@@ -419,6 +458,7 @@ static SDL_Window *create_window(const char *title, int x, int y, int w, int h, 
     if (!window) return NULL;
     window_scale_value = rt_sdl_display_scale();   // surface créée en Retina
     set_backing(window, scale);
+    log_geometry(window, "création");
     return window;
 }
 
@@ -473,7 +513,12 @@ static int sdl_video(CPU *c, const char *name) {
         if (ph) W32(ph, (uint32_t)(h * window_scale_value));
     }
     else if (!strcmp(n, "SetWindowBordered")) SDL_SetWindowBordered(WINDOW(0), arg(c, 1) ? SDL_TRUE : SDL_FALSE);
-    else if (!strcmp(n, "SetWindowFullscreen")) r = (uint32_t)SDL_SetWindowFullscreen(WINDOW(0), arg(c, 1));
+    else if (!strcmp(n, "SetWindowFullscreen")) {
+        SDL_Window *w = WINDOW(0);
+        r = (uint32_t)SDL_SetWindowFullscreen(w, arg(c, 1));
+        fprintf(stderr, "[sdl] SetWindowFullscreen(0x%x) = %d\n", arg(c, 1), (int)r);
+        log_geometry(w, "plein écran");
+    }
     else if (!strcmp(n, "SetWindowDisplayMode")) {
         SDL_Window *w = WINDOW(0); uint32_t address = arg(c, 1);
         SDL_DisplayMode mode;
@@ -556,12 +601,15 @@ static int sdl_video(CPU *c, const char *name) {
     else if (!strcmp(n, "GL_SwapWindow")) {
         SDL_Window *w = WINDOW(0);
         if (w) { int dw = 0, dh = 0; drawable_size(w, &dw, &dh); fps_overlay_frame(dw, dh); }
+        static unsigned swaps;
+        if (w && ++swaps % 30 == 0) log_geometry(w, "swap");   // transitions plein écran asynchrones
         diagnose_frame(w);
         gpu_timing_frame();
         unsigned saved = rt_guest_suspend();   // la synchronisation verticale peut bloquer
         uint64_t start = mach_absolute_time();
         SDL_GL_SwapWindow(w);
         rt_gl_timing_add("SwapWindow", mach_absolute_time() - start);
+        rt_gl_pass_frame();
         rt_guest_resume(saved);
     } else if (!strcmp(n, "GL_GetProcAddress")) {
         const char *proc = guest_string(c, arg(c, 0));

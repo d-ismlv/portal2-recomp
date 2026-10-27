@@ -12,6 +12,8 @@ parser = argparse.ArgumentParser(description=__doc__)
 parser.add_argument('--build', action='store_true')
 parser.add_argument('--timeout', type=int, default=60)
 parser.add_argument('--show', action='store_true', help='afficher la fenêtre (sinon P2_HIDDEN_WINDOWS=1)')
+parser.add_argument('--binary', type=Path, default=Path('build/portal2-native'),
+                    help='exécutable à lancer (comparaisons A/B sans toucher build/portal2-native)')
 parser.add_argument('arguments', nargs=argparse.REMAINDER)
 args = parser.parse_args()
 if args.build:
@@ -29,7 +31,7 @@ if not args.show:
     diag_dir = user_dir.with_name('portal2-userdata-diag')
     if not diag_dir.exists(): shutil.copytree(user_dir, diag_dir, symlinks=True)
     user_dir = diag_dir
-command = [str(Path('build/portal2-native').resolve()), '--images', str(Path('build/game/prep').resolve()),
+command = [str(args.binary.resolve()), '--images', str(Path('build/game/prep').resolve()),
            '--game-dir', config['game_root'], '--linux-root', config['linux_root'],
            '--user-dir', str(user_dir), '--', *game_args]
 log = Path('build/game/launch.log')

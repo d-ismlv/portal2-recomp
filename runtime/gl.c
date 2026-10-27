@@ -17,6 +17,7 @@
 #include <stdio.h>
 #include <mach/mach_time.h>
 #include "rt.h"
+#include <stdarg.h>
 #include "host_gl.h"   // OpenGL.framework (macOS) ou gl4es (iOS)
 #include <dlfcn.h>
 #include <pthread.h>
@@ -196,6 +197,10 @@ static uint32_t trace_draw_fb, trace_read_fb;
 static long trace_writes[2][TRACE_FBS];         // [renderbuffer|texture][nom] -> dessins
 static long trace_seen_writes[2][TRACE_FBS];
 static long blit_trace_start = -2;
+// Vrais dessins (glDrawArrays*, glDrawElements*, glDrawRangeElements*), pas glDrawBuffer(s).
+static int is_draw_call(const char *name) {
+    return !strncmp(name, "glDrawArrays", 12) || !strncmp(name, "glDrawElements", 14) || !strncmp(name, "glDrawRangeElements", 19);
+}
 static long *trace_counter(uint32_t object) {
     uint32_t kind = object >> 31, name = object & 0x7fffffff;
     return name < TRACE_FBS ? &trace_writes[kind][name] : NULL;
@@ -215,7 +220,7 @@ static void trace_gl(CPU *c, const char *name) {
         if (!strcmp(name, "glFramebufferTexture") || !strcmp(name, "glFramebufferTextureEXT")) object = R32(a + 8);
         uint32_t fb = target == GL_READ_FRAMEBUFFER ? trace_read_fb : trace_draw_fb;
         if (attachment == GL_COLOR_ATTACHMENT0 && fb < TRACE_FBS) trace_attach[fb] = object | (texture ? 0x80000000u : 0);
-    } else if ((name[2] == 'D' && name[3] == 'r') || !strcmp(name, "glClear")) {
+    } else if (is_draw_call(name) || !strcmp(name, "glClear")) {
         long *counter = trace_draw_fb < TRACE_FBS && trace_attach[trace_draw_fb] ? trace_counter(trace_attach[trace_draw_fb]) : NULL;
         if (counter) ++*counter;
     } else if (!strncmp(name, "glBlitFramebuffer", 17)) {
@@ -234,6 +239,79 @@ static void trace_gl(CPU *c, const char *name) {
         if (target && trace_counter(target)) ++*trace_counter(target);
     }
 }
+// Diagnostic P2_PASS_TRACE=<s> : décrit la première image rendue après s
+// secondes, passe par passe (une passe = suite d'appels vers la même cible
+// de dessin) : cible, zone de dessin, effacements, dessins, copies. Sert à
+// repérer ce qui coûte au GPU (sur un GPU à tuiles, chaque changement de
+// cible relit et réécrit les attachements en mémoire).
+static int pass_state = -1;   // -1 inconnu, 0 inactif, 1 attente, 2 image en cours, 3 fini
+static uint64_t pass_deadline;
+static uint32_t pass_fb, pass_vw, pass_vh, pass_clears, pass_clear_mask;
+static long pass_draws, pass_index;
+static char *pass_log; static size_t pass_len, pass_cap;
+static void pass_printf(const char *format, ...) __attribute__((format(printf, 1, 2)));
+static void pass_printf(const char *format, ...) {
+    if (pass_len + 512 > pass_cap) {
+        size_t cap = pass_cap ? pass_cap * 2 : 1 << 16;
+        char *grown = realloc(pass_log, cap);
+        if (!grown) return;
+        pass_log = grown; pass_cap = cap;
+    }
+    va_list list; va_start(list, format);
+    int n = vsnprintf(pass_log + pass_len, pass_cap - pass_len, format, list);
+    va_end(list);
+    if (n > 0) pass_len += (size_t)n < pass_cap - pass_len ? (size_t)n : pass_cap - pass_len - 1;
+}
+static void pass_close(void) {
+    if (pass_draws || pass_clears)
+        pass_printf("passe %ld : fb %u, zone %ux%u, %ld dessins, %u effacements (masque %#x)\n",
+                    pass_index++, pass_fb, pass_vw, pass_vh, pass_draws, pass_clears, pass_clear_mask);
+    pass_draws = 0; pass_clears = 0; pass_clear_mask = 0;
+}
+// Appelé à chaque échange d'images (sdl_video.c).
+void rt_gl_pass_frame(void) {
+    if (pass_state == -1) {
+        const char *e = getenv("P2_PASS_TRACE");
+        pass_state = e && *e ? 1 : 0;
+        mach_timebase_info_data_t base;
+        mach_timebase_info(&base);
+        if (pass_state) pass_deadline = mach_absolute_time() + (uint64_t)atol(e) * 1000000000ull * base.denom / base.numer;
+    }
+    if (pass_state == 1 && mach_absolute_time() >= pass_deadline) { pass_state = 2; pass_index = 0; pass_len = 0; }
+    else if (pass_state == 2) {
+        pass_close();
+        fprintf(stderr, "[passes] image complète :\n%.*s[passes] fin\n", (int)pass_len, pass_log ? pass_log : "");
+        pass_state = 3;
+    }
+}
+static void pass_trace(CPU *c, const char *name) {
+    uint32_t a = c->esp + 4;
+    if (!strncmp(name, "glBindFramebuffer", 17)) {
+        uint32_t target = R32(a), fb = R32(a + 4);
+        if (target != GL_READ_FRAMEBUFFER && fb != pass_fb) { pass_close(); pass_fb = fb; }
+    } else if (!strncmp(name, "glFramebufferTexture", 20) || !strncmp(name, "glFramebufferRenderbuffer", 25)) {
+        pass_printf("  attache %s %#x -> objet %u\n", name + 13, R32(a + 4),
+                    !strncmp(name, "glFramebufferTexture2D", 22) || name[13] == 'R' ? R32(a + 12) : R32(a + 8));
+    } else if (!strcmp(name, "glViewport")) {
+        pass_vw = R32(a + 8); pass_vh = R32(a + 12);
+    } else if (!strcmp(name, "glClear")) {
+        ++pass_clears; pass_clear_mask |= R32(a);
+    } else if (is_draw_call(name)) {
+        ++pass_draws;
+    } else if (!strncmp(name, "glBlitFramebuffer", 17)) {
+        pass_close();
+        pass_printf("  copie blit src %d,%d-%d,%d -> dst %d,%d-%d,%d masque %#x filtre %#x\n", (int)R32(a), (int)R32(a + 4),
+                    (int)R32(a + 8), (int)R32(a + 12), (int)R32(a + 16), (int)R32(a + 20), (int)R32(a + 24),
+                    (int)R32(a + 28), R32(a + 32), R32(a + 36));
+    } else if (!strncmp(name, "glCopyTex", 9)) {
+        pass_close();
+        pass_printf("  %s %ux%u\n", name, R32(a + 24), R32(a + 28));
+    } else if (!strncmp(name, "glGenerateMipmap", 16) || !strcmp(name, "glReadPixels") || !strncmp(name, "glGetQueryObject", 16)
+               || !strcmp(name, "glFinish") || !strcmp(name, "glFlush") || !strncmp(name, "glClientWaitSync", 16)) {
+        pass_printf("  %s\n", name);
+    }
+}
+
 static int gl_execute(CPU *c, const char *name, const RtGlEntry *entry, void *fn) {
     static uint8_t *kinds;
     if (__builtin_expect(!kinds, 0)) kinds = calloc(rt_gl_entry_count, 1);
@@ -250,6 +328,7 @@ static int gl_execute(CPU *c, const char *name, const RtGlEntry *entry, void *fn
     }
     if (kind != GL_KIND_OTHER && stream_enabled() && stream_before(c, kind)) return 1;
     if (__builtin_expect(blit_trace_start != -1, 0)) trace_gl(c, name);
+    if (__builtin_expect(pass_state == 2, 0)) pass_trace(c, name);
     int handled;
     if (__builtin_expect(!gl_timing(), 1)) handled = entry->thunk(c, fn);
     else {

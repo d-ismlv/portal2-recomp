@@ -243,6 +243,14 @@ def main():
     parser.add_argument('--release', action='store_true',
                         help='version pour jouer : --opt 2 --fast-memory (mesuré ~200 fps en jeu contre '
                              '~117 en -O1 contrôlé) ; garder la version contrôlée pour diagnostiquer')
+    pgo = parser.add_mutually_exclusive_group()
+    pgo.add_argument('--pgo-generate', action='store_true',
+                     help='version instrumentée (profil LLVM écrit toutes les 20 s dans LLVM_PROFILE_FILE), '
+                          'sans informations de débogage pour limiter la place des objets')
+    pgo.add_argument('--pgo-use', type=Path, metavar='PROFDATA',
+                     help='compilation guidée par un profil fusionné (llvm-profdata merge)')
+    parser.add_argument('--order-file', type=Path,
+                        help="fichier d'ordre de l'éditeur de liens (tools/hot_order.py) : code chaud regroupé")
     parser.add_argument('--jobs', type=int, default=os.cpu_count() or 1)
     parser.add_argument('--stats', type=Path, default=Path('build/game/build-stats.json'))
     parser.add_argument('--config', type=Path, default=Path('config/local.json'),
@@ -264,15 +272,25 @@ def main():
         print('Runtime traps for unimplemented imports: ' + ', '.join(unimplemented))
     identity = subprocess.run(['clang', '--version'], capture_output=True, text=True, check=True).stdout
     memory = (['-DRT_FAST_MEMORY'] if args.fast_memory else []) + (['-DRT_TRACED_CALLS'] if args.traced_calls else [])
-    runtime_flags = [f'-O{args.runtime_opt or args.opt}', '-g', *WARNINGS, *memory, '-Iruntime', *HOST_CFLAGS]
-    generated_flags = [f'-O{args.opt}', DEBUG[args.debug], *WARNINGS, *memory, '-Iruntime']
+    profile = []
+    if args.pgo_generate:
+        profile = ['-fprofile-instr-generate', '-DRT_PGO_GENERATE']
+        args.debug = 'none'
+    elif args.pgo_use:
+        # Le contenu du profil entre dans la clé des objets (même chemin, autre profil).
+        identity += digest(args.pgo_use.read_bytes())
+        profile = [f'-fprofile-instr-use={args.pgo_use.resolve()}', '-Wno-profile-instr-unprofiled',
+                   '-Wno-profile-instr-out-of-date', '-Wno-profile-instr-missing']
+    runtime_flags = [f'-O{args.runtime_opt or args.opt}', '-g', *WARNINGS, *memory, *profile, '-Iruntime', *HOST_CFLAGS]
+    generated_flags = [f'-O{args.opt}', DEBUG[args.debug], *WARNINGS, *memory, *profile, '-Iruntime']
     sources = Path('build/game/gen/src')
     units = [(str(p), runtime_flags) for p in sorted(Path('runtime').glob('*.c'))]
     units.append(('src/main.c', runtime_flags))
     units += [(str(sources / name), generated_flags) for name in sorted(manifest['shards'])]
     units.append((str(sources / 'dispatch.c'), generated_flags))
     units += [(str(p), generated_flags) for p in plugin_sources]
-    cache = Path('build/game/obj')
+    # Objets instrumentés à part : supprimables d'un bloc une fois le profil extrait.
+    cache = Path('build/game/obj-pgo-generate' if args.pgo_generate else 'build/game/obj')
     compile_started = time.time()
     objects, compiled, cpu = compile_units(units, cache, args.jobs, identity)
     compile_time = time.time() - compile_started
@@ -280,7 +298,9 @@ def main():
     response = Path('build/game/link.rsp')
     response.write_text('\n'.join(str(o) for o in objects) + '\n')
     temporary = args.out.with_name(f'.{args.out.name}.tmp')
-    subprocess.run(['clang', f'@{response}', *HOST_LIBS, '-o', str(temporary)], check=True)
+    link_flags = (['-fprofile-instr-generate'] if args.pgo_generate else []) + \
+        ([f'-Wl,-order_file,{args.order_file}'] if args.order_file else [])
+    subprocess.run(['clang', f'@{response}', *HOST_LIBS, *link_flags, '-o', str(temporary)], check=True)
     os.replace(temporary, args.out)
     link_time = time.time() - link_started
     removed = collect_garbage(cache, digest(runtime_flags, generated_flags), objects)

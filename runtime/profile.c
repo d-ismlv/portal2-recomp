@@ -178,10 +178,54 @@ static void dump_raw(void) {
     rename(temporary, path);
 }
 
+// P2_PROFILE_ORDER=/chemin.txt : chaque adresse de l'exécutable vue dans les
+// échantillons (feuille ou pile), « décalage propre inclusif » par ligne
+// (décalage depuis le début de l'image, en hexadécimal), à résoudre hors ligne
+// avec nm : sert à construire un fichier d'ordre de l'éditeur de liens.
+static int wall_mode;
+enum { ORDER_SLOTS = 1u << 20 };
+typedef struct { uintptr_t pc; uint64_t self, inclusive; } OrderEntry;
+static void dump_order(const char *path) {
+    Dl_info self;
+    if (!dladdr((void *)dump_order, &self)) return;
+    uintptr_t base = (uintptr_t)self.dli_fbase;
+    static OrderEntry *table;
+    if (!table && !(table = malloc(ORDER_SLOTS * sizeof(*table)))) return;
+    memset(table, 0, ORDER_SLOTS * sizeof(*table));
+    for (uint32_t i = 0; i < SLOTS; ++i) {
+        if (__atomic_load_n(&used[i], __ATOMIC_ACQUIRE) != 2) continue;
+        uint32_t h = hits[i];
+        for (int d = -1; d < DEPTH; ++d) {
+            uintptr_t pc = d < 0 ? keys[i].pc : keys[i].chain[d];
+            if (!pc) break;
+            uint32_t s = (uint32_t)((pc >> 2) * 2654435761u) & (ORDER_SLOTS - 1);
+            for (unsigned probe = 0; probe < 256 && table[s].pc && table[s].pc != pc; ++probe) s = (s + 1) & (ORDER_SLOTS - 1);
+            if (table[s].pc && table[s].pc != pc) continue;
+            table[s].pc = pc;
+            if (d < 0) table[s].self += h;
+            table[s].inclusive += h;
+        }
+    }
+    char temporary[1100];
+    snprintf(temporary, sizeof(temporary), "%s.tmp", path);
+    FILE *out = fopen(temporary, "w");
+    if (!out) return;
+    for (uint32_t i = 0; i < ORDER_SLOTS; ++i)
+        if (table[i].pc > base)
+            fprintf(out, "%lx %llu %llu\n", (unsigned long)(table[i].pc - base), (unsigned long long)table[i].self,
+                    (unsigned long long)table[i].inclusive);
+    fclose(out);
+    rename(temporary, path);
+}
+
 static void dump(void) {
     static int raw = -1;
     if (raw < 0) raw = getenv("P2_PROFILE_RAW") != NULL;
     if (raw) dump_raw();
+    // Liste brute d'abord (linéaire) : en mode temps réel, les sections
+    // ci-dessous peuvent prendre très longtemps (dédoublonnage quadratique).
+    const char *order = getenv("P2_PROFILE_ORDER");
+    if (order && *order) { dump_order(order); if (wall_mode) return; }
     char temporary[1100];
     snprintf(temporary, sizeof(temporary), "%s.tmp", output);
     FILE *out = fopen(temporary, "w");
@@ -251,3 +295,19 @@ __attribute__((constructor)) static void start_profiler(void) {
     pthread_create(&thread, NULL, writer, NULL);
     pthread_detach(thread);
 }
+
+#ifdef RT_PGO_GENERATE
+// Version --pgo-generate : les parties de diagnostic sont arrêtées au délai
+// (SIGKILL), sans passer par exit où LLVM écrit son profil ; on l'écrit donc
+// toutes les 20 s (fichier choisi par LLVM_PROFILE_FILE).
+int __llvm_profile_write_file(void);
+static void *pgo_writer(void *unused) {
+    (void)unused;
+    for (;;) { sleep(20); __llvm_profile_write_file(); }
+    return NULL;
+}
+__attribute__((constructor)) static void start_pgo_writer(void) {
+    pthread_t thread;
+    if (!pthread_create(&thread, NULL, pgo_writer, NULL)) pthread_detach(thread);
+}
+#endif
