@@ -2,3 +2,4 @@ build/
 *.o
 __pycache__/
 config/local.json
+deps/

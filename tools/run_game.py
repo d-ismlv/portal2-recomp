@@ -26,7 +26,7 @@ if not game_args: game_args = ['-game', 'portal2', '-novid', '-windowed', '-w', 
 # Les lancements de diagnostic (fenêtre cachée) travaillent sur une copie des
 # données utilisateur : jamais deux instances sur les mêmes sauvegardes et
 # réglages, ni de modification des réglages de l'utilisateur.
-user_dir = Path('../work/portal2-userdata').resolve()
+user_dir = Path(config.get('user_dir') or '../work/portal2-userdata').expanduser().resolve()
 if not args.show:
     diag_dir = user_dir.with_name('portal2-userdata-diag')
     if not diag_dir.exists(): shutil.copytree(user_dir, diag_dir, symlinks=True)

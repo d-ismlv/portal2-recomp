@@ -54,7 +54,7 @@ def main():
     binary = ROOT / 'build/portal2-native'
     paths = {
         'binary': binary, 'images': ROOT / 'build/game/prep', 'game_dir': Path(config['game_root']),
-        'linux_root': Path(config['linux_root']), 'user_dir': (ROOT / '../work/portal2-userdata').resolve(),
+        'linux_root': Path(config['linux_root']), 'user_dir': Path(config.get('user_dir') or ROOT / '../work/portal2-userdata').expanduser().resolve(),
     }
 
     app = args.dest / f'{NAME}.app'

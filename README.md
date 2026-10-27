@@ -67,27 +67,52 @@ English.
 
 ## What you need
 
-- An Apple silicon Mac with the Xcode command line tools (their LLVM
-  `objdump` disassembles the game), Python 3, and Homebrew's `sdl2`,
-  `freetype` and `fontconfig` for the macOS build.
-- **Portal 2 on Steam.** Two parts of it:
-  - the game data: your normal Portal 2 install folder (the Windows release
-    works, e.g. installed through Whisky/CrossOver), the one containing
-    `portal2/`, `platform/` and `bin/`;
-  - the **Linux binaries** (Steam depot 661). With your Steam account, in
-    [SteamCMD](https://developer.valvesoftware.com/wiki/SteamCMD) or the
-    Steam console: `download_depot 620 661`.
-- For macOS: Valve's macOS `libsteam_api.dylib` from SDK 1.53a, as shipped in
-  the [Steamworks.NET 20.1.0](https://github.com/rlabrecque/Steamworks.NET/releases/tag/20.1.0)
-  Unity package (`steam_api.bundle`). The game starts through Steam and needs
-  the Steam client running and signed in.
-- For iOS: Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), CMake
-  and Ninja (`brew install xcodegen cmake ninja`), an
-  Apple account (a free one works, with 7-day provisioning profiles) and
-  ~12 GB of free space on the device. Tested on an iPhone 15 Pro Max (A17
-  Pro, 8 GB); older or smaller iPhones are untested.
+- An Apple silicon Mac, the Xcode command line tools (`xcode-select
+  --install`), Python 3 and [Homebrew](https://brew.sh):
+  `brew install sdl2 freetype fontconfig`.
+- **Portal 2 on Steam**, in two parts:
+  - the **game data**: a Portal 2 install folder, the one containing
+    `portal2/`, `platform/` and `bin/`. The Windows release works (installed
+    through Whisky or CrossOver, for example);
+  - the **Linux binaries** (depot 661, about 90 MB). Open the Steam console
+    (`open steam://open/console` in a terminal) and type
+    `download_depot 620 661`.
+- The Steam client running and signed in when you play on the Mac.
+- For the iPhone: Xcode with an Apple ID added in Settings > Accounts (a free
+  account works, with 7-day profiles), `brew install xcodegen cmake ninja`,
+  the iPhone connected by cable with Developer Mode on, and ~12 GB free on it.
+  Tested on an iPhone 15 Pro Max (A17 Pro, 8 GB); other models are untested.
 
-Then create `config/local.json` (ignored by git):
+## Quick start
+
+```sh
+git clone https://github.com/kanapitsas/portal2-recomp.git
+cd portal2-recomp
+./setup.sh "/path/to/Portal 2" "/path/to/depot_661"          # macOS
+./setup.sh --ios "/path/to/Portal 2" "/path/to/depot_661"    # macOS + iPhone
+```
+
+`setup.sh` checks the tools, downloads Valve's macOS `libsteam_api.dylib`
+(from the [Steamworks.NET 20.1.0](https://github.com/rlabrecque/Steamworks.NET/releases/tag/20.1.0)
+package, checksum verified), writes `config/local.json`, recompiles the game
+(about 10 minutes the first time) and creates `~/Applications/Portal 2
+Natif.app`. Without paths, it looks for the folders `download_depot` writes
+under `~/Library/Application Support/Steam` (not tested yet: pass the paths
+if it does not find them). Re-running it is safe and quick.
+
+With `--ios` it also reads your team from your Apple Development
+certificate, picks an app identifier unique to that team, gets a provisioning
+profile through Xcode, builds the iPhone app, installs it and copies the game
+data to the phone (about 11.5 GB, only the first time). On the phone, trust
+your developer account in Settings > General > VPN & Device Management.
+Re-run `./setup.sh --ios` every 7 days with a free account.
+
+Saves and settings go to `~/Library/Application Support/Portal2Recomp`; the
+game folder is never written to.
+
+## Manual build
+
+`config/local.json` (ignored by git; `setup.sh` writes it):
 
 ```json
 {
@@ -95,14 +120,16 @@ Then create `config/local.json` (ignored by git):
   "linux_root": "/path/to/depot_661",
   "steam_appid": 620,
   "steam_api_dylib": "/path/to/steam_api.bundle/Contents/MacOS/libsteam_api.dylib",
+  "user_dir": "/path/to/saves",
   "ios_bundle_id": "com.yourname.portal2"
 }
 ```
 
 `ios_bundle_id` must be unique to your Apple account (free accounts cannot
-share identifiers); it can also be given with `P2_BUNDLE_ID`.
+share identifiers); it can also be given with `P2_BUNDLE_ID`. Without
+`user_dir`, saves go to `../work/portal2-userdata`, next to this folder.
 
-## Build and play on macOS
+macOS:
 
 ```sh
 python3 tools/gameprep.py                 # prepare the Linux modules (seconds)
@@ -111,10 +138,7 @@ python3 tools/run_game.py --show --timeout 3600
 python3 tools/make_app.py                 # optional: an app for the Dock / Finder
 ```
 
-Saves and settings go to `../work/portal2-userdata`, next to this folder;
-the game folder is never written to.
-
-## Build and play on iPhone
+iPhone:
 
 ```sh
 python3 tools/gameprep.py                         # if not done for macOS
@@ -125,11 +149,12 @@ tools/ios_device.sh data                          # copy the game data to the ap
 ```
 
 The first device build needs a provisioning profile: see
-[ios/signing/project.yml](ios/signing/project.yml) and
 [docs/ios.md](docs/ios.md). The simulator works too
 (`ios/deps/build.sh sim`, `python3 tools/build_ios.py`, then
-`tools/run_ios_sim.sh`), but renders in
-software and shows clipping artifacts that do not exist on the device.
+`tools/run_ios_sim.sh`), but renders in software and shows clipping
+artifacts that do not exist on the device.
+
+## Playing on iPhone
 
 **Controls**: left stick to move, right half of the screen to look (stick
 or trackpad), buttons for jump, crouch, use and pause; tap the back of the phone on
