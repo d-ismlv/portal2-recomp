@@ -1,65 +1,65 @@
-# Couverture du traducteur i386 → C (audit du 25 octobre 2026)
+# i386 → C translator coverage (audit of October 25, 2026)
 
-Commande (≈ 1 min, 11 cœurs ; le cache de désassemblage est dans `build/disasm-cache`) :
+Command (≈ 1 min, 11 cores; the disassembly cache lives in `build/disasm-cache`):
 
 ```sh
 python3 tools/progress.py --all --compile-forms --layout build/game/prep/layout.json --out build/coverage.json
 ```
 
-Racines : symboles, exports, `DT_INIT/FINI`, `init_array/fini_array` et pointeurs de code
-en données (`data_ptrs`) de **tous** les modules préparés, suivis par appels directs.
-Mode collecte : chaque instruction refusée est comptée sans arrêter la fonction
-(`lift.scan`) ; `lift.lift`, utilisé pour générer, reste fail-closed.
-`--compile-forms` compile (`clang -fsyntax-only -Werror`) un exemple traduit de chaque
-forme distincte (mnémonique + forme d'opérandes) trouvée dans le jeu.
+Roots: symbols, exports, `DT_INIT/FINI`, `init_array/fini_array` and code pointers
+in data (`data_ptrs`) from **all** prepared modules, followed through direct calls.
+Collection mode: every rejected instruction is counted without stopping the function
+(`lift.scan`); `lift.lift`, which is used for generation, stays fail-closed.
+`--compile-forms` compiles (`clang -fsyntax-only -Werror`) one translated example of each
+distinct form (mnemonic + operand shape) found in the game.
 
-## Résultat
+## Results
 
-| | avant ce lot | après |
+| | before this batch | after |
 |---|---|---|
-| fonctions découvertes | 115 431 | 115 745 |
-| entièrement traduisibles | 110 706 (95,9 %) | 115 745 (100 %) |
-| instructions | 9,31 M | 9,79 M (cases de switch incluses) |
-| formes distinctes compilées | — | 586, toutes compilent |
+| functions discovered | 115,431 | 115,745 |
+| fully translatable | 110,706 (95.9%) | 115,745 (100%) |
+| instructions | 9.31 M | 9.79 M (including switch cases) |
+| distinct forms compiled | — | 586, all compile |
 
-Bloqueurs résolus, par nombre de fonctions touchées : `sqrtss` (1 506), « pas de
-frontière d'instruction » (1 515 : sauts croisés entre modules mal comptés, et
-octets nuls que objdump élidait — corrigé par `objdump -z`), `minss`/`maxss`,
+Blockers fixed, by number of functions affected: `sqrtss` (1,506), "no
+instruction boundary" (1,515: cross-module jumps miscounted, and
+null bytes that objdump was eliding — fixed with `objdump -z`), `minss`/`maxss`,
 `andnps`, `bt/bts/btr/btc`, `shufps`, `unpck*ps`, `movhps/movlps/movlhps/movhlps`,
 `movmskps`, `rcpps/rsqrtps/sqrtps`, `fcomi/fucomi(p)`, `fcmovcc`, `fldcw/fnstcw/fnstsw`,
 `fi{add,mul,sub,subr,div,divr}`, `frndint`, `fsin/fcos/fptan/fpatan/fyl2x/fprem`,
 `fld/fstp tbyte`, MMX (`movq/movd mm`, `padd*/psub*/pmul*/pack*/punpck*/psra*`, `emms`),
-SSE2 entier (`pshufd`, `pcmpeq/gt`, `pmuludq`, `packssdw`, `psrldq`, `punpck*`),
-`mul/imul/div/idiv` 8 et 16 bits, `cbw/cwd`, `sahf/lahf`, `rep ret`, `prefetch*`.
-Chaque forme a un test sémantique sur du vrai code machine (`tests/lifter_programs.s`,
-assemblé par `clang -target i386-linux-gnu`) dans `tests/checks_lifter.c`.
+SSE2 integer (`pshufd`, `pcmpeq/gt`, `pmuludq`, `packssdw`, `psrldq`, `punpck*`),
+8- and 16-bit `mul/imul/div/idiv`, `cbw/cwd`, `sahf/lahf`, `rep ret`, `prefetch*`.
+Each form has a semantic test on real machine code (`tests/lifter_programs.s`,
+assembled with `clang -target i386-linux-gnu`) in `tests/checks_lifter.c`.
 
-## Sauts indirects
+## Indirect jumps
 
-| catégorie (occurrences dans les fonctions découvertes) | nombre |
+| category (occurrences in discovered functions) | count |
 |---|---|
-| tables de switch résolues statiquement | 5 441 |
-| `jmp reg` restants (appels terminaux virtuels) | 6 169 |
-| `jmp [mem]` restants (vtables, pointeurs) | 2 458 |
-| stubs PLT | 1 377 |
+| switch tables resolved statically | 5,441 |
+| remaining `jmp reg` (virtual tail calls) | 6,169 |
+| remaining `jmp [mem]` (vtables, pointers) | 2,458 |
+| PLT stubs | 1,377 |
 
-Sur toutes les formes de table reconnaissables, 1 632 sont résolues, 1 reste (un
-tableau de pointeurs de fonctions de studiorender, pas un switch). Une table résolue
-devient un `switch` C de `goto` locaux, mais **la cible calculée par le code invité
-est comparée** : toute autre valeur passe par `rt_dispatch` vérifié (piège si non
-recompilée). Une table imprécise ne peut donc qu'ajouter des étiquettes mortes.
+Across all recognizable table shapes, 1,632 are resolved and 1 remains (an
+array of function pointers in studiorender, not a switch). A resolved table
+becomes a C `switch` of local `goto`s, but **the target computed by the guest code
+is checked**: any other value goes through a checked `rt_dispatch` (which traps if it
+was not recompiled). An imprecise table can therefore only add dead labels.
 
-## Limites connues
+## Known limitations
 
-- Statique : les cibles indirectes hors `data_ptrs` (vtables construites, callbacks)
-  ne sont pas découvertes ; « traduisible » ne veut dire ni exécuté ni juste.
-- x87 en double (pas 80 bits) ; `fld/fstp tbyte` convertissent. `rcpps/rsqrtps`
-  sont exacts (dans la borne ISA 1,5·2⁻¹², pas bit à bit Intel). NaN par défaut ARM.
-- MMX : registres `mm` distincts de la pile x87 (pas d'alias), TOP/tags mis à jour.
-- Exceptions C++ : seuls des chemins d'erreur de libstdc++ (bad_alloc, bad_cast,
-  length_error, gestionnaire verbose de terminate) lancent ; aucun `catch` dans le code
-  du jeu. Un `throw` réel testé (libsteam_api_linux `std::__throw_bad_cast`) déroule la
-  pile invitée via `dl_iterate_phdr`/`.eh_frame` traduits, ne trouve pas de gestionnaire
-  et finit dans `abort`, comme sous Linux. Les landing pads ne sont pas des points de
-  reprise : si un gestionnaire existait, le transfert remonterait jusqu'à une frontière
-  native et piégerait explicitement.
+- Static: indirect targets outside `data_ptrs` (constructed vtables, callbacks)
+  are not discovered; "translatable" means neither executed nor correct.
+- x87 runs in double precision (not 80-bit); `fld/fstp tbyte` convert. `rcpps/rsqrtps`
+  are exact (within the ISA bound of 1.5·2⁻¹², not bit-for-bit with Intel). ARM default NaN.
+- MMX: `mm` registers are separate from the x87 stack (no aliasing); TOP/tags are updated.
+- C++ exceptions: only libstdc++ error paths (bad_alloc, bad_cast,
+  length_error, the verbose terminate handler) throw; there is no `catch` in the game's
+  code. A real `throw` that was tested (libsteam_api_linux `std::__throw_bad_cast`) unwinds the
+  guest stack through translated `dl_iterate_phdr`/`.eh_frame`, finds no handler
+  and ends up in `abort`, just as on Linux. Landing pads are not resume
+  points: if a handler did exist, the transfer would unwind up to a native
+  boundary and trap explicitly.

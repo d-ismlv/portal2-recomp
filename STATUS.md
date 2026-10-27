@@ -1,253 +1,253 @@
-# État — 26 octobre 2026, nuit (reprise Claude)
+# Status — 26 October 2026, night (resumed by Claude)
 
-**Le jeu est jouable** (testé par l'utilisateur : menus, clavier/souris, son,
-voix, musique, début de partie, retour au menu, Cmd-Q). Performances
-mesurées en jeu (sp_a1_intro1, focus simulé, fenêtre cachée, M3 Pro) :
+**The game is playable** (tested by the user: menus, keyboard/mouse, sound,
+voice, music, starting a game, returning to the menu, Cmd-Q). Performance
+measured in-game (sp_a1_intro1, simulated focus, hidden window, M3 Pro):
 
-| build | 1280×720 | « 2560×1440 » sans Retina (en fait 1512×982) | 2560×1440 Retina |
+| build | 1280×720 | "2560×1440" without Retina (actually 1512×982) | 2560×1440 Retina |
 |---|---|---|---|
-| `-O1` mémoire contrôlée (25 oct. soir) | ~117 fps | — | — |
-| `--release` (`-O2 --fast-memory`), 26 oct. | 235-255 fps | ~263-280 fps | ~215-230 fps (menu) |
+| `-O1` with memory checks (25 Oct., evening) | ~117 fps | — | — |
+| `--release` (`-O2 --fast-memory`), 26 Oct. | 235-255 fps | ~263-280 fps | ~215-230 fps (menu) |
 
-Attention : sans mode Retina, macOS réduit une fenêtre plus grande que
-l'écran (1512×982 points sur ce MacBook) ; les anciennes mesures
-« 2560×1440 » rendaient donc 1512×982 pixels. Le mode Retina rend vraiment
-2560×1440 (2,5 fois plus de pixels) dans une fenêtre de 1280×720 points.
+Caution: without Retina mode, macOS shrinks a window that is larger than the
+screen (1512×982 points on this MacBook), so the earlier "2560×1440"
+measurements were actually rendering 1512×982 pixels. Retina mode really
+renders 2560×1440 (2.5 times as many pixels) in a 1280×720-point window.
 
-Gains de la nuit du 25 au 26 (mesurés avec `tools/bench_game.py`, moyenne de
-la seconde moitié de plusieurs parties) : `--release` (×1,7), QoS interactive
-(+15 %), caches de fichiers (access/fopen des absents, parents de la racine,
-flux libc indexés), et surtout ajouts `glBufferSubData` non synchronisés dans
-un stockage neuf (+30 %, relu trois fois par Codex, `P2_GL_STREAM_UNSYNC=0`
-pour désactiver). Essais écartés, mesures à l'appui : annoncer 2 ou 4 CPU
-(plus lent), relâcher le verrou invité pendant les appels GL (plus lent),
-forcer l'usage des tampons, `gl_bufmode`.
+Gains from the night of 25 to 26 October (measured with `tools/bench_game.py`,
+averaging the second half of several runs): `--release` (×1.7), interactive QoS
+(+15 %), file caches (access/fopen of missing files, parents of the root,
+indexed libc streams), and above all unsynchronized `glBufferSubData` appends
+into fresh storage (+30 %, reviewed three times by Codex; `P2_GL_STREAM_UNSYNC=0`
+disables it). Attempts rejected, with measurements to back them up: reporting 2
+or 4 CPUs (slower), releasing the guest lock during GL calls (slower), forcing
+buffer usage, `gl_bufmode`.
 
-MSAA (26 oct., sp_a1_intro6, 2560×1440 Retina, machine chargée par le
-simulateur iOS) : togl fait 6 résolutions MSAA par image (3 réduites vers la
-texture de réfraction 1024², 2 pleine taille, 1 vers l'écran), chacune après
-de nouveaux dessins dans la surface MSAA : aucune n'est redondante. MSAA 4x :
-13,4 ms GPU par image ; sans MSAA : 7,0 ms (47 → 75 fps sous charge). En
-Retina, baisser l'antialiasing dans le menu Vidéo est le levier principal.
-Les lancements de diagnostic (sans `--show`) utilisent maintenant une copie
-des données utilisateur (`../work/portal2-userdata-diag`).
+MSAA (26 Oct., sp_a1_intro6, 2560×1440 Retina, machine loaded by the iOS
+simulator): togl performs 6 MSAA resolves per frame (3 downscaled into the
+1024² refraction texture, 2 full-size, 1 to the screen), each one after new
+draws into the MSAA surface: none of them is redundant. MSAA 4x: 13.4 ms of
+GPU time per frame; without MSAA: 7.0 ms (47 → 75 fps under load). In Retina,
+lowering antialiasing in the Video menu is the main lever.
+Diagnostic launches (without `--show`) now use a copy of the user data
+(`../work/portal2-userdata-diag`).
 
-Profil CPU fiable (26 oct., `/usr/bin/sample` sur le jeu en régime établi ;
-le profileur SIGPROF intégré surpondère les appels système sous macOS) :
-thread principal ≈ 50 % code du jeu traduit, 16 % runtime, 11 % pilote
-GL/Metal, 8 % présentation (requêtes WindowServer, peut-être dues à la
-fenêtre cachée de diagnostic). Gains du jour, sans MSAA en 2560×1440 (limité
-CPU), A/B alterné : routes directes des imports chauds (`P2_IMPORT_COUNTS`
-pour les compter) 120,9 → 125,6 fps ; cache de cible par site d'appel
-indirect + `rt_return` en macro 117,4 → 124,4 fps (machine chargée). Avec
-MSAA 4x en 1440p le GPU limite (~13 ms/image) : ces gains n'y changent rien.
-Pistes suivantes : ThinLTO/PGO, accès TLS en ligne, présentation en fenêtre
-visible à mesurer.
+Reliable CPU profile (26 Oct., `/usr/bin/sample` on the game in steady state;
+the built-in SIGPROF profiler over-weights system calls on macOS): main
+thread ≈ 50 % translated game code, 16 % runtime, 11 % GL/Metal driver,
+8 % presentation (WindowServer requests, possibly caused by the hidden
+diagnostic window). Today's gains, without MSAA at 2560×1440 (CPU-bound),
+alternating A/B: direct routes for hot imports (`P2_IMPORT_COUNTS` to count
+them) 120.9 → 125.6 fps; per-call-site target cache for indirect calls +
+`rt_return` as a macro 117.4 → 124.4 fps (loaded machine). With MSAA 4x at
+1440p the GPU is the bottleneck (~13 ms/frame): these gains make no difference
+there. Next leads: ThinLTO/PGO, inline TLS access, measuring presentation with
+a visible window.
 
-Grandes salles (26 oct. soir, 2560×1440 Retina, fenêtre cachée) :
-sp_a2_laser_over_goo et sp_a2_column_blocker ≈ 95 fps machine calme sans
-MSAA (GPU ~9 ms/image, donc plafond GPU ~110 fps en 1440p), ~50 fps quand
-un autre jeu et une compilation tournent, ~38-40 fps avec MSAA 4x en plus :
-c'était la situation de l'utilisateur (30 fps). Les mesures n'ont de sens que
-machine calme (vérifier `uptime`). Essai écarté : regrouper les fonctions
-chaudes (`P2_PROFILE_WALL=1 P2_PROFILE_ORDER=…`, `tools/hot_order.py`,
-`build_game.py --order-file`) : pas de gain visible (78,7 → 78,9 fps).
-PGO (26 oct. nuit) : profil collecté sur laser_over_goo, column_blocker et
-intro3 (version instrumentée, ~1,5 Go de profil brut par partie), fusionné
-dans `build/game/pgo.profdata` (173 Mo, hors git). A/B machine calme : 720p
-156,8 → 167,3 fps (+7 %) ; 1440p ≈ +2 % seulement, car le GPU y est saturé
-(9,9 ms GPU pour 10 ms par image, ~100 fps dans les grandes salles). Le
-binaire de l'app est la version PGO ; l'ancien reste en
-`build/portal2-native-nopgo`. Reconstruire avec le profil :
+Large rooms (26 Oct., evening, 2560×1440 Retina, hidden window):
+sp_a2_laser_over_goo and sp_a2_column_blocker ≈ 95 fps on an idle machine
+without MSAA (GPU ~9 ms/frame, so a GPU ceiling of ~110 fps at 1440p), ~50 fps
+while another game and a build are running, ~38-40 fps with MSAA 4x on top:
+that was the user's situation (30 fps). Measurements are only meaningful on an
+idle machine (check `uptime`). Attempt rejected: grouping hot functions
+together (`P2_PROFILE_WALL=1 P2_PROFILE_ORDER=…`, `tools/hot_order.py`,
+`build_game.py --order-file`): no visible gain (78.7 → 78.9 fps).
+PGO (26 Oct., night): profile collected on laser_over_goo, column_blocker and
+intro3 (instrumented build, ~1.5 GB of raw profile per run), merged into
+`build/game/pgo.profdata` (173 MB, not in git). A/B on an idle machine: 720p
+156.8 → 167.3 fps (+7 %); 1440p only ≈ +2 %, because the GPU is saturated
+there (9.9 ms of GPU time out of 10 ms per frame, ~100 fps in the large rooms).
+The app binary is the PGO build; the old one remains at
+`build/portal2-native-nopgo`. Rebuild with the profile:
 `python3 tools/build_game.py --release --pgo-use build/game/pgo.profdata`
-(sans l'option, on revient à la version sans PGO). Refaire le profil :
-`--pgo-generate --out build/portal2-native-pgogen`, parties avec
+(without the option, you get the non-PGO build back). Regenerate the profile:
+`--pgo-generate --out build/portal2-native-pgogen`, runs with
 `LLVM_PROFILE_FILE=…-%p.profraw`, `xcrun llvm-profdata merge`.
-Prochain plafond en 1440p : le GPU (120 fps demandera d'alléger le rendu).
+Next ceiling at 1440p: the GPU (120 fps will require a lighter render).
 
-Coût GPU en 1440p (27 oct., laser_over_goo, A/B alternés, machine calme,
-`bench_game.py --extra "+convar valeur"`) : le filtrage anisotrope 8x
-(menu Vidéo, « Mode de filtrage ») coûte le plus. Base ~100-110 fps ;
-`mat_forceaniso 4` 132-149 ; 2 : 120-158 ; 1 : 123-124 ; rendu 1080p
-132-134. Sans effet : `mat_reducefillrate 1`, `gl_nullqueries 1`. Les
-mesures varient de ±15 % d'un lancement à l'autre (même vue de départ) :
-ne conclure que sur des écarts nets. Image tracée (`P2_PASS_TRACE=<s>`) :
-~280 dessins, rendu principal en 2560×1440 coupé par 3 copies (réfraction
-1024², deux copies pleine taille), post-traitement 640×360, copie finale
-retournée vers la fenêtre ; ces copies sont nécessaires au jeu.
-Comparer deux binaires : `bench_game.py --binary build/<copie>` (la copie doit
-rester dans `build/`, le chemin de libsteam_api est relatif à l'exécutable).
+GPU cost at 1440p (27 Oct., laser_over_goo, alternating A/B, idle machine,
+`bench_game.py --extra "+convar value"`): 8x anisotropic filtering
+(Video menu, "Filtering Mode") is the most expensive. Baseline ~100-110 fps;
+`mat_forceaniso 4` 132-149; 2: 120-158; 1: 123-124; 1080p rendering
+132-134. No effect: `mat_reducefillrate 1`, `gl_nullqueries 1`. Measurements
+vary by ±15 % from one launch to the next (same starting view): only draw
+conclusions from clear differences. Traced frame (`P2_PASS_TRACE=<s>`):
+~280 draws, main render at 2560×1440 interrupted by 3 copies (1024²
+refraction, two full-size copies), post-processing at 640×360, final copy
+flipped to the window; these copies are required by the game.
+Comparing two binaries: `bench_game.py --binary build/<copy>` (the copy must
+stay in `build/`, since the libsteam_api path is relative to the executable).
 
-Plein écran : la souris vise ~0,5 cm trop haut d'après l'utilisateur ; la zone
-sûre sous l'encoche fait 32 points sur ce MacBook. Le journal écrit maintenant
-la géométrie réelle (`[sdl] géométrie …`) à la création, aux changements de
-taille et de plein écran : un lancement en plein écran donnera les chiffres.
-Le SIGBUS de fn_17eabcc0 (3 fois le 26 oct.) survient à la fermeture du jeu
-(CPortal_Player, écouteur d'inventaire GC orphelin probable), pas en jeu.
+Fullscreen: according to the user, the mouse aims ~0.5 cm too high; the safe
+area below the notch is 32 points on this MacBook. The log now records the
+actual geometry (`[sdl] géométrie …`) at creation, on resize and on fullscreen
+changes: a fullscreen launch will provide the numbers.
+The SIGBUS in fn_17eabcc0 (3 times on 26 Oct.) happens when the game shuts
+down (CPortal_Player, probably an orphaned GC inventory listener), not in game.
 
-Le thread principal attend surtout le pilote OpenGL d'Apple (soumissions
-Metal sur glBufferSubData de tampons en vol, compilation GLSL à la volée,
-mise en cache par togl dans `update/glshaders.cfg`). La carte graphique a de
-la marge : la cadence varie peu avec la résolution.
+The main thread mostly waits on Apple's OpenGL driver (Metal submissions on
+glBufferSubData of in-flight buffers, on-the-fly GLSL compilation, cached by
+togl in `update/glshaders.cfg`). The GPU has headroom: the frame rate varies
+little with resolution.
 
-Lancer (depuis ce dossier, client Steam ouvert) :
+Run (from this directory, with the Steam client open):
 
 ```sh
-python3 tools/build_game.py --release  # pour jouer : -O2 sans contrôle mémoire (≈ 10 min à froid)
-python3 tools/build_game.py            # diagnostic : -O1, mémoire contrôlée (≈ 20 min à froid)
+python3 tools/build_game.py --release  # to play: -O2 without memory checks (~10 min from scratch)
+python3 tools/build_game.py            # diagnostics: -O1, checked memory (~20 min from scratch)
 SteamAppId=620 python3 tools/run_game.py --show --timeout 3600
 ```
 
-Pour jouer sans terminal : `python3 tools/make_app.py` crée
-`~/Applications/Portal 2 Natif.app` (lien vers `build/portal2-native`, chemins
-de `config/local.json`, Steam démarré au besoin, sans `-w/-h` : résolution et
-mode viennent du menu Vidéo, enregistrés dans `update/cfg/video.txt`).
-Journal : `~/Library/Logs/Portal2Natif.log`. À refaire seulement si les
-chemins ou arguments changent ; une recompilation suffit sinon.
+To play without a terminal: `python3 tools/make_app.py` creates
+`~/Applications/Portal 2 Natif.app` (a link to `build/portal2-native`, paths
+from `config/local.json`, starts Steam if needed, no `-w/-h`: resolution and
+mode come from the Video menu, saved in `update/cfg/video.txt`).
+Log: `~/Library/Logs/Portal2Natif.log`. Only needs redoing if the paths or
+arguments change; otherwise a rebuild is enough.
 
-Retina (actif par défaut, `P2_RETINA=0` pour revenir à l'ancien
-comportement) : l'écran est annoncé en pixels (3024×1964), donc le menu
-Vidéo propose aussi les grandes résolutions de la table du jeu (jusqu'à
-2560×1600). Une résolution qui tient à l'écran en points donne une fenêtre
-normale (rendu ×1) ; une plus grande donne une fenêtre Retina de moitié en
-points (2560×1440 → fenêtre de 1280×720 points, rendu natif). Bascule à chaud
-de `wantsBestResolutionOpenGLSurface`. Plein écran non vérifié en Retina.
-F3 affiche/masque un compteur d'images hôte (`P2_FPS=1` : visible dès le
-départ).
+Retina (on by default, `P2_RETINA=0` restores the old behavior): the screen
+is reported in pixels (3024×1964), so the Video menu also offers the large
+resolutions from the game's table (up to 2560×1600). A resolution that fits
+on screen in points gives a normal window (×1 rendering); a larger one gives a
+Retina window half its size in points (2560×1440 → 1280×720-point window,
+native rendering). `wantsBestResolutionOpenGLSurface` is toggled on the fly.
+Fullscreen not verified in Retina.
+F3 shows/hides a host frame counter (`P2_FPS=1`: visible from the start).
 
-Diagnostics : `P2_GPU_TIMING=1` (temps GPU par image, requêtes
-GL_TIME_ELAPSED), `P2_BLIT_TRACE=<n>` (300 copies glBlitFramebuffer à partir
-de la n-ième, avec les dessins faits dans la surface source depuis la copie
-précédente), `P2_FRAME_LOG=1` (cadence), `P2_FRAME_DUMP=/chemin.ppm`
-(capture du tampon arrière), `P2_WATCH_CALL=0x<adresse>` (arguments d'un
-appel invité), fautes hôtes traduites en adresse invitée + pile invitée.
-Sans `--show`, la fenêtre est cachée et la synchro verticale désactivée.
+Diagnostics: `P2_GPU_TIMING=1` (GPU time per frame, GL_TIME_ELAPSED
+queries), `P2_BLIT_TRACE=<n>` (300 glBlitFramebuffer copies starting from the
+n-th, with the draws made into the source surface since the previous copy),
+`P2_FRAME_LOG=1` (frame pacing), `P2_FRAME_DUMP=/chemin.ppm`
+(back-buffer capture), `P2_WATCH_CALL=0x<adresse>` (arguments of a guest
+call), host faults translated into guest address + guest stack.
+Without `--show`, the window is hidden and vsync is disabled.
 
-Corrections décisives de la soirée : tas invité O(1) (l'ancien était
-quadratique), tables de switch non coupées en fonctions, portées de symboles
-façon ld.so (libprotobuf de client.so/server.so), /proc générés depuis
-l'hôte, binaires Windows de la copie du jeu invisibles (Miles chargeait un
-.asi PE), GLX minimal, événements SDL3 filtrés, Steam GameCoordinator.
+Decisive fixes of the evening: O(1) guest heap (the old one was
+quadratic), switch tables no longer split into functions, ld.so-style symbol
+scoping (libprotobuf in client.so/server.so), /proc generated from the host,
+Windows binaries in the game copy made invisible (Miles was loading a PE
+.asi), minimal GLX, filtered SDL3 events, Steam GameCoordinator.
 
-## Greffons Miles PE (voix MP3) — branche feat/pe-plugins
+## Miles PE plugins (MP3 voices) — branch feat/pe-plugins
 
-libMiles charge lui-même les DLL Windows `bin/linux32/*.asi` (mssmp3 décode les
-voix MP3). Elles sont traduites d'avance (`tools/peprep.py`,
-`lift.generate_pe`, appelés par `build_game.py` → `build/game/gen/pe`) en C
-relogeable indexé par RVA ; `runtime/pe.c` reconnaît l'image au premier
-transfert vers elle (octets de .text identiques au fichier, relocations
-comprises : données vers la vue écrivable de Miles, valeurs vers .text vers la
-vue exécutable), puis aiguille. Seuls les .asi traduits et identiques au
-fichier restent visibles (`rt_path_windows_binary`). Diagnostic :
-`P2_PE_TRACE=1` (fonctions de greffon appelées). Vérifié : plus de « Can't
-create mixer », décodage de `vo/announcer/openingexercise01.wav` identique à
-afconvert (corrélation 0,9999997). En fenêtre cachée, la carte ne déclenche
-pas la réplique d'ouverture et la sortie reste muette : à écouter en vrai.
+libMiles loads the Windows DLLs `bin/linux32/*.asi` itself (mssmp3 decodes
+the MP3 voice lines). They are translated ahead of time (`tools/peprep.py`,
+`lift.generate_pe`, called by `build_game.py` → `build/game/gen/pe`) into
+relocatable C indexed by RVA; `runtime/pe.c` recognizes the image on the first
+control transfer into it (.text bytes identical to the file, relocations
+included: data pointing into Miles' writable view, values pointing into .text
+into the executable view), then dispatches. Only the translated .asi files
+that are identical to the file on disk remain visible
+(`rt_path_windows_binary`). Diagnostics: `P2_PE_TRACE=1` (plugin functions
+called). Verified: no more "Can't create mixer", decoding of
+`vo/announcer/openingexercise01.wav` identical to afconvert (correlation
+0.9999997). With a hidden window, the map does not trigger the opening line
+and the output stays silent: needs to be listened to for real.
 
 ---
 
-# Point de reprise — 25 octobre 2026
+# Checkpoint — 25 October 2026
 
-Travail mis en pause à la demande de l’utilisateur après la validation de la
-passerelle de threads. **Le jeu ne se lance pas encore : aucun menu ni aucune
-fenêtre de jeu n’a été validé.**
+Work paused at the user's request after the thread bridge was validated.
+**The game does not launch yet: no menu and no game window has been
+validated.**
 
-## Dernier démarrage réel
+## Last real startup
 
-Le Mach-O ARM64 appelle le vrai `portal2_linux main`, initialise les modules
-`libmimalloc`, `libtier0`, `libvstdlib`, `libsteam_api`, `libtogl`, `launcher` et
-`filesystem_stdio`, puis exécute les premiers threads du moteur. Le dernier
-arrêt concret est l’import **`SDL_SetHint`**, appelé par `launcher.so`.
-Les traces sont dans `build/game/launch.log` et `build/game/discovery.log`.
+The ARM64 Mach-O calls the real `portal2_linux main`, initializes the modules
+`libmimalloc`, `libtier0`, `libvstdlib`, `libsteam_api`, `libtogl`, `launcher` and
+`filesystem_stdio`, then runs the engine's first threads. The last concrete
+stop is the import **`SDL_SetHint`**, called by `launcher.so`.
+The traces are in `build/game/launch.log` and `build/game/discovery.log`.
 
-Les nombres de fonctions et instructions générées mesurent la compilation,
-pas la couverture d’exécution. Des méthodes voisines de tables virtuelles sont
-compilées comme racines statiques même avant leur première exécution.
+The counts of generated functions and instructions measure compilation, not
+execution coverage. Methods adjacent to vtables are compiled as static roots
+even before they first execute.
 
-## Lot terminé avant la pause
+## Batch completed before the pause
 
-- Copie `stpcpy`, fichiers stdio, positions 32/64 bits et détection EOF/erreur.
-- Traduction explicite des structures Linux i386 `stat`/`stat64`.
-- Accès aux ressources originales et au dépôt Linux ; écritures de configuration
-  sous `../work/portal2-userdata`, sans modifier la copie originale.
-- Threads Darwin avec état CPU, pile invitée protégée, TCB, TLS et errno séparés.
-  Création, jonction, attribut de taille de pile et paramètres d’ordonnancement.
-- Mutex/conditions, attente temporisée, initialisation unique et destructeurs TLS.
-- Sérialisation des instructions invitées sur un processeur logique. Les appels
-  et branches arrière cèdent périodiquement la main ; les attentes bloquantes
-  libèrent le verrou d’exécution. Ce choix privilégie la cohérence sur ARM.
-- Futex Linux WAIT/WAKE, y compris variante PRIVATE, avec attente réelle,
-  réveils limités, comparaison de valeur et délai d’expiration.
+- `stpcpy` copy, stdio files, 32/64-bit offsets and EOF/error detection.
+- Explicit translation of the Linux i386 `stat`/`stat64` structures.
+- Access to the original assets and to the Linux depot; configuration writes
+  go under `../work/portal2-userdata`, without modifying the original copy.
+- Darwin threads with CPU state, protected guest stack, and separate TCB, TLS
+  and errno. Creation, join, stack size attribute and scheduling parameters.
+- Mutexes/condition variables, timed waits, one-time initialization and TLS
+  destructors.
+- Serialization of guest instructions onto one logical processor. Calls and
+  backward branches periodically yield; blocking waits release the execution
+  lock. This choice favors consistency on ARM.
+- Linux futex WAIT/WAKE, including the PRIVATE variant, with real waiting,
+  bounded wakeups, value comparison and timeout.
 
-`make test sanitize` passe : oracle codec (513 tailles), ABI/CPU/mémoire,
-comparaisons/conversions SSE, fichiers, puis trois threads natifs. Les tests de
-threads couvrent boucle AOT concurrente, réveil de condition, jonction, isolation
-errno/TCB, héritage MXCSR, pthread_once, destructeurs TLS et futex WAIT/WAKE.
-Le binaire de jeu est reconstruit séparément avec `--opt 0` pour le diagnostic.
+`make test sanitize` passes: codec oracle (513 sizes), ABI/CPU/memory,
+SSE comparisons/conversions, files, then three native threads. The thread tests
+cover a concurrent AOT loop, condition wakeup, join, errno/TCB isolation,
+MXCSR inheritance, pthread_once, TLS destructors and futex WAIT/WAKE.
+The game binary is rebuilt separately with `--opt 0` for diagnostics.
 
-La revue Claude a été demandée mais **n’a pas pu avoir lieu** : l’organisation
-interdit actuellement l’accès par abonnement à Claude Code. Ce n’est pas une
-revue réussie ; les vérifications disponibles sont les tests locaux et UBSan.
+A Claude review was requested but **could not take place**: the organization
+currently forbids subscription access to Claude Code. This is not a
+successful review; the available checks are the local tests and UBSan.
 
-## Prochaine étape, après autorisation de reprise
+## Next step, once resumption is authorized
 
-Implémenter une passerelle typée vers SDL2 natif ARM64. La bibliothèque et les
-en-têtes sont déjà présents : `/opt/homebrew/lib/libSDL2.dylib` et
-`/opt/homebrew/include/SDL2`. Aucun nouveau téléchargement Steam n’est nécessaire
-pour cette étape. Ne jamais tronquer les pointeurs Darwin 64 bits vers les
-adresses invitées 32 bits : utiliser un registre de handles et traduire les
-structures SDL, événements et callbacks. Le rendu OpenGL et Steam restent à
-traiter ensuite. `steamclient.dylib` présent dans Steam possède aussi une tranche
-ARM64, mais aucune passerelle Steam native n’est encore implémentée.
+Implement a typed bridge to native ARM64 SDL2. The library and headers are
+already present: `/opt/homebrew/lib/libSDL2.dylib` and
+`/opt/homebrew/include/SDL2`. No new Steam download is needed for this step.
+Never truncate 64-bit Darwin pointers into 32-bit guest addresses: use a
+handle registry and translate SDL structures, events and callbacks. OpenGL
+rendering and Steam are to be handled afterwards. The `steamclient.dylib`
+shipped with Steam also has an ARM64 slice, but no native Steam bridge is
+implemented yet.
 
-Commandes de reprise, depuis ce dossier :
+Commands to resume, from this directory:
 
 ```sh
 make test
 python3 tools/discover_game.py --steps 20 --timeout 30
 ```
 
-`discover_game.py` s’arrête sur tout import/instruction manquant ; il ne traite
-ni une sortie normale ni une expiration de délai comme une preuve de jeu lancé.
-La configuration locale non versionnée est dans `config/local.json` ; les racines
-indirectes découvertes sont dans `config/game-roots.json`.
+`discover_game.py` stops on any missing import/instruction; it treats neither
+a normal exit nor a timeout as proof that the game launched.
+The local, unversioned configuration is in `config/local.json`; the discovered
+indirect roots are in `config/game-roots.json`.
 
-## Limites à conserver explicites
+## Limitations to keep explicit
 
-La destruction du runtime refuse les workers encore actifs pour éviter de
-libérer leur mémoire en cours d’exécution. Arrêt coordonné des workers, threads
-détachés, attributs de conditions, autres opérations futex, certains appels
-Linux et finalisation des modules restent incomplets. Le x87 est modélisé en
-précision double. Les lectures de répertoires ne fusionnent pas encore les trois
-sources de fichiers. Aucun contournement des imports manquants ne doit servir
-à déclarer un lancement réussi.
+Runtime teardown refuses workers that are still active, to avoid freeing their
+memory while they run. Coordinated worker shutdown, detached threads,
+condition attributes, other futex operations, some Linux calls and module
+finalization remain incomplete. x87 is modeled in double precision. Directory
+reads do not yet merge the three file sources. No workaround for missing
+imports may be used to declare a successful launch.
 
-## Conventions pour les ponts natifs (ajoutées le 25 octobre, reprise Claude)
+## Conventions for native bridges (added on 25 October, Claude takeover)
 
-- **Nouveaux imports** : un fichier `runtime/<domaine>.c` par domaine. Il déclare
-  ses noms sur des lignes `// SHIMS: nom1 nom2 ...` (lues par `tools/lift.py`)
-  et s'enregistre avec `RT_SHIM_PROVIDER(fonction)` ; la fonction renvoie 0 pour
-  un nom inconnu. Ne plus allonger la liste `_CORE_SHIMS` de `lift.py` ni la
-  chaîne de `rt_shim` dans `shims.c`.
-- **Adresses dynamiques** (`SDL_GL_GetProcAddress`, `alGetProcAddress`, `dlsym`
-  vers une bibliothèque hôte) : `rt_dynamic_import(nom)` renvoie une adresse
-  invitée stable (plage `0xf8000000`) ; un appel invité y aboutit dans
-  `rt_shim(c, nom)` comme un import statique.
-- **Pointeurs hôtes** : `rt_handle_new/get/find/free` (plage non projetée
-  `0xe0000000`, typée par un identifiant). Une structure que le code invité lit
-  directement (SDL_Surface, FT_Face, SDL_Event...) doit être recopiée en mémoire
-  invitée au format i386.
-- **Retour flottant** : `rt_return_st0(c, valeur)`. **Rappel invité** depuis
-  l'hôte : `rt_invoke` (`modules.h`).
-- **Rappel invité depuis un thread hôte étranger** (thread audio SDL, CoreAudio) :
-  `CPU *c = rt_foreign_thread_attach()` (idempotent : pile protégée, TCB, TLS,
-  errno propres), puis `rt_guest_enter(); rt_invoke(c, …); rt_guest_leave();`.
-  Détachement explicite ou automatique à la sortie du thread. Tout appel hôte qui
-  peut attendre ce thread (verrou de périphérique SDL, jonction) se fait verrou
-  invité relâché (`rt_guest_suspend/resume`), sinon interblocage.
-- **Tests** : `tests/checks_<domaine>.c` avec `RT_CHECK(nom) { ... }`, liés
-  automatiquement dans `abi-smoke` (et sa variante UBSan).
-- **Bibliothèques hôtes** : `HOST_CFLAGS`/`HOST_LIBS` du Makefile, recopiés dans
+- **New imports**: one `runtime/<domaine>.c` file per domain. It declares its
+  names on `// SHIMS: nom1 nom2 ...` lines (read by `tools/lift.py`) and
+  registers itself with `RT_SHIM_PROVIDER(fonction)`; the function returns 0 for
+  an unknown name. Do not extend the `_CORE_SHIMS` list in `lift.py` or the
+  `rt_shim` chain in `shims.c` any further.
+- **Dynamic addresses** (`SDL_GL_GetProcAddress`, `alGetProcAddress`, `dlsym`
+  into a host library): `rt_dynamic_import(nom)` returns a stable guest
+  address (range `0xf8000000`); a guest call to it ends up in
+  `rt_shim(c, nom)` just like a static import.
+- **Host pointers**: `rt_handle_new/get/find/free` (unmapped range
+  `0xe0000000`, typed by an identifier). A structure that guest code reads
+  directly (SDL_Surface, FT_Face, SDL_Event...) must be copied into guest
+  memory in i386 layout.
+- **Floating-point return**: `rt_return_st0(c, valeur)`. **Guest callback**
+  from the host: `rt_invoke` (`modules.h`).
+- **Guest callback from a foreign host thread** (SDL audio thread, CoreAudio):
+  `CPU *c = rt_foreign_thread_attach()` (idempotent: its own protected stack,
+  TCB, TLS, errno), then `rt_guest_enter(); rt_invoke(c, …); rt_guest_leave();`.
+  Detach explicitly or automatically on thread exit. Any host call that may
+  wait on this thread (SDL device lock, join) must be made with the guest lock
+  released (`rt_guest_suspend/resume`), otherwise it deadlocks.
+- **Tests**: `tests/checks_<domaine>.c` with `RT_CHECK(nom) { ... }`, linked
+  automatically into `abi-smoke` (and its UBSan variant).
+- **Host libraries**: `HOST_CFLAGS`/`HOST_LIBS` in the Makefile, mirrored in
   `tools/build_game.py` (SDL2, FreeType, Fontconfig, iconv, OpenGL, OpenAL).
-- Attention : `make clean` efface aussi `build/game/prep` ; le régénérer avec
-  `python3 tools/gameprep.py` (quelques secondes).
+- Caution: `make clean` also wipes `build/game/prep`; regenerate it with
+  `python3 tools/gameprep.py` (a few seconds).
