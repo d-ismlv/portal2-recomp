@@ -58,8 +58,9 @@ English.
 
 ## What you need
 
-- An Apple silicon Mac with the Xcode command line tools, Python 3, and
-  Homebrew's `sdl2`, `freetype` and `fontconfig` for the macOS build.
+- An Apple silicon Mac with the Xcode command line tools (their LLVM
+  `objdump` disassembles the game), Python 3, and Homebrew's `sdl2`,
+  `freetype` and `fontconfig` for the macOS build.
 - **Portal 2 on Steam.** Two parts of it:
   - the game data: your normal Portal 2 install folder (the Windows release
     works, e.g. installed through Whisky/CrossOver), the one containing
@@ -71,7 +72,8 @@ English.
   the [Steamworks.NET 20.1.0](https://github.com/rlabrecque/Steamworks.NET/releases/tag/20.1.0)
   Unity package (`steam_api.bundle`). The game starts through Steam and needs
   the Steam client running and signed in.
-- For iOS: Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), an
+- For iOS: Xcode, [XcodeGen](https://github.com/yonaskolb/XcodeGen), CMake
+  and Ninja (`brew install xcodegen cmake ninja`), an
   Apple account (a free one works, with 7-day provisioning profiles) and
   ~12 GB of free space on the device. Tested on an iPhone 15 Pro Max (A17
   Pro, 8 GB); older or smaller iPhones are untested.
@@ -106,6 +108,7 @@ the game folder is never written to.
 ## Build and play on iPhone
 
 ```sh
+python3 tools/gameprep.py                         # if not done for macOS
 ios/deps/build.sh device                          # SDL2, FreeType, gl4es (once)
 python3 tools/build_ios.py --target device --release
 tools/ios_device.sh install                       # iPhone connected by cable, unlocked, Developer Mode on
@@ -115,7 +118,8 @@ tools/ios_device.sh data                          # copy the game data to the ap
 The first device build needs a provisioning profile: see
 [ios/signing/project.yml](ios/signing/project.yml) and
 [docs/ios.md](docs/ios.md). The simulator works too
-(`python3 tools/build_ios.py` then `tools/run_ios_sim.sh`), but renders in
+(`ios/deps/build.sh sim`, `python3 tools/build_ios.py`, then
+`tools/run_ios_sim.sh`), but renders in
 software and shows clipping artifacts that do not exist on the device.
 
 **Controls**: left stick to move, right half of the screen to look (stick
@@ -126,9 +130,11 @@ tuned in the iOS Settings app, under Portal 2.
 ## Tests
 
 ```sh
-make test       # runtime and ABI checks against the real binaries
-make sanitize   # the same with UBSan
+make test INPUT_DIR=/path/to/depot_661/bin       # runtime and ABI checks against the real binaries
+make sanitize INPUT_DIR=/path/to/depot_661/bin   # the same with UBSan
 ```
+
+`INPUT_DIR` defaults to `../work/portal2-linux/bin`.
 
 ## Limits
 

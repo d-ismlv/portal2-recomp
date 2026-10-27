@@ -47,8 +47,11 @@ cd ios/signing
 export P2_BUNDLE_ID=$(python3 ../../tools/ios_bundle_id.py)
 xcodegen
 xcodebuild -project P2Signing.xcodeproj -scheme Portal2 -destination generic/platform=iOS \
-  -allowProvisioningUpdates DEVELOPMENT_TEAM=<your team ID> build
+  -allowProvisioningUpdates DEVELOPMENT_TEAM=YOURTEAMID build
 ```
+
+Replace `YOURTEAMID` with your team ID (Xcode > Settings > Accounts, or the
+`OU` field of your Apple Development certificate).
 
 `Documents/launch.args` in the app's container adds arguments
 (one per line), for example `+map` followed by `sp_a2_laser_intro`.
