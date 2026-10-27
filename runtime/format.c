@@ -175,7 +175,42 @@ static int guest_format(CPU *c, uint32_t destination, uint32_t capacity,
                 rt_trap(c, c->eip, "%n under _FORTIFY_SOURCE=2 (writable-format check not modeled)");
             store_count(c, take32(&args), &s, used);
             count = 0;
-        } else rt_trap(c, c->eip, "unsupported guest format conversion");
+        } else if ((s.conversion == 's' && !strcmp(s.length, "l")) || (s.conversion == 'S' && !s.length[0])) {
+            // %ls : glibc convertit par wcrtomb dans la locale C, que seuls les
+            // caractères ASCII traversent ; sinon -1 (EILSEQ). Précision en octets.
+            uint32_t address = take32(&args);
+            s.native[strlen(s.native) - 1] = 's';
+            if (!address) count = OUTPUT_VALUE(s.precision < 0 || s.precision >= 6 ? "(null)" : "");
+            else {
+                size_t limit = s.precision >= 0 ? (size_t)s.precision : SIZE_MAX, n = 0, capacity = 64;
+                char *text = malloc(capacity);
+                if (!text) rt_trap(c, c->eip, "printf %ls: out of host memory");
+                for (uint32_t at = address; n < limit; at += 4) {
+                    rt_span(c, at, 4);
+                    uint32_t unit = R32(at);
+                    if (!unit) break;
+                    if (unit > 0x7f) { free(text); return -1; }
+                    if (n + 1 >= capacity) {
+                        char *grown = realloc(text, capacity *= 2);
+                        if (!grown) { free(text); rt_trap(c, c->eip, "printf %ls: out of host memory"); }
+                        text = grown;
+                    }
+                    text[n++] = (char)unit;
+                }
+                text[n] = 0;
+                count = OUTPUT_VALUE(text);
+                free(text);
+            }
+        } else if ((s.conversion == 'c' && !strcmp(s.length, "l")) || (s.conversion == 'C' && !s.length[0])) {
+            uint32_t unit = take32(&args);   // %lc : même règle (locale C)
+            if (unit > 0x7f) return -1;
+            s.native[strlen(s.native) - 1] = 'c';
+            count = OUTPUT_VALUE((int)unit);
+        } else {
+            static _Thread_local char message[96];
+            snprintf(message, sizeof(message), "unsupported guest format conversion %%%s%c", s.length, s.conversion);
+            rt_trap(c, c->eip, message);
+        }
         if (count < 0) return -1;
         used += (unsigned)count;
         if (used > INT_MAX) return -1;
